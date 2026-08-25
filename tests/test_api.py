@@ -26,6 +26,17 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
         assert config.status_code == 200
         assert config.json()["data_root"] == str(data_root)
         assert config.json()["imu"]["calibration_verified"] is False
+        assert config.json()["allowed_unikeys"] == [
+            "rkim6933",
+            "zche0826",
+            "jzho8728",
+            "jzha9115",
+            "xfan0282",
+            "yniu0950",
+            "hche5673",
+            "jmia0254",
+            "xliu0452",
+        ]
 
         frontend = client.get("/")
         assert frontend.status_code == 200
@@ -52,3 +63,26 @@ def test_start_contract_rejects_non_unikey_participant_before_hardware_access(
         )
 
     assert response.status_code == 422
+
+
+def test_start_contract_rejects_well_formed_but_unlisted_unikey(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    app = create_app(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/recordings/start",
+            json={"collection_id": "pilot", "participant_id": "unknown123"},
+        )
+
+    assert response.status_code == 422
+    assert "白名单" in response.json()["detail"]

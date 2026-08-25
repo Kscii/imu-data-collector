@@ -11,7 +11,7 @@
 - 采样率：供应商口头信息为 30 Hz，但当前样机短测为每秒一包、每包 25 帧，更符合 25 Hz；仍需至少 30 分钟长测确认。
 - 摄像头：UVC 摄像头，默认请求 MJPEG 1920×1080、30 fps；保存 H.264、约 6 Mbit/s、无音频。
 - 产物：一次佩戴录制对应一对同名 `.h5` 与 `.mkv`，建议 10–30 分钟；一个录制可包含多个互不重叠的标注片段，片段间空白保持未标注。
-- 身份：参与者与标注者统一使用小写 UniKey，例如 `xfan0282`。
+- 身份：参与者、操作者与标注者共用配置白名单；当前为 9 个已确认 UniKey，WebUI 使用下拉框，后端再次强制校验。
 - 上传：原始媒体不进 Git/Git LFS；首选通过 rclone 自动复制到 Google Drive，并在上传后校验。
 
 完整事实、架构和操作说明见 [docs/](docs/)，当前工作清单见 [TODO.md](TODO.md)。
@@ -37,8 +37,16 @@ uv run imu-collector serve
 uv run imu-collector doctor
 uv run imu-collector devices
 uv run imu-collector probe-gatt
+uv run imu-collector probe-imu --seconds 15
+uv run imu-collector characterize-imu --operator xfan0282 \
+  --stage pipeline_smoke_uncontrolled --seconds 10
 uv run imu-collector validate /path/to/recording.h5
 ```
+
+`characterize-imu` 生成 IMU-only H5 和相邻 JSON 报告，固定落入
+`~/IMUData/_diagnostics/`，并写死 `training_eligible=false`。正式姿态表征建议通过
+WebUI 的“IMU 表征”页逐阶段操作，详见
+[IMU 表征与校准候选](docs/imu-characterization.md)。
 
 配置文件为 [configs/default.yaml](configs/default.yaml)。也可用 `IMU_COLLECTOR_CONFIG` 指向另一个 YAML，或用 `IMU_COLLECTOR_DATA_ROOT` 临时覆盖落盘根目录。
 

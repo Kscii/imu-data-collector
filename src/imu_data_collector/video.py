@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import glob
 import json
+import re
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +26,36 @@ async def _run_capture(*args: str) -> tuple[int, str, str]:
     return process.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
-async def discover_video_devices() -> list[dict[str, Any]]:
+def _supports_profile(formats: str, settings: VideoSettings) -> bool:
+    pixel = (
+        "MJPG"
+        if settings.input_format.lower() in {"mjpeg", "mjpg"}
+        else settings.input_format.upper()
+    )
+    resolution = f"{settings.width}x{settings.height}"
+    fps_patterns = (
+        f"{float(settings.requested_fps):.3f} fps",
+        f"{settings.requested_fps}.000 fps",
+    )
+    return (
+        pixel in formats
+        and resolution in formats
+        and any(item in formats for item in fps_patterns)
+    )
+
+
+def _stable_camera_id(props: dict[str, str], device: str) -> str:
+    serial = props.get("ID_SERIAL", "")
+    path = props.get("ID_PATH", "")
+    interface = props.get("ID_USB_INTERFACE_NUM", "")
+    stable = serial or path
+    return f"{stable}|if={interface}" if stable else f"path={device}"
+
+
+async def discover_video_devices(
+    settings: VideoSettings | None = None,
+) -> list[dict[str, Any]]:
+    profile = settings or VideoSettings()
     output: list[dict[str, Any]] = []
     for device in sorted(glob.glob("/dev/video*")):
         code, capabilities, _ = await _run_capture("v4l2-ctl", "--all", "-d", device)
@@ -34,7 +64,8 @@ async def discover_video_devices() -> list[dict[str, Any]]:
         code, formats, _ = await _run_capture(
             "v4l2-ctl", "--list-formats-ext", "-d", device
         )
-        if code:
+        # metadata 节点常能出现在 --all 中，但没有实际像素格式。
+        if code or not re.search(r"\[\d+\]:", formats):
             continue
         _, properties, _ = await _run_capture(
             "udevadm", "info", "--query=property", f"--name={device}"
@@ -47,14 +78,48 @@ async def discover_video_devices() -> list[dict[str, Any]]:
                 "device": device,
                 "product": props.get("ID_V4L_PRODUCT", "Unknown camera"),
                 "serial": props.get("ID_SERIAL", ""),
+                "path": props.get("ID_PATH", ""),
                 "interface": props.get("ID_USB_INTERFACE_NUM", ""),
+                "camera_id": _stable_camera_id(props, device),
                 "formats": formats,
-                "supports_default_profile": (
-                    "1920x1080" in formats and "30.000 fps" in formats and "MJPG" in formats
-                ),
+                "supports_default_profile": _supports_profile(formats, profile),
+                "color_capture": "MJPG" in formats or "YUYV" in formats,
             }
         )
     return output
+
+
+def select_video_device(
+    devices: list[dict[str, Any]],
+    settings: VideoSettings,
+    requested_camera_id: str | None = None,
+) -> dict[str, Any]:
+    if settings.device:
+        selected = next((item for item in devices if item["device"] == settings.device), None)
+        if selected is None:
+            raise RuntimeError(f"配置的视频节点不可用或不是采集节点：{settings.device}")
+    else:
+        camera_id = requested_camera_id or settings.camera_id
+        if camera_id:
+            selected = next((item for item in devices if item["camera_id"] == camera_id), None)
+            if selected is None:
+                raise RuntimeError("所选摄像头当前不可用；请重新扫描并选择")
+        else:
+            selected = next(
+                (
+                    item
+                    for item in devices
+                    if item["supports_default_profile"] and item["color_capture"]
+                ),
+                None,
+            )
+    if selected is None:
+        raise RuntimeError("没有摄像头支持配置的 1080p30 MJPEG 彩色视频模式")
+    if not selected["supports_default_profile"]:
+        raise RuntimeError("所选摄像头不支持当前配置的视频分辨率、帧率或像素格式")
+    if not selected["color_capture"]:
+        raise RuntimeError("所选节点不是彩色视频采集节点")
+    return selected
 
 
 @dataclass(slots=True)

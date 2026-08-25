@@ -15,6 +15,8 @@ from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.models import (
     AnnotationDocument,
+    CharacterizationStageRequest,
+    CharacterizationStartRequest,
     RecordingStartRequest,
     SyncDocument,
 )
@@ -38,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "data_root": str(active_settings.data_root),
             "minimum_free_gib": active_settings.minimum_free_gib,
+            "allowed_unikeys": list(active_settings.identity.allowed_unikeys),
             "imu": {
                 "name": active_settings.imu.name,
                 "address": active_settings.imu.address,
@@ -69,7 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def devices(
         scan_ble: Annotated[bool, Query(description="执行五秒主动 BLE 扫描")] = False,
     ) -> dict[str, Any]:
-        cameras = await discover_video_devices()
+        cameras = await discover_video_devices(active_settings.video)
         ble: list[dict[str, Any]] = []
         if scan_ble:
             try:
@@ -82,6 +85,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def start(request: RecordingStartRequest) -> dict[str, Any]:
         try:
             summary = await coordinator.start(request)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         except Exception as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return summary.model_dump(mode="json")
@@ -93,6 +98,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return summary.model_dump(mode="json")
+
+    @app.post("/api/v1/characterizations/start")
+    async def start_characterization(
+        request: CharacterizationStartRequest,
+    ) -> dict[str, Any]:
+        try:
+            return await coordinator.start_characterization(request)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/v1/characterizations/stages/start")
+    async def start_characterization_stage(
+        request: CharacterizationStageRequest,
+    ) -> dict[str, Any]:
+        try:
+            return await coordinator.start_characterization_stage(request)
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/v1/characterizations/stages/stop")
+    async def stop_characterization_stage() -> dict[str, Any]:
+        try:
+            return await coordinator.stop_characterization_stage()
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/v1/characterizations/stop")
+    async def stop_characterization() -> dict[str, Any]:
+        try:
+            return await coordinator.stop_characterization()
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get("/api/v1/characterizations")
+    async def characterizations() -> list[dict[str, Any]]:
+        return coordinator.list_characterizations()
 
     @app.get("/api/v1/recordings")
     async def recordings() -> list[dict[str, Any]]:
@@ -139,6 +182,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await coordinator.save_sync(recording_id, document)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/recordings/{recording_id}/sync")
+    async def sync(recording_id: str) -> dict[str, Any]:
+        required_recording(recording_id)
+        return coordinator.sync(recording_id)
 
     @app.post("/api/v1/recordings/{recording_id}/upload")
     async def upload(recording_id: str) -> dict[str, str]:

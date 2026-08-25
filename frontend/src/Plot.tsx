@@ -9,11 +9,17 @@ type Props = {
   values: number[][];
   cursorTime?: number;
   height?: number;
+  onSelectTime?: (time: number) => void;
 };
 
-export default function Plot({ time, values, cursorTime, height = 290 }: Props) {
+export default function Plot({ time, values, cursorTime, height = 290, onSelectTime }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
+  const onSelectTimeRef = useRef(onSelectTime);
+
+  useEffect(() => {
+    onSelectTimeRef.current = onSelectTime;
+  }, [onSelectTime]);
 
   useEffect(() => {
     if (!host.current) return;
@@ -47,7 +53,15 @@ export default function Plot({ time, values, cursorTime, height = 290 }: Props) 
       }
     });
     observer.observe(host.current);
+    const select = (event: MouseEvent) => {
+      if (!plot.current || !host.current || !onSelectTimeRef.current) return;
+      const bounds = host.current.getBoundingClientRect();
+      const value = plot.current.posToVal(event.clientX - bounds.left, "x");
+      onSelectTimeRef.current(value);
+    };
+    host.current.addEventListener("click", select);
     return () => {
+      host.current?.removeEventListener("click", select);
       observer.disconnect();
       plot.current?.destroy();
       plot.current = null;

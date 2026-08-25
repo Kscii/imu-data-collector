@@ -51,6 +51,14 @@ sudo ./scripts/uninstall-bluetooth-experimental.sh
 5. 检查镜头范围和背景隐私；v1 不录音。
 6. 开始后做一次明显同步动作，结束前再做一次。
 
+当前允许的参与者、操作者和标注者统一配置在
+`configs/default.yaml` 的 `identity.allowed_unikeys`。WebUI 下拉框用于减少录入错误，
+后端白名单是最终门禁；格式正确但不在名单中的字符串仍会被拒绝。
+
+摄像头使用 udev 的序列号与 USB interface 组成稳定 `camera_id`。以当前内置摄像头为例，
+WebUI 应选择彩色 1080p30 MJPEG 主节点，而不是同一设备的灰度或 metadata 辅助节点。
+`/dev/videoN` 只作为本次启动时解析出的实际路径，不作为长期身份。
+
 ## 录制中 WebUI 应关注
 
 - 视频是否连续且构图正确。
@@ -58,6 +66,17 @@ sudo ./scripts/uninstall-bluetooth-experimental.sh
 - IMU 六轴曲线是否随动作变化、最后通知时间是否持续更新。
 - BLE 包数/样本数、回调丢弃数、磁盘剩余空间、编码器错误。
 - 任何设备滑动、重新佩戴或异常都应在会话备注中记录。
+
+## 同步锚点操作
+
+标注页同时显示视频和 IMU 曲线。把视频停在镜头可见、IMU 也产生明显峰值的同步动作，
+再点击曲线中的对应峰值并添加锚点。建议在录制开头、中间和结尾各做一次：
+
+- 一个锚点只能校正 offset，不能估计时钟漂移。
+- 两个锚点可以拟合 scale 与 offset，但无法识别某一个点选错。
+- 三个或更多分散锚点可利用残差发现误点；界面显示 quality、scale、offset 与 RMS。
+
+只有 `quality=verified` 才表示当前阈值下拟合通过；它不等于传感器尺度已经校准。
 
 ## 标注语义
 

@@ -35,6 +35,7 @@ class RecordingStartRequest(BaseModel):
     participant_id: str
     body_location: str = "chest"
     protocol_id: str = "fall_binary_v1"
+    camera_id: str | None = Field(default=None, max_length=512)
 
     @model_validator(mode="after")
     def validate_identity(self) -> RecordingStartRequest:
@@ -96,6 +97,39 @@ class SyncAnchor(BaseModel):
 
 class SyncDocument(BaseModel):
     anchors: list[SyncAnchor] = Field(default_factory=list)
+
+
+class CharacterizationStage(StrEnum):
+    PIPELINE_SMOKE_UNCONTROLLED = "pipeline_smoke_uncontrolled"
+    LONG_STATIC_BUTTON_UP = "long_static_button_up"
+    BUTTON_FACE_UP = "button_face_up"
+    BUTTON_FACE_DOWN = "button_face_down"
+    INTERFACE_FACE_UP = "interface_face_up"
+    INTERFACE_OPPOSITE_FACE_UP = "interface_opposite_face_up"
+    PENDANT_END_UP_EXPLORATORY = "pendant_end_up_exploratory"
+    PENDANT_END_DOWN_EXPLORATORY = "pendant_end_down_exploratory"
+    GYRO_X_POSITIVE = "gyro_x_positive"
+    GYRO_X_NEGATIVE = "gyro_x_negative"
+    GYRO_Y_POSITIVE = "gyro_y_positive"
+    GYRO_Y_NEGATIVE = "gyro_y_negative"
+    GYRO_Z_POSITIVE = "gyro_z_positive"
+    GYRO_Z_NEGATIVE = "gyro_z_negative"
+
+
+class CharacterizationStartRequest(BaseModel):
+    operator_id: str
+    notes: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_operator(self) -> CharacterizationStartRequest:
+        if not UNIKEY_RE.fullmatch(self.operator_id):
+            raise ValueError("operator_id must be a lowercase UniKey-like identifier")
+        return self
+
+
+class CharacterizationStageRequest(BaseModel):
+    stage_code: CharacterizationStage
+    notes: str = Field(default="", max_length=2000)
 
 
 class RecordingSummary(BaseModel):

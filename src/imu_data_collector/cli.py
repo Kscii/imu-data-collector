@@ -11,17 +11,31 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import h5py
 import uvicorn
 
 from imu_data_collector.api import create_app
 from imu_data_collector.ble import CW12EUBleSource
+from imu_data_collector.characterization import (
+    correct_characterization_stage,
+    recover_interrupted_characterization,
+    write_accel_pose_pair_report,
+    write_characterization_report,
+)
 from imu_data_collector.config import load_activity_taxonomy, load_settings
+from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.cw12eu import parse_notification
+from imu_data_collector.models import (
+    CharacterizationStage,
+    CharacterizationStageRequest,
+    CharacterizationStartRequest,
+)
 from imu_data_collector.validation import validate_capture_h5
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
     discover_video_devices,
     probe_video_frames,
+    select_video_device,
 )
 
 
@@ -51,6 +65,33 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("serve", help="启动本地 WebUI 和 API")
     validate = subparsers.add_parser("validate", help="验证一个采集 HDF5")
     validate.add_argument("path", type=Path)
+    analyze = subparsers.add_parser(
+        "analyze-characterization", help="重新生成 IMU 表征 JSON 报告"
+    )
+    analyze.add_argument("path", type=Path)
+    compare = subparsers.add_parser(
+        "compare-accel-pair", help="比较两个相反静态姿态并生成加速度候选报告"
+    )
+    compare.add_argument("positive_path", type=Path)
+    compare.add_argument("negative_path", type=Path)
+    compare.add_argument("--positive-stage", required=True)
+    compare.add_argument("--negative-stage", required=True)
+    compare.add_argument("--axis", choices=("x", "y", "z"), required=True)
+    compare.add_argument("--output", type=Path)
+    recover = subparsers.add_parser(
+        "recover-characterization", help="从中断的 partial 副本保守收尾 IMU 表征"
+    )
+    recover.add_argument("path", type=Path)
+    correct = subparsers.add_parser(
+        "correct-characterization-stage", help="原子更正表征阶段并记录审计信息"
+    )
+    correct.add_argument("path", type=Path)
+    correct.add_argument("--old-stage", required=True)
+    correct.add_argument("--new-stage", required=True)
+    correct.add_argument(
+        "--reliability", choices=("candidate", "exploratory"), required=True
+    )
+    correct.add_argument("--reason", required=True)
     subparsers.add_parser("doctor", help="检查本机运行依赖")
     devices = subparsers.add_parser("devices", help="列出本机采集设备")
     devices.add_argument(
@@ -73,6 +114,17 @@ def _parser() -> argparse.ArgumentParser:
         "probe-video", help="短时录制到临时目录并统计视频 PTS"
     )
     probe_video.add_argument("--seconds", type=float, default=5.0)
+    characterize = subparsers.add_parser(
+        "characterize-imu", help="按单个物理阶段录制 IMU-only 表征 HDF5"
+    )
+    characterize.add_argument("--operator", default="xfan0282")
+    characterize.add_argument(
+        "--stage",
+        choices=[item.value for item in CharacterizationStage],
+        default=CharacterizationStage.PIPELINE_SMOKE_UNCONTROLLED.value,
+    )
+    characterize.add_argument("--seconds", type=float, default=30.0)
+    characterize.add_argument("--notes", default="")
     return parser
 
 
@@ -197,12 +249,8 @@ async def _probe_gatt(settings, hold_seconds: float = 0.0) -> dict:
 async def _probe_video(settings, duration_seconds: float) -> dict:
     if not 1 <= duration_seconds <= 60:
         raise ValueError("视频探测时长必须在 1 到 60 秒之间")
-    devices = await discover_video_devices()
-    preferred = next(
-        (item for item in devices if item["supports_default_profile"]), None
-    )
-    if preferred is None:
-        raise RuntimeError("没有摄像头支持配置的 1080p30 MJPEG 模式")
+    devices = await discover_video_devices(settings.video)
+    preferred = select_video_device(devices, settings.video)
     with tempfile.TemporaryDirectory(prefix="imu-video-probe-") as directory:
         path = Path(directory) / "probe.mkv"
         recorder = FFmpegVideoRecorder(
@@ -245,15 +293,48 @@ async def _probe_video(settings, duration_seconds: float) -> dict:
         }
 
 
+async def _characterize_imu(
+    settings,
+    operator: str,
+    stage: str,
+    duration_seconds: float,
+    notes: str,
+) -> dict:
+    if not 1 <= duration_seconds <= 3600:
+        raise ValueError("单阶段表征时长必须在 1 到 3600 秒之间")
+    coordinator = RecordingCoordinator(settings)
+    await coordinator.start_characterization(
+        CharacterizationStartRequest(operator_id=operator, notes=notes)
+    )
+    await coordinator.start_characterization_stage(
+        CharacterizationStageRequest(stage_code=stage, notes=notes)
+    )
+    interrupted = False
+    try:
+        await asyncio.sleep(duration_seconds)
+    except asyncio.CancelledError:
+        interrupted = True
+    finally:
+        if coordinator.current_stage is not None:
+            await coordinator.stop_characterization_stage()
+    result = await coordinator.stop_characterization()
+    return {**result, "interrupted_by_user": interrupted}
+
+
 def main() -> None:
     args = _parser().parse_args()
     settings = load_settings(args.config)
     if args.command == "serve":
         uvicorn.run(create_app(settings), host=settings.server_host, port=settings.server_port)
     elif args.command == "validate":
+        with h5py.File(args.path, "r") as handle:
+            require_video = (
+                str(handle.attrs.get("recording_kind", "capture")) == "capture"
+            )
         report = validate_capture_h5(
             args.path,
             load_activity_taxonomy(settings.activity_taxonomy_path),
+            require_video=require_video,
             require_sync=False,
         )
         print(
@@ -264,6 +345,41 @@ def main() -> None:
             )
         )
         raise SystemExit(0 if report.ready else 1)
+    elif args.command == "analyze-characterization":
+        report_path = write_characterization_report(args.path)
+        print(
+            json.dumps(
+                {"source_h5": str(args.path), "report_path": str(report_path)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    elif args.command == "compare-accel-pair":
+        report_path = write_accel_pose_pair_report(
+            args.positive_path,
+            args.negative_path,
+            args.positive_stage,
+            args.negative_stage,
+            args.axis,
+            args.output,
+        )
+        print(json.dumps({"report_path": str(report_path)}, ensure_ascii=False, indent=2))
+    elif args.command == "recover-characterization":
+        result = recover_interrupted_characterization(
+            args.path,
+            settings.imu,
+            load_activity_taxonomy(settings.activity_taxonomy_path),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command == "correct-characterization-stage":
+        result = correct_characterization_stage(
+            args.path,
+            args.old_stage,
+            args.new_stage,
+            args.reliability,
+            args.reason,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "doctor":
         commands = {
             name: shutil.which(name)
@@ -286,7 +402,7 @@ def main() -> None:
         raise SystemExit(0 if all(commands.values()) else 1)
     elif args.command == "devices":
         async def inspect_devices() -> dict:
-            cameras = await discover_video_devices()
+            cameras = await discover_video_devices(settings.video)
             ble = (
                 await CW12EUBleSource.discover(settings=settings.imu)
                 if args.scan_ble
@@ -307,6 +423,22 @@ def main() -> None:
         print(
             json.dumps(
                 asyncio.run(_probe_gatt(settings, args.hold_seconds)),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    elif args.command == "characterize-imu":
+        print(
+            json.dumps(
+                asyncio.run(
+                    _characterize_imu(
+                        settings,
+                        args.operator,
+                        args.stage,
+                        args.seconds,
+                        args.notes,
+                    )
+                ),
                 indent=2,
                 ensure_ascii=False,
             )

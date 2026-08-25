@@ -25,6 +25,7 @@ class ImuSettings:
 @dataclass(slots=True)
 class VideoSettings:
     device: str | None = None
+    camera_id: str | None = None
     width: int = 1920
     height: int = 1080
     requested_fps: int = 30
@@ -44,6 +45,21 @@ class UploadSettings:
 
 
 @dataclass(slots=True)
+class IdentitySettings:
+    allowed_unikeys: tuple[str, ...] = (
+        "rkim6933",
+        "zche0826",
+        "jzho8728",
+        "jzha9115",
+        "xfan0282",
+        "yniu0950",
+        "hche5673",
+        "jmia0254",
+        "xliu0452",
+    )
+
+
+@dataclass(slots=True)
 class Settings:
     data_root: Path = Path("~/IMUData")
     catalog_path: Path = Path("~/.local/share/imu-data-collector/catalog.sqlite3")
@@ -54,6 +70,7 @@ class Settings:
     imu: ImuSettings = field(default_factory=ImuSettings)
     video: VideoSettings = field(default_factory=VideoSettings)
     upload: UploadSettings = field(default_factory=UploadSettings)
+    identity: IdentitySettings = field(default_factory=IdentitySettings)
 
     def resolve_paths(self, project_root: Path) -> None:
         self.data_root = self.data_root.expanduser().resolve()
@@ -69,10 +86,14 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     imu = ImuSettings(**values.pop("imu", {}))
     video = VideoSettings(**values.pop("video", {}))
     upload = UploadSettings(**values.pop("upload", {}))
+    identity_values = values.pop("identity", {})
+    if "allowed_unikeys" in identity_values:
+        identity_values["allowed_unikeys"] = tuple(identity_values["allowed_unikeys"])
+    identity = IdentitySettings(**identity_values)
     for key in ("data_root", "catalog_path", "activity_taxonomy_path"):
         if key in values:
             values[key] = Path(values[key])
-    return Settings(imu=imu, video=video, upload=upload, **values)
+    return Settings(imu=imu, video=video, upload=upload, identity=identity, **values)
 
 
 def load_settings(config_path: Path | None = None) -> Settings:

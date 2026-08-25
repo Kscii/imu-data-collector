@@ -1,9 +1,17 @@
+import json
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pytest
 
+from imu_data_collector.characterization import (
+    analyze_characterization,
+    compare_accel_pose_pair,
+    correct_characterization_stage,
+    recover_interrupted_characterization,
+    write_characterization_report,
+)
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.cw12eu import pack_test_frame
 from imu_data_collector.hdf5_store import (
@@ -165,4 +173,158 @@ def test_sync_update_uses_recording_relative_anchor_times(tmp_path: Path) -> Non
         times = np.asarray(handle["imu/samples/recording_time_ns"])
         assert times[0] < 200_000_000
         assert str(handle["sync"].attrs["quality"]) == "verified"
+        assert handle["sync/labels"].asstr()[:].tolist() == ["tap", "tap"]
     assert validate_capture_h5(path, taxonomy(), require_sync=True).ready
+
+
+def test_characterization_h5_and_report_are_never_training_eligible(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "characterization.h5"
+    writer = CaptureH5Writer(
+        path,
+        RecordingStartRequest(
+            collection_id="_diagnostics",
+            participant_id="xfan0282",
+            protocol_id="imu_characterization_v1",
+        ),
+        "characterization-1",
+        1_000_000_000,
+        ImuSettings(),
+        taxonomy(),
+        recording_kind="imu_characterization",
+        training_eligible=False,
+        video_status="not_requested",
+    )
+    for index, receive_time in enumerate(
+        (2_000_000_000, 3_000_000_000, 4_000_000_000)
+    ):
+        payload = b"".join(
+            pack_test_frame(
+                (index + axis for axis in range(6)), bytes([index, 1, 2, 3])
+            )
+            for _ in range(25)
+        )
+        writer.append_notification(payload, receive_time)
+    writer.append_experiment_stage(
+        "interface_opposite_face_up", 0, 4_000_000_000, "candidate"
+    )
+    writer.append_experiment_stage(
+        "interface_face_up", 0, 4_000_000_000, "candidate"
+    )
+    writer.reconstruct_times()
+    writer.write_sync([])
+    writer.finish()
+
+    assert validate_capture_h5(path, taxonomy(), require_video=False).ready
+    report = analyze_characterization(path)
+    assert report["training_eligible"] is False
+    assert report["packet_metrics"]["payload_length_histogram"] == {"400": 3}
+    assert set(report["stage_metrics"]) == {
+        "interface_opposite_face_up",
+        "interface_face_up",
+    }
+    report_path = write_characterization_report(path)
+    assert report_path.is_file()
+    with h5py.File(path, "r") as handle:
+        assert not bool(handle.attrs["training_eligible"])
+        assert str(handle.attrs["recording_kind"]) == "imu_characterization"
+
+
+def test_opposite_pose_pair_produces_conservative_accel_candidate(
+    tmp_path: Path,
+) -> None:
+    def write_pose(path: Path, values: tuple[int, ...], stage: str) -> None:
+        writer = CaptureH5Writer(
+            path,
+            RecordingStartRequest(
+                collection_id="_diagnostics",
+                participant_id="xfan0282",
+                protocol_id="imu_characterization_v1",
+            ),
+            path.stem,
+            1_000_000_000,
+            ImuSettings(),
+            taxonomy(),
+            recording_kind="imu_characterization",
+            training_eligible=False,
+            video_status="not_requested",
+        )
+        payload = b"".join(
+            pack_test_frame(values, bytes([0, 1, 2, index])) for index in range(25)
+        )
+        for receive_time in (2_000_000_000, 3_000_000_000, 4_000_000_000):
+            writer.append_notification(payload, receive_time)
+        writer.append_experiment_stage(stage, 0, 4_000_000_000, "candidate")
+        writer.reconstruct_times()
+        writer.write_sync([])
+        writer.finish()
+
+    positive = tmp_path / "positive.h5"
+    negative = tmp_path / "negative.h5"
+    write_pose(positive, (100, -50, 4050, 0, 0, 0), "button_face_up")
+    write_pose(negative, (105, -45, -4140, 0, 0, 0), "button_face_down")
+    report = compare_accel_pose_pair(
+        positive, negative, "button_face_up", "button_face_down", "z"
+    )
+
+    assert report["dominant_raw_column_candidate"] == "az"
+    assert report["counts_per_g_candidate"] == pytest.approx(4095.0)
+    assert report["bias_counts_candidate"] == pytest.approx(-45.0)
+    assert report["status"] == "strong_candidate"
+    assert report["calibration_verified"] is False
+
+
+def test_interrupted_characterization_recovery_preserves_partial(
+    tmp_path: Path,
+) -> None:
+    partial = tmp_path / "interrupted.partial.h5"
+    settings = ImuSettings()
+    writer = CaptureH5Writer(
+        partial,
+        RecordingStartRequest(
+            collection_id="_diagnostics",
+            participant_id="xfan0282",
+            protocol_id="imu_characterization_v1",
+        ),
+        "interrupted",
+        1_000_000_000,
+        settings,
+        taxonomy(),
+        recording_kind="imu_characterization",
+        training_eligible=False,
+        video_status="not_requested",
+    )
+    payload = b"".join(
+        pack_test_frame((1, 2, 3, 4, 5, 6), bytes([0, 1, 2, index]))
+        for index in range(25)
+    )
+    for receive_time in (2_000_000_000, 3_000_000_000, 4_000_000_000):
+        writer.append_notification(payload, receive_time)
+    writer.append_experiment_stage(
+        "pendant_end_up_exploratory", 0, 4_000_000_000, "exploratory"
+    )
+    writer.abort_close()
+
+    result = recover_interrupted_characterization(partial, settings, taxonomy())
+    recovered = Path(result["recovered_h5"])
+    assert partial.is_file()
+    assert recovered.is_file()
+    assert result["source_partial_preserved"] is True
+    assert validate_capture_h5(recovered, taxonomy(), require_video=False).ready
+    with h5py.File(recovered, "r") as handle:
+        assert bool(handle.attrs["interrupted_capture"])
+        assert int(handle["imu"].attrs["callback_drops"]) == -1
+
+    corrected = correct_characterization_stage(
+        recovered,
+        "pendant_end_up_exploratory",
+        "button_face_up",
+        "candidate",
+        "测试中的用户元数据更正",
+    )
+    assert corrected["original_file_sha256"] != corrected["corrected_file_sha256"]
+    with h5py.File(recovered, "r") as handle:
+        assert handle["experiment/stages/stage_code"].asstr()[0] == "button_face_up"
+        corrections = json.loads(handle.attrs["metadata_corrections"])
+        assert corrections[0]["old_stage_code"] == "pendant_end_up_exploratory"

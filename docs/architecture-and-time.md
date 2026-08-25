@@ -23,11 +23,19 @@
 
 ```text
 ~/IMUData/
+  _diagnostics/
+    <UTC_timestamp>_<operator_unikey>_imu_characterization/
+      <recording_id>.h5
+      <recording_id>.characterization.json
   <collection_id>/
     <UTC_timestamp>_<participant_unikey>/
       <recording_id>.h5
       <recording_id>.mkv
 ```
+
+`_diagnostics` 与正式 collection 分离，诊断 H5 根属性含
+`recording_kind=imu_characterization`、`video_status=not_requested` 和
+`training_eligible=false`。它用于验证协议、尺度候选和稳定性，不能直接作为训练样本。
 
 不推荐把整个项目所有录制塞进一个不断增长的 H5/MKV：它会放大损坏范围、妨碍并行上传和增量复核。也不推荐按每次跌倒切成海量几秒小文件：拍摄时边界未知，而且大量容器启动会造成管理和时序问题。一次佩戴会话一个文件对，是两者之间更稳妥的原子单位；H5 内可有多个片段。
 
@@ -44,6 +52,7 @@
   sync/: anchors, scale, offset, residual, quality
   annotations/segments/: labeled half-open intervals [start_ns, end_ns)
   annotations/events/: onset/impact time plus nearest frame/sample provenance
+  experiment/stages/: 物理实验阶段、起止时间、可靠性和备注
 ```
 
 视频体积可按码率预估：6 Mbit/s 约为 2.7 GB/小时，实际还受场景复杂度、编码器和容器开销影响。一个 10–30 分钟录制约 0.45–1.35 GB。Git LFS 技术上能存大文件，但不适合作为持续增长原始视频库：配额、克隆成本、历史不可变和权限治理都不理想。代码、schema、manifest 和小型测试样本进 Git；原始 H5/MKV 走对象/云盘存储。当前规模先用 rclone + Google Drive，未来并发、生命周期或数据量显著上升时再迁移 S3 兼容对象存储。

@@ -63,6 +63,10 @@ class CaptureH5Writer:
         recording_start_monotonic_ns: int,
         imu_settings: ImuSettings,
         taxonomy: dict[str, Any],
+        *,
+        recording_kind: str = "capture",
+        training_eligible: bool = False,
+        video_status: str = "required",
     ) -> None:
         self.path = path
         self.request = request
@@ -70,6 +74,9 @@ class CaptureH5Writer:
         self.recording_start_monotonic_ns = recording_start_monotonic_ns
         self.imu_settings = imu_settings
         self.taxonomy = taxonomy
+        self.recording_kind = recording_kind
+        self.training_eligible = training_eligible
+        self.video_status = video_status
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = h5py.File(path, "w", libver="latest")
         self.packet_count = 0
@@ -98,6 +105,9 @@ class CaptureH5Writer:
                     and self.imu_settings.gyro_counts_per_dps
                 ),
                 "state": "recording",
+                "recording_kind": self.recording_kind,
+                "training_eligible": self.training_eligible,
+                "video_status": self.video_status,
             }
         )
         imu = handle.create_group("imu")
@@ -195,6 +205,26 @@ class CaptureH5Writer:
             )
 
         handle.create_group("video").create_group("frames")
+        experiment = handle.create_group("experiment")
+        experiment.attrs.update(
+            {
+                "device_frame_definition_zh": (
+                    "+X 指向佩戴者右侧；+Y 指向头部/挂绳端；"
+                    "+Z 指向身体外侧/按键面"
+                ),
+                "stage_time_domain": "recording_relative_ns",
+            }
+        )
+        stages = experiment.create_group("stages")
+        text = h5py.string_dtype("utf-8")
+        for name, dtype in (
+            ("stage_code", text),
+            ("start_ns", "i8"),
+            ("end_ns", "i8"),
+            ("reliability", text),
+            ("notes", text),
+        ):
+            stages.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype)
         sync = handle.create_group("sync")
         sync.attrs.update({"quality": "missing", "scale": 1.0, "offset_ns": 0.0})
         sync.create_dataset("imu_anchor_ns", shape=(0,), maxshape=(None,), dtype="i8")
@@ -206,6 +236,30 @@ class CaptureH5Writer:
             )
         )
         handle.flush()
+
+    def append_experiment_stage(
+        self,
+        stage_code: str,
+        start_ns: int,
+        end_ns: int,
+        reliability: str,
+        notes: str = "",
+    ) -> None:
+        if end_ns <= start_ns:
+            raise ValueError("实验阶段结束时间必须晚于开始时间")
+        stages = self.handle["experiment/stages"]
+        values: dict[str, Any] = {
+            "stage_code": stage_code,
+            "start_ns": start_ns,
+            "end_ns": end_ns,
+            "reliability": reliability,
+            "notes": notes,
+        }
+        for name, value in values.items():
+            dataset = stages[name]
+            dataset.resize((len(dataset) + 1,))
+            dataset[-1] = value
+        self.handle.flush()
 
     def append_notification(self, payload: bytes, receive_time_ns: int) -> int:
         packets = self.handle["imu/packets"]
@@ -335,6 +389,15 @@ class CaptureH5Writer:
         model = fit_sync_model(imu_anchor, video_anchor)
         sync = self.handle["sync"]
         sync.attrs["anchor_clock_domain"] = "recording_relative_ns"
+        if "labels" in sync:
+            del sync["labels"]
+        sync.create_dataset(
+            "labels",
+            data=np.asarray(
+                [anchor.label for anchor in anchors], dtype=h5py.string_dtype("utf-8")
+            ),
+            maxshape=(None,),
+        )
         for name, values in (("imu_anchor_ns", imu_anchor), ("video_anchor_ns", video_anchor)):
             dataset = sync[name]
             dataset.resize((len(values),))

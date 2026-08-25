@@ -26,6 +26,7 @@ main { display: grid; gap: 16px; }
 .panel { background: rgba(17, 28, 46, .94); border: 1px solid #253754; border-radius: 12px; padding: 16px; box-shadow: 0 12px 30px rgba(0,0,0,.14); }
 .panel-title { color: #a9bbd3; font-size: 12px; font-weight: 750; letter-spacing: .04em; margin-bottom: 12px; text-transform: uppercase; }
 .controls { display: flex; gap: 14px; align-items: end; }
+.controls label { min-width: 220px; }
 label { display: grid; gap: 6px; color: #9eb0c8; font-size: 12px; }
 input, select { color: white; border: 1px solid #30415f; border-radius: 7px; background: #0c1626; padding: 10px 11px; min-width: 210px; }
 .primary { background: #2563eb; border-color: #3b82f6; font-weight: 700; }
@@ -59,3 +60,13 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .library article > div:first-child { display: grid; gap: 4px; }
 .library article span { color: #8ea0b9; font-size: 12px; }
 .library ul { grid-column: 1 / -1; color: #fbbf24; margin: 0; }
+.characterization-intro { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+.characterization-intro p, .stage-help { color: #9eb0c8; line-height: 1.55; margin: 6px 0 14px; }
+.training-guard { color: #fbbf24; border: 1px solid #854d0e; background: #422006; border-radius: 8px; padding: 10px 14px; font: 700 12px ui-monospace, monospace; white-space: nowrap; }
+.stage-actions { margin-top: 14px; }
+.muted { color: #7587a0; }
+.sync-panel { display: grid; gap: 10px; }
+.sync-inputs { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sync-inputs span { color: #a5b4c8; font: 12px ui-monospace, monospace; background: #0b1525; padding: 8px; border-radius: 6px; }
+.anchor-list { display: grid; gap: 6px; }
+.anchor-list > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 9px; background: #0b1525; border-radius: 7px; color: #a5b4c8; font: 12px ui-monospace, monospace; }

@@ -5,6 +5,19 @@ server_host: "127.0.0.1"
 server_port: 8765
 minimum_free_gib: 20
 
+identity:
+  # 参与者和标注者共用同一白名单；修改后需重启本地服务。
+  allowed_unikeys:
+    - "rkim6933"
+    - "zche0826"
+    - "jzho8728"
+    - "jzha9115"
+    - "xfan0282"
+    - "yniu0950"
+    - "hche5673"
+    - "jmia0254"
+    - "xliu0452"
+
 imu:
   name: "CW12EU-T"
   address: "83:FC:90:14:1E:A4"
@@ -17,6 +30,8 @@ imu:
 
 video:
   device: null
+  # 首次由 WebUI 选择稳定 camera_id；device 仅用于显式调试覆盖。
+  camera_id: null
   width: 1920
   height: 1080
   requested_fps: 30
