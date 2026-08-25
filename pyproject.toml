@@ -1,0 +1,42 @@
+[project]
+name = "imu-data-collector"
+version = "0.1.0"
+description = "以时间戳为核心的 CW12EU-T IMU 与 UVC 视频数据采集平台"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "bleak>=2.0.0",
+    "dbus-fast>=5.0.22 ; sys_platform == 'linux'",
+    "fastapi>=0.116.0",
+    "h5py>=3.14.0",
+    "numpy>=2.2.0",
+    "pydantic>=2.11.0",
+    "pyyaml>=6.0.2",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[project.scripts]
+imu-collector = "imu_data_collector.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.0",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.1.0",
+    "ruff>=0.12.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

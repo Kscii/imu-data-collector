@@ -1,0 +1,33 @@
+data_root: "~/IMUData"
+catalog_path: "~/.local/share/imu-data-collector/catalog.sqlite3"
+activity_taxonomy_path: "configs/activities.yaml"
+server_host: "127.0.0.1"
+server_port: 8765
+minimum_free_gib: 20
+
+imu:
+  name: "CW12EU-T"
+  address: "83:FC:90:14:1E:A4"
+  notify_uuid: "00002ae1-0000-1000-8000-00805f9b34fb"
+  expected_rate_hz: 25.0
+  expected_rate_status: "short_probe_observed_2026-08-25_pending_long_run"
+  frame_size_bytes: 16
+  accel_counts_per_g: null
+  gyro_counts_per_dps: null
+
+video:
+  device: null
+  width: 1920
+  height: 1080
+  requested_fps: 30
+  input_format: "mjpeg"
+  bitrate: "6M"
+  maxrate: "8M"
+  preview_width: 640
+  preview_fps: 10
+  vaapi_device: "/dev/dri/renderD128"
+
+upload:
+  enabled: false
+  remote: "gdrive"
+  remote_root: null
