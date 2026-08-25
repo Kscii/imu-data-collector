@@ -114,6 +114,9 @@ def _parser() -> argparse.ArgumentParser:
         "probe-video", help="短时录制到临时目录并统计视频 PTS"
     )
     probe_video.add_argument("--seconds", type=float, default=5.0)
+    probe_video.add_argument(
+        "--camera-id", default=None, help="按稳定 camera_id 选择要探测的摄像头"
+    )
     characterize = subparsers.add_parser(
         "characterize-imu", help="按单个物理阶段录制 IMU-only 表征 HDF5"
     )
@@ -246,11 +249,13 @@ async def _probe_gatt(settings, hold_seconds: float = 0.0) -> dict:
         await source.stop()
 
 
-async def _probe_video(settings, duration_seconds: float) -> dict:
+async def _probe_video(
+    settings, duration_seconds: float, camera_id: str | None = None
+) -> dict:
     if not 1 <= duration_seconds <= 60:
         raise ValueError("视频探测时长必须在 1 到 60 秒之间")
     devices = await discover_video_devices(settings.video)
-    preferred = select_video_device(devices, settings.video)
+    preferred = select_video_device(devices, settings.video, camera_id)
     with tempfile.TemporaryDirectory(prefix="imu-video-probe-") as directory:
         path = Path(directory) / "probe.mkv"
         recorder = FFmpegVideoRecorder(
@@ -274,6 +279,7 @@ async def _probe_video(settings, duration_seconds: float) -> dict:
         actual_fps = (
             (len(table.pts_monotonic_ns) - 1) / span_seconds if span_seconds > 0 else 0.0
         )
+        pts_deltas = table.pts_monotonic_ns[1:] - table.pts_monotonic_ns[:-1]
         return {
             "device": preferred["device"],
             "product": preferred["product"],
@@ -287,6 +293,8 @@ async def _probe_video(settings, duration_seconds: float) -> dict:
             "frame_count": len(table.pts_monotonic_ns),
             "pts_span_seconds": span_seconds,
             "actual_span_fps": actual_fps,
+            "nonpositive_pts_delta_count": int((pts_deltas <= 0).sum()),
+            "duplicate_pts_count": int((pts_deltas == 0).sum()),
             "output_bytes": path.stat().st_size,
             "ffmpeg_progress_fps": recorder.progress.fps,
             "ffmpeg_errors": recorder.progress.errors,
@@ -446,7 +454,7 @@ def main() -> None:
     else:
         print(
             json.dumps(
-                asyncio.run(_probe_video(settings, args.seconds)),
+                asyncio.run(_probe_video(settings, args.seconds, args.camera_id)),
                 indent=2,
                 ensure_ascii=False,
             )

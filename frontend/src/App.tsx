@@ -5,6 +5,7 @@ type Recording = {
   recording_id: string;
   collection_id: string;
   participant_id: string;
+  data_tier: "test" | "prod" | "legacy_unclassified";
   state: string;
   started_at_utc: string;
   duration_ns?: number;
@@ -50,6 +51,8 @@ type Taxonomy = {
 
 type AppConfig = {
   allowed_unikeys: string[];
+  data_tiers: ("test" | "prod")[];
+  default_data_tier: "test" | "prod";
   data_root: string;
   video: { width: number; height: number; requested_fps: number; bitrate: string };
 };
@@ -59,6 +62,7 @@ type Camera = {
   device: string;
   product: string;
   interface: string;
+  integration: string;
   supports_default_profile: boolean;
   color_capture: boolean;
 };
@@ -89,6 +93,8 @@ const characterizationStages = [
   ["gyro_z_negative", "绕 +Z 反向旋转", "与上一阶段成对"]
 ] as const;
 
+const LIVE_WINDOW_SECONDS = 120;
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -118,11 +124,20 @@ function stateLabel(state: string) {
   return labels[state] ?? state;
 }
 
+function issueLabel(issue: string) {
+  const labels: Record<string, string> = {
+    "synchronization anchors have not been verified": "同步锚点尚未验证",
+    "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证"
+  };
+  return labels[issue] ?? issue;
+}
+
 export default function App() {
   const [tab, setTab] = useState<"capture" | "characterize" | "annotate" | "library">("capture");
   const [live, setLive] = useState<any>({ state: "idle", imu: {}, video: {} });
   const [participant, setParticipant] = useState("xfan0282");
-  const [collection, setCollection] = useState("pilot_v1");
+  const [collection, setCollection] = useState("xfan0282_test_01");
+  const [dataTier, setDataTier] = useState<"test" | "prod">("test");
   const [error, setError] = useState("");
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [taxonomy, setTaxonomy] = useState<Taxonomy | null>(null);
@@ -139,7 +154,10 @@ export default function App() {
       setCameras(value.cameras);
       setCameraId((current) => {
         if (value.cameras.some((item) => item.camera_id === current)) return current;
-        return value.cameras.find((item) => item.supports_default_profile && item.color_capture)?.camera_id ?? "";
+        const compatible = value.cameras.filter((item) => item.supports_default_profile && item.color_capture);
+        return compatible.find((item) => item.integration === "external")?.camera_id
+          ?? compatible[0]?.camera_id
+          ?? "";
       });
     }).catch((e) => setError(e.message));
 
@@ -150,6 +168,7 @@ export default function App() {
       if (!value.allowed_unikeys.includes(participant) && value.allowed_unikeys.length) {
         setParticipant(value.allowed_unikeys[0]);
       }
+      setDataTier(value.default_data_tier);
     }).catch((e) => setError(e.message));
     refreshCameras();
     refreshRecordings();
@@ -158,14 +177,16 @@ export default function App() {
     socket.onmessage = (message) => {
       const payload = JSON.parse(message.data);
       setLive(payload);
-      if (payload.state === "recording" && payload.imu?.raw) {
+      if (payload.imu?.connected && payload.imu?.raw) {
         const data = liveRef.current;
-        data.t.push(performance.now() / 1000);
+        const nowSeconds = performance.now() / 1000;
+        data.t.push(nowSeconds);
         data.values.push(payload.imu.raw);
-        if (data.t.length > 240) {
+        while (data.t.length && data.t[0] < nowSeconds - LIVE_WINDOW_SECONDS) {
           data.t.shift();
           data.values.shift();
         }
+        liveRef.current = { t: [...data.t], values: [...data.values] };
         redraw((value) => value + 1);
       }
     };
@@ -180,6 +201,7 @@ export default function App() {
         body: JSON.stringify({
           collection_id: collection,
           participant_id: participant,
+          data_tier: dataTier,
           body_location: "chest",
           protocol_id: taxonomy?.taxonomy_id ?? "fall_binary_v1",
           camera_id: cameraId || null
@@ -201,6 +223,20 @@ export default function App() {
     }
   };
 
+  const toggleImuPreview = async () => {
+    setError("");
+    try {
+      const active = live.session_type === "devices_preview";
+      await api(`/api/v1/preflight/${active ? "stop" : "start"}`, {
+        method: "POST",
+        body: active ? undefined : JSON.stringify({ camera_id: cameraId || null })
+      });
+      if (!active) liveRef.current = { t: [], values: [] };
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   return (
     <div className="app-shell">
       <header>
@@ -208,7 +244,7 @@ export default function App() {
           <span className="eyebrow">CW12EU-T · 本机采集</span>
           <h1>IMU 数采平台</h1>
         </div>
-        <div className={`state state-${live.state}`}>{stateLabel(live.state)}</div>
+        <div className={`state state-${live.state}`}>{live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav>
         <button className={tab === "capture" ? "active" : ""} onClick={() => setTab("capture")}>采集</button>
@@ -224,6 +260,8 @@ export default function App() {
           setParticipant={setParticipant}
           collection={collection}
           setCollection={setCollection}
+          dataTier={dataTier}
+          setDataTier={setDataTier}
           start={start}
           stop={stop}
           chart={liveRef.current}
@@ -232,6 +270,7 @@ export default function App() {
           cameraId={cameraId}
           setCameraId={setCameraId}
           refreshCameras={refreshCameras}
+          toggleImuPreview={toggleImuPreview}
         />
       )}
       {tab === "characterize" && (
@@ -253,9 +292,11 @@ export default function App() {
 function CapturePage(props: any) {
   const {
     live, participant, setParticipant, collection, setCollection, start, stop, chart,
-    allowedUnikeys, cameras, cameraId, setCameraId, refreshCameras
+    dataTier, setDataTier, allowedUnikeys, cameras, cameraId, setCameraId, refreshCameras,
+    toggleImuPreview
   } = props;
   const active = live.state === "recording" && live.session_type === "capture";
+  const devicesPreview = live.session_type === "devices_preview";
   const busy = ["arming", "finalizing"].includes(live.state);
   const anotherSession = live.state === "recording" && live.session_type !== "capture";
   return (
@@ -263,29 +304,35 @@ function CapturePage(props: any) {
       <section className="controls panel">
         <label>数据批次 ID<input value={collection} onChange={(e) => setCollection(e.target.value)} disabled={active || busy} /></label>
         <label>参与者 UniKey<select value={participant} onChange={(e) => setParticipant(e.target.value)} disabled={active || busy}>{allowedUnikeys.map((item: string) => <option value={item} key={item}>{item}</option>)}</select></label>
-        <label>摄像头<select value={cameraId} onChange={(e) => setCameraId(e.target.value)} disabled={active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{item.product} · {item.device}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
+        <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={active || busy}><option value="test">test · 永久禁止训练</option><option value="prod">prod · 仍需通过全部质量门禁</option></select></label>
+        <label>摄像头<select value={cameraId} onChange={(e) => setCameraId(e.target.value)} disabled={active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
         <button disabled={active || busy} onClick={refreshCameras}>重新扫描摄像头</button>
+        <button disabled={active || busy || anotherSession || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{devicesPreview ? "释放预览设备" : "连接预览设备"}</button>
         {!active ? <button className="primary" disabled={busy || anotherSession || !cameraId} onClick={start}>开始录制</button> : <button className="danger" onClick={stop}>结束录制</button>}
       </section>
       <section className="metrics">
-        <Metric label="摄像头实际 FPS" value={(live.video?.fps ?? 0).toFixed(1)} />
+        <Metric label={live.video?.preview_only ? "预览输出 FPS" : "摄像头实际 FPS"} value={(live.video?.fps ?? 0).toFixed(1)} />
         <Metric label="视频帧" value={live.video?.frame ?? 0} />
         <Metric label="IMU 通知包" value={live.imu?.packet_count ?? 0} />
         <Metric label="IMU 候选样本" value={live.imu?.sample_count ?? 0} />
+        <Metric label="IMU 估算频率" value={`${(live.imu?.estimated_sample_rate_hz ?? 0).toFixed(2)} Hz`} />
+        <Metric label="最后一包" value={live.imu?.last_packet_age_ms == null ? "—" : `${live.imu.last_packet_age_ms.toFixed(0)} ms 前`} warn={live.imu?.connected && (live.imu?.last_packet_age_ms ?? 0) > 2000} />
         <Metric label="BLE连接" value={live.imu?.connected ? "已连接" : "未连接"} warn={!live.imu?.connected} />
+        <Metric label="解析/回调丢弃" value={`${live.imu?.parse_errors ?? 0} / ${live.imu?.callback_drops ?? 0}`} warn={(live.imu?.parse_errors ?? 0) > 0 || (live.imu?.callback_drops ?? 0) > 0} />
         <Metric label="剩余磁盘" value={`${(live.free_disk_gib ?? 0).toFixed(1)} GiB`} />
       </section>
       <section className="capture-grid">
         <div className="panel camera-panel">
-          <div className="panel-title">录制画面 · 仅本机</div>
-          {active ? <img src="/api/v1/preview.mjpeg" alt="摄像头实时预览" /> : <div className="placeholder">开始录制后显示实时预览</div>}
+          <div className="panel-title">实时画面 · 仅本机{devicesPreview ? " · 预览不落盘" : ""}</div>
+          {active || devicesPreview ? <img key={live.session_type} src={`/api/v1/preview.mjpeg?mode=${live.session_type}`} alt="摄像头实时预览" /> : <div className="placeholder">连接预览设备后显示实时画面</div>}
         </div>
         <div className="panel chart-panel">
-          <div className="panel-title">IMU 六轴实时曲线 · 当前为原始计数</div>
+          <div className="panel-title">IMU 六轴实时曲线 · 最近 120 秒 · 当前为原始计数{devicesPreview ? " · 预览不落盘" : ""}</div>
           <Plot time={chart.t} values={chart.values} />
         </div>
       </section>
-      {live.recording?.issues?.length > 0 && <div className="issues">{live.recording.issues.map((issue: string) => <div key={issue}>{issue}</div>)}</div>}
+      {live.recording?.issues?.length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{live.recording.issues.map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {live.preview_error && <div className="issues"><div>{live.preview_error}</div></div>}
     </main>
   );
 }
@@ -337,7 +384,7 @@ function CharacterizationPage({ live, allowedUnikeys, chart, onError }: { live: 
         <label>阶段备注<input value={notes} disabled={!active || !!currentStage} onChange={(e) => setNotes(e.target.value)} placeholder="夹具、摆放或异常说明" /></label>
         <div className="stage-actions">{!currentStage ? <button className="primary" disabled={!active} onClick={() => invoke("/api/v1/characterizations/stages/start", { stage_code: stage, notes })}>开始该阶段</button> : <button onClick={() => invoke("/api/v1/characterizations/stages/stop")}>结束该阶段</button>}</div>
       </div>
-      <div className="panel chart-panel"><div className="panel-title">六轴实时原始计数</div><Plot time={chart.t} values={chart.values} /></div>
+      <div className="panel chart-panel"><div className="panel-title">六轴实时原始计数 · 最近 120 秒</div><Plot time={chart.t} values={chart.values} /></div>
     </section>
     <section className="panel library"><div className="panel-title">历史表征报告</div>{history.length === 0 ? <span className="muted">尚无完整报告</span> : history.map((item) => <article key={item.report_path}><div><strong>{item.source_h5}</strong><span>{(item.observed_rate_hz ?? 0).toFixed(5)} Hz · {item.packet_count} 包 · {item.calibration_status}</span></div><div className="state state-needs_attention">仅诊断</div></article>)}</section>
   </main>;
@@ -473,5 +520,5 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onError }: { rec
 }
 
 function Library({ recordings }: { recordings: Recording[] }) {
-  return <main><section className="panel library"><div className="panel-title">本地录制</div>{recordings.map((recording) => <article key={recording.recording_id}><div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {seconds(recording.duration_ns)}</span></div><div className={`state state-${recording.state}`}>{stateLabel(recording.state)}</div>{recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}</article>)}</section></main>;
+  return <main><section className="panel library"><div className="panel-title">本地录制</div>{recordings.map((recording) => <article key={recording.recording_id}><div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {recording.data_tier} · {seconds(recording.duration_ns)}</span></div><div className={`state state-${recording.state}`}>{stateLabel(recording.state)}</div>{recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}</article>)}</section></main>;
 }

@@ -29,6 +29,7 @@ class RecordingCatalog:
                     recording_id TEXT PRIMARY KEY,
                     collection_id TEXT NOT NULL,
                     participant_id TEXT NOT NULL,
+                    data_tier TEXT NOT NULL DEFAULT 'legacy_unclassified',
                     state TEXT NOT NULL,
                     started_at_utc TEXT NOT NULL,
                     ended_at_utc TEXT,
@@ -51,6 +52,15 @@ class RecordingCatalog:
                 );
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(recordings)").fetchall()
+            }
+            if "data_tier" not in columns:
+                connection.execute(
+                    "ALTER TABLE recordings ADD COLUMN data_tier "
+                    "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
+                )
 
     def upsert(self, summary: RecordingSummary) -> None:
         payload = summary.model_dump(mode="json")
@@ -58,11 +68,12 @@ class RecordingCatalog:
             connection.execute(
                 """
                 INSERT INTO recordings (
-                    recording_id, collection_id, participant_id, state,
+                    recording_id, collection_id, participant_id, data_tier, state,
                     started_at_utc, ended_at_utc, duration_ns, h5_path, mkv_path,
                     issues_json, upload_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recording_id) DO UPDATE SET
+                    data_tier=excluded.data_tier,
                     state=excluded.state,
                     ended_at_utc=excluded.ended_at_utc,
                     duration_ns=excluded.duration_ns,
@@ -75,6 +86,7 @@ class RecordingCatalog:
                     payload["recording_id"],
                     payload["collection_id"],
                     payload["participant_id"],
+                    payload["data_tier"],
                     payload["state"],
                     payload["started_at_utc"],
                     payload["ended_at_utc"],
@@ -117,6 +129,7 @@ class RecordingCatalog:
             recording_id=row["recording_id"],
             collection_id=row["collection_id"],
             participant_id=row["participant_id"],
+            data_tier=row["data_tier"],
             state=RecordingState(row["state"]),
             started_at_utc=row["started_at_utc"],
             ended_at_utc=row["ended_at_utc"],

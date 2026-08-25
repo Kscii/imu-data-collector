@@ -1,7 +1,12 @@
 import pytest
 
+import imu_data_collector.video as video_module
 from imu_data_collector.config import VideoSettings
-from imu_data_collector.video import select_video_device
+from imu_data_collector.video import (
+    FFmpegVideoRecorder,
+    discover_video_devices,
+    select_video_device,
+)
 
 
 def cameras() -> list[dict]:
@@ -31,3 +36,70 @@ def test_camera_selection_uses_stable_id_and_rejects_auxiliary_node() -> None:
 def test_camera_selection_rejects_stale_id() -> None:
     with pytest.raises(RuntimeError, match="当前不可用"):
         select_video_device(cameras(), VideoSettings(), "missing|if=00")
+
+
+def test_recorder_disables_b_frames_and_preserves_source_timestamps(
+    tmp_path,
+) -> None:
+    command = FFmpegVideoRecorder(
+        VideoSettings(vaapi_device=None), "/dev/video0", tmp_path / "capture.mkv"
+    ).command()
+
+    b_frame_index = command.index("-bf")
+    assert command[b_frame_index + 1] == "0"
+    index = command.index("-fps_mode")
+    assert command[index + 1] == "vfr"
+
+
+def test_preview_only_recorder_has_no_file_output(tmp_path) -> None:
+    del tmp_path
+    command = FFmpegVideoRecorder(
+        VideoSettings(vaapi_device=None), "/dev/video0", None
+    ).command()
+
+    assert "matroska" not in command
+    assert "libx264" not in command
+    assert command[-1] == "pipe:1"
+    assert "image2pipe" in command
+
+
+@pytest.mark.asyncio
+async def test_discovery_skips_metadata_and_keeps_capture_nodes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        video_module.glob,
+        "glob",
+        lambda _pattern: ["/dev/video4", "/dev/video5"],
+    )
+
+    async def fake_run(*args: str, timeout_seconds: float = 10.0):
+        del timeout_seconds
+        device_arg = next(item for item in args if "/dev/video" in item)
+        device = device_arg.removeprefix("--name=")
+        if args[0] == "udevadm":
+            capability = ":capture:" if device.endswith("4") else ":metadata:"
+            return (
+                0,
+                f"ID_V4L_CAPABILITIES={capability}\n"
+                "ID_V4L_PRODUCT=罗技摄像头\n"
+                "ID_SERIAL=logitech_123\n"
+                "ID_USB_INTERFACE_NUM=00\n"
+                "ID_INTEGRATION=external\n",
+                "",
+            )
+        return (
+            0,
+            "[0]: 'MJPG'\nSize: Discrete 1920x1080\n"
+            "Interval: Discrete 0.033s (30.000 fps)\n",
+            "",
+        )
+
+    monkeypatch.setattr(video_module, "_run_capture", fake_run)
+
+    devices = await discover_video_devices(VideoSettings())
+
+    assert [item["device"] for item in devices] == ["/dev/video4"]
+    assert devices[0]["camera_id"] == "logitech_123|if=00"
+    assert devices[0]["integration"] == "external"
+    assert devices[0]["supports_default_profile"] is True

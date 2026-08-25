@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -20,6 +21,13 @@ class RecordingState(StrEnum):
     FAILED = "failed"
 
 
+class DataTier(StrEnum):
+    """录制开始时确定的数据用途分级。"""
+
+    TEST = "test"
+    PROD = "prod"
+
+
 class BinaryLabel(StrEnum):
     FALL = "fall"
     NON_FALL = "non_fall"
@@ -33,6 +41,7 @@ class EventKind(StrEnum):
 class RecordingStartRequest(BaseModel):
     collection_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
     participant_id: str
+    data_tier: DataTier = DataTier.TEST
     body_location: str = "chest"
     protocol_id: str = "fall_binary_v1"
     camera_id: str | None = Field(default=None, max_length=512)
@@ -44,6 +53,10 @@ class RecordingStartRequest(BaseModel):
         if self.body_location != "chest":
             raise ValueError("v1 supports chest placement only")
         return self
+
+
+class PreviewStartRequest(BaseModel):
+    camera_id: str | None = Field(default=None, max_length=512)
 
 
 class ActivitySegment(BaseModel):
@@ -136,6 +149,7 @@ class RecordingSummary(BaseModel):
     recording_id: str
     collection_id: str
     participant_id: str
+    data_tier: DataTier | Literal["legacy_unclassified"] = "legacy_unclassified"
     state: RecordingState
     started_at_utc: str
     ended_at_utc: str | None = None

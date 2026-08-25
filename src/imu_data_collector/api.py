@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -17,6 +18,7 @@ from imu_data_collector.models import (
     AnnotationDocument,
     CharacterizationStageRequest,
     CharacterizationStartRequest,
+    PreviewStartRequest,
     RecordingStartRequest,
     SyncDocument,
 )
@@ -27,7 +29,13 @@ from imu_data_collector.video import discover_video_devices
 def create_app(settings: Settings | None = None) -> FastAPI:
     active_settings = settings or load_settings()
     coordinator = RecordingCoordinator(active_settings)
-    app = FastAPI(title="IMU 数据采集平台", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await coordinator.shutdown()
+
+    app = FastAPI(title="IMU 数据采集平台", version="0.1.0", lifespan=lifespan)
     app.state.coordinator = coordinator
     app.state.settings = active_settings
 
@@ -41,6 +49,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "data_root": str(active_settings.data_root),
             "minimum_free_gib": active_settings.minimum_free_gib,
             "allowed_unikeys": list(active_settings.identity.allowed_unikeys),
+            "data_tiers": ["test", "prod"],
+            "default_data_tier": "test",
             "imu": {
                 "name": active_settings.imu.name,
                 "address": active_settings.imu.address,
@@ -90,6 +100,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return summary.model_dump(mode="json")
+
+    @app.post("/api/v1/preflight/start")
+    async def start_preview(request: PreviewStartRequest) -> dict[str, Any]:
+        try:
+            return await coordinator.start_preview(request)
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/v1/preflight/stop")
+    async def stop_preview() -> dict[str, Any]:
+        try:
+            return await coordinator.stop_preview()
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.post("/api/v1/recordings/stop")
     async def stop() -> dict[str, Any]:
@@ -218,11 +242,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, media_type="video/x-matroska", filename=path.name)
 
     @app.get("/api/v1/preview.mjpeg")
-    async def preview() -> StreamingResponse:
+    async def preview(request: Request) -> StreamingResponse:
         async def stream():
             generation = -1
             while True:
+                if await request.is_disconnected():
+                    return
                 recorder = coordinator.video
+                if recorder is None:
+                    return
                 if recorder and recorder.latest_jpeg and recorder.preview_generation != generation:
                     generation = recorder.preview_generation
                     yield (

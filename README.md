@@ -12,6 +12,7 @@
 - 摄像头：UVC 摄像头，默认请求 MJPEG 1920×1080、30 fps；保存 H.264、约 6 Mbit/s、无音频。
 - 产物：一次佩戴录制对应一对同名 `.h5` 与 `.mkv`，建议 10–30 分钟；一个录制可包含多个互不重叠的标注片段，片段间空白保持未标注。
 - 身份：参与者、操作者与标注者共用配置白名单；当前为 9 个已确认 UniKey，WebUI 使用下拉框，后端再次强制校验。
+- 数据级别：录制开始时显式选择 `test` 或 `prod`，安全默认值为 `test`；任何 `test` 或旧版未分类数据都永久禁止进入训练集，`prod` 也仍需通过全部质量门禁。
 - 上传：原始媒体不进 Git/Git LFS；首选通过 rclone 自动复制到 Google Drive，并在上传后校验。
 
 完整事实、架构和操作说明见 [docs/](docs/)，当前工作清单见 [TODO.md](TODO.md)。
@@ -38,6 +39,7 @@ uv run imu-collector doctor
 uv run imu-collector devices
 uv run imu-collector probe-gatt
 uv run imu-collector probe-imu --seconds 15
+uv run imu-collector probe-video --seconds 20 --camera-id '<稳定 camera_id>'
 uv run imu-collector characterize-imu --operator xfan0282 \
   --stage pipeline_smoke_uncontrolled --seconds 10
 uv run imu-collector validate /path/to/recording.h5
@@ -55,5 +57,6 @@ WebUI 的“IMU 表征”页逐阶段操作，详见
 - `.partial.h5` / `.partial.mkv` 表示录制中断或尚未完整收尾，不能当作可训练数据。
 - 标注与同步编辑使用“复制、验证、原子替换”，尽量避免损坏唯一副本。
 - 原始字节、原始计数和时间戳不可被重采样结果覆盖。
+- 不根据目录名或文件名推断训练资格；H5 根属性 `data_tier` 是用途分级的事实来源，普通界面不允许录制后修改。
 - 未验证比例时，SI 单位数组保持 `NaN`；代码不会猜测量程。
 - 人体跌倒采集必须另行制定安全、知情同意与隐私流程；本软件不替代该流程。

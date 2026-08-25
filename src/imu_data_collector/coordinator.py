@@ -16,6 +16,7 @@ from imu_data_collector.ble import CW12EUBleSource
 from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
+from imu_data_collector.cw12eu import parse_notification
 from imu_data_collector.hdf5_store import (
     CaptureH5Writer,
     read_annotations,
@@ -27,6 +28,7 @@ from imu_data_collector.models import (
     AnnotationEvent,
     CharacterizationStageRequest,
     CharacterizationStartRequest,
+    PreviewStartRequest,
     RecordingStartRequest,
     RecordingState,
     RecordingSummary,
@@ -64,6 +66,11 @@ class RecordingCoordinator:
         self.mode: str | None = None
         self.current_stage: dict[str, Any] | None = None
         self.last_characterization: dict[str, Any] | None = None
+        self.preview_parse_errors = 0
+        self._first_packet_ns: int | None = None
+        self._monitoring_requested = False
+        self._preview_camera_id: str | None = None
+        self.preview_error: str | None = None
 
     def _require_allowed_unikey(self, value: str, field_name: str) -> None:
         if value not in self.settings.identity.allowed_unikeys:
@@ -85,8 +92,119 @@ class RecordingCoordinator:
                 f"the configured {self.settings.minimum_free_gib} GiB minimum"
             )
 
+    def _reset_live_imu_metrics(self) -> None:
+        self.packet_count = 0
+        self.sample_count = 0
+        self.observed_rate_hz = 0.0
+        self.latest_raw[:] = 0
+        self.preview_parse_errors = 0
+        self._first_packet_ns = None
+
+    async def _start_preview_locked(self, camera_id: str | None) -> None:
+        if self.mode == "devices_preview" and self.ble and self.ble.connected:
+            return
+        if self.mode is not None or self.state in {
+            RecordingState.ARMING,
+            RecordingState.RECORDING,
+            RecordingState.FINALIZING,
+        }:
+            raise RuntimeError("当前有其他设备会话，不能开始设备预览")
+        camera = await self._resolve_camera(camera_id)
+        self.mode = "devices_preview"
+        self._monitoring_requested = True
+        self._preview_camera_id = str(camera["camera_id"])
+        self.preview_error = None
+        self.ble = CW12EUBleSource(self.settings.imu)
+        self.video = FFmpegVideoRecorder(
+            self.settings.video, str(camera["device"]), None
+        )
+        self._stop_consumer.clear()
+        self._reset_live_imu_metrics()
+        try:
+            await self.ble.start()
+            self._consumer = asyncio.create_task(self._consume_imu_preview())
+            await self.video.start()
+        except Exception as error:
+            self.preview_error = str(error)
+            await self._stop_preview_locked(preserve_request=False)
+            raise
+
+    async def start_preview(self, request: PreviewStartRequest) -> dict[str, Any]:
+        """连接 IMU 与摄像头，只在内存中提供实时预览，不创建采集文件。"""
+
+        async with self._lock:
+            await self._start_preview_locked(request.camera_id)
+            return self.snapshot()
+
+    async def _stop_preview_locked(self, *, preserve_request: bool) -> None:
+        if self.mode != "devices_preview":
+            return
+        if self.video:
+            try:
+                await self.video.stop()
+            except Exception:
+                pass
+        if self.ble:
+            try:
+                await self.ble.stop()
+            except Exception:
+                pass
+        self._stop_consumer.set()
+        if self._consumer:
+            try:
+                await asyncio.wait_for(self._consumer, timeout=3.0)
+            except TimeoutError:
+                self._consumer.cancel()
+                await asyncio.gather(self._consumer, return_exceptions=True)
+            finally:
+                self._consumer = None
+        self.ble = None
+        self.video = None
+        self.mode = None
+        if not preserve_request:
+            self._monitoring_requested = False
+            self._preview_camera_id = None
+
+    async def stop_preview(self) -> dict[str, Any]:
+        async with self._lock:
+            if self.mode != "devices_preview":
+                raise RuntimeError("当前没有正在运行的设备预览")
+            await self._stop_preview_locked(preserve_request=False)
+            return self.snapshot()
+
+    async def shutdown(self) -> None:
+        """服务退出时释放仅用于预览的设备句柄。"""
+
+        async with self._lock:
+            if self.mode == "devices_preview":
+                await self._stop_preview_locked(preserve_request=False)
+
+    async def _consume_imu_preview(self) -> None:
+        assert self.ble is not None
+        while not self._stop_consumer.is_set() or not self.ble.queue.empty():
+            try:
+                packet = await asyncio.wait_for(self.ble.queue.get(), timeout=0.25)
+            except TimeoutError:
+                continue
+            self.packet_count += 1
+            if self._first_packet_ns is None:
+                self._first_packet_ns = packet.receive_time_ns
+            try:
+                parsed = parse_notification(
+                    packet.payload, self.settings.imu.frame_size_bytes
+                )
+            except ValueError:
+                self.preview_parse_errors += 1
+                continue
+            self.latest_packet_samples = parsed.sample_count
+            self.sample_count += parsed.sample_count
+            if parsed.sample_count:
+                self.latest_raw = parsed.raw_counts[-1].copy()
+
     async def start(self, request: RecordingStartRequest) -> RecordingSummary:
         async with self._lock:
+            if self.mode == "devices_preview":
+                await self._stop_preview_locked(preserve_request=True)
             if self.state not in {
                 RecordingState.IDLE,
                 RecordingState.READY,
@@ -97,6 +215,9 @@ class RecordingCoordinator:
             self._require_allowed_unikey(request.participant_id, "participant_id")
             self._check_disk()
             camera = await self._resolve_camera(request.camera_id)
+            self._monitoring_requested = True
+            self._preview_camera_id = str(camera["camera_id"])
+            self.preview_error = None
             self.mode = "capture"
             now = datetime.now(UTC)
             recording_id = f"{now.strftime('%Y%m%dT%H%M%S.%fZ')}_{request.participant_id}"
@@ -109,6 +230,7 @@ class RecordingCoordinator:
                 recording_id=recording_id,
                 collection_id=request.collection_id,
                 participant_id=request.participant_id,
+                data_tier=request.data_tier,
                 state=RecordingState.ARMING,
                 started_at_utc=now.isoformat(),
                 h5_path=str(h5_partial),
@@ -138,19 +260,23 @@ class RecordingCoordinator:
                 self.settings.video, str(camera["device"]), mkv_partial
             )
             self._stop_consumer.clear()
-            self.packet_count = 0
-            self.sample_count = 0
-            self.observed_rate_hz = 0.0
-            self.latest_raw[:] = 0
+            self._reset_live_imu_metrics()
             try:
                 await self.ble.start()
-                self._consumer = asyncio.create_task(self._consume_imu())
                 await self.video.start()
+                capture_start_ns = self.video.started_monotonic_ns or time.monotonic_ns()
+                capture_started_at = datetime.now(UTC).isoformat()
+                self.writer.set_recording_start(
+                    capture_start_ns, capture_started_at
+                )
+                self._consumer = asyncio.create_task(self._consume_imu())
             except Exception as error:
                 await self._abort_start(error)
                 raise
             self.state = RecordingState.RECORDING
-            self.current = summary.model_copy(update={"state": self.state})
+            self.current = summary.model_copy(
+                update={"state": self.state, "started_at_utc": capture_started_at}
+            )
             self.catalog.upsert(self.current)
             return self.current
 
@@ -187,10 +313,14 @@ class RecordingCoordinator:
                 packet = await asyncio.wait_for(self.ble.queue.get(), timeout=0.25)
             except TimeoutError:
                 continue
+            if packet.receive_time_ns < self.writer.recording_start_monotonic_ns:
+                continue
             parsed_count = self.writer.append_notification(
                 packet.payload, packet.receive_time_ns
             )
             self.packet_count += 1
+            if self._first_packet_ns is None:
+                self._first_packet_ns = packet.receive_time_ns
             self.sample_count += parsed_count
             self.latest_packet_samples = parsed_count
             if parsed_count:
@@ -207,6 +337,7 @@ class RecordingCoordinator:
             ):
                 raise RuntimeError("no active recording")
             self.state = RecordingState.FINALIZING
+            capture_ended_at = datetime.now(UTC).isoformat()
             self.current = self.current.model_copy(update={"state": self.state})
             self.catalog.upsert(self.current)
             issues: list[str] = []
@@ -237,6 +368,9 @@ class RecordingCoordinator:
             try:
                 rate, _residual = self.writer.reconstruct_times()
                 self.observed_rate_hz = rate
+                self.writer.handle["imu"].attrs["callback_drops"] = (
+                    self.ble.dropped_callback_packets
+                )
                 if not partial_mkv.is_file() or partial_mkv.stat().st_size == 0:
                     raise ValueError("FFmpeg produced no MKV data")
                 partial_mkv.replace(final_mkv)
@@ -252,9 +386,10 @@ class RecordingCoordinator:
                     width=frame_table.width,
                     height=frame_table.height,
                     requested_fps=self.settings.video.requested_fps,
+                    ffmpeg_diagnostics=self.video.progress.errors,
                 )
                 self.writer.write_sync([])
-                self.writer.finish()
+                self.writer.finish(ended_at_utc=capture_ended_at)
                 partial_h5.replace(final_h5)
             except Exception as error:
                 issues.append(str(error))
@@ -293,12 +428,22 @@ class RecordingCoordinator:
             )
             self.catalog.upsert(self.current)
             self.mode = None
+            self.ble = None
+            self.video = None
+            self.writer = None
+            if self._monitoring_requested:
+                try:
+                    await self._start_preview_locked(self._preview_camera_id)
+                except Exception as error:
+                    self.preview_error = f"录制已完成，但自动恢复设备预览失败：{error}"
             return self.current
 
     async def start_characterization(
         self, request: CharacterizationStartRequest
     ) -> dict[str, Any]:
         async with self._lock:
+            if self.mode == "devices_preview":
+                await self._stop_preview_locked(preserve_request=True)
             if self.state not in {
                 RecordingState.IDLE,
                 RecordingState.READY,
@@ -319,6 +464,7 @@ class RecordingCoordinator:
             capture_request = RecordingStartRequest(
                 collection_id="_diagnostics",
                 participant_id=request.operator_id,
+                data_tier="test",
                 body_location="chest",
                 protocol_id="imu_characterization_v1",
             )
@@ -326,6 +472,7 @@ class RecordingCoordinator:
                 recording_id=recording_id,
                 collection_id="_diagnostics",
                 participant_id=request.operator_id,
+                data_tier="test",
                 state=RecordingState.ARMING,
                 started_at_utc=now.isoformat(),
                 h5_path=str(partial_h5),
@@ -349,10 +496,7 @@ class RecordingCoordinator:
             self.video = None
             self.current_stage = None
             self._stop_consumer.clear()
-            self.packet_count = 0
-            self.sample_count = 0
-            self.observed_rate_hz = 0.0
-            self.latest_raw[:] = 0
+            self._reset_live_imu_metrics()
             try:
                 await self.ble.start()
                 self._consumer = asyncio.create_task(self._consume_imu())
@@ -520,10 +664,18 @@ class RecordingCoordinator:
     def snapshot(self) -> dict[str, Any]:
         video = self.video.progress if self.video else None
         ble = self.ble
+        now_ns = time.monotonic_ns()
+        packet_span_seconds = (
+            (ble.last_packet_ns - self._first_packet_ns) / 1e9
+            if ble and ble.last_packet_ns and self._first_packet_ns
+            else 0.0
+        )
         free_gib = shutil.disk_usage(self.settings.data_root).free / 1024**3
         return {
             "state": self.state.value,
             "session_type": self.mode,
+            "monitoring_requested": self._monitoring_requested,
+            "preview_error": self.preview_error,
             "recording": self.current.model_dump(mode="json") if self.current else None,
             "imu": {
                 "connected": bool(ble and ble.connected),
@@ -531,7 +683,23 @@ class RecordingCoordinator:
                 "packet_count": self.packet_count,
                 "sample_count": self.sample_count,
                 "last_packet_ns": ble.last_packet_ns if ble else None,
+                "last_packet_age_ms": (
+                    (now_ns - ble.last_packet_ns) / 1e6
+                    if ble and ble.last_packet_ns
+                    else None
+                ),
                 "callback_drops": ble.dropped_callback_packets if ble else 0,
+                "parse_errors": self.preview_parse_errors,
+                "notification_rate_hz": (
+                    (self.packet_count - 1) / packet_span_seconds
+                    if self.packet_count > 1 and packet_span_seconds > 0
+                    else 0.0
+                ),
+                "estimated_sample_rate_hz": (
+                    (self.sample_count - self.latest_packet_samples) / packet_span_seconds
+                    if self.packet_count > 1 and packet_span_seconds > 0
+                    else 0.0
+                ),
                 "observed_rate_hz": self.observed_rate_hz,
             },
             "video": {
@@ -539,6 +707,7 @@ class RecordingCoordinator:
                 "fps": video.fps if video else 0.0,
                 "bitrate": video.bitrate if video else "0",
                 "speed": video.speed if video else "0x",
+                "preview_only": self.mode == "devices_preview",
             },
             "free_disk_gib": free_gib,
             "characterization": self.characterization_snapshot()

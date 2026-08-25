@@ -25,6 +25,8 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
         config = client.get("/api/v1/config")
         assert config.status_code == 200
         assert config.json()["data_root"] == str(data_root)
+        assert config.json()["data_tiers"] == ["test", "prod"]
+        assert config.json()["default_data_tier"] == "test"
         assert config.json()["imu"]["calibration_verified"] is False
         assert config.json()["allowed_unikeys"] == [
             "rkim6933",
@@ -86,3 +88,29 @@ def test_start_contract_rejects_well_formed_but_unlisted_unikey(
 
     assert response.status_code == 422
     assert "白名单" in response.json()["detail"]
+
+
+def test_start_contract_rejects_unknown_data_tier_before_hardware_access(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    app = create_app(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/recordings/start",
+            json={
+                "collection_id": "pilot",
+                "participant_id": "xfan0282",
+                "data_tier": "temporary",
+            },
+        )
+
+    assert response.status_code == 422

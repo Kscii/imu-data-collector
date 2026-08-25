@@ -25,6 +25,7 @@ from imu_data_collector.models import (
     AnnotationDocument,
     AnnotationEvent,
     BinaryLabel,
+    DataTier,
     EventKind,
     RecordingStartRequest,
     SyncAnchor,
@@ -80,6 +81,7 @@ def build_capture(tmp_path: Path) -> Path:
         width=1920,
         height=1080,
         requested_fps=30.0,
+        ffmpeg_diagnostics=["[mjpeg] overread 8"],
     )
     writer.write_sync([])
     writer.finish()
@@ -124,9 +126,17 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
 
     initial = validate_capture_h5(path, taxonomy())
     assert initial.ready, initial.issues
+    assert initial.metrics["video_nonpositive_pts_delta_count"] == 0
+    assert initial.metrics["video_actual_span_fps"] == pytest.approx(30.0, rel=0.02)
     with h5py.File(path, "r") as handle:
         assert np.isnan(handle["imu/samples/values_si"][:]).all()
         assert handle["sync"].attrs["anchor_clock_domain"] == "recording_relative_ns"
+        assert str(handle.attrs["data_tier"]) == "test"
+        assert not bool(handle.attrs["training_eligible"])
+        assert int(handle["video"].attrs["ffmpeg_diagnostic_count"]) == 1
+        assert json.loads(handle["video"].attrs["ffmpeg_diagnostics_json"]) == [
+            "[mjpeg] overread 8"
+        ]
 
     document = finalized_annotation()
     replace_annotations_atomic(path, document, taxonomy())
@@ -134,6 +144,61 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
     stored = read_annotations(path)
     assert stored == document
     assert validate_capture_h5(path, taxonomy()).ready
+
+
+def test_test_tier_is_default_and_can_never_be_marked_training_eligible(
+    tmp_path: Path,
+) -> None:
+    request = RecordingStartRequest(collection_id="pilot", participant_id="xfan0282")
+    assert request.data_tier == DataTier.TEST
+
+    with pytest.raises(ValueError, match="test 数据永久禁止"):
+        CaptureH5Writer(
+            tmp_path / "forbidden.h5",
+            request,
+            "forbidden",
+            1_000_000_000,
+            ImuSettings(),
+            taxonomy(),
+            training_eligible=True,
+        )
+    assert not (tmp_path / "forbidden.h5").exists()
+
+
+def test_formal_recording_start_is_frozen_before_first_packet(tmp_path: Path) -> None:
+    request = RecordingStartRequest(
+        collection_id="pilot", participant_id="xfan0282", data_tier="test"
+    )
+    path = tmp_path / "start.partial.h5"
+    writer = CaptureH5Writer(
+        path,
+        request,
+        "start",
+        1_000_000_000,
+        ImuSettings(),
+        taxonomy(),
+    )
+
+    writer.set_recording_start(2_000_000_000, "2026-08-25T15:00:00+00:00")
+
+    assert writer.recording_start_monotonic_ns == 2_000_000_000
+    assert int(writer.handle.attrs["recording_start_monotonic_ns"]) == 2_000_000_000
+    assert writer.handle.attrs["started_at_utc"] == "2026-08-25T15:00:00+00:00"
+    writer.abort_close()
+
+
+def test_legacy_schema_without_data_tier_remains_structurally_readable(
+    tmp_path: Path,
+) -> None:
+    path = build_capture(tmp_path)
+    with h5py.File(path, "r+") as handle:
+        handle.attrs["capture_schema_version"] = "1.0.0"
+        del handle.attrs["data_tier"]
+
+    report = validate_capture_h5(path, taxonomy())
+    assert report.ready, report.issues
+    assert report.metrics["data_tier"] == "legacy_unclassified"
+    assert report.metrics["training_eligible"] == "false"
 
 
 def test_invalid_annotation_does_not_replace_existing_revision(tmp_path: Path) -> None:

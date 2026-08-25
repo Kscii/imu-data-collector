@@ -16,13 +16,24 @@ import numpy as np
 from imu_data_collector.config import VideoSettings
 
 
-async def _run_capture(*args: str) -> tuple[int, str, str]:
+async def _run_capture(
+    *args: str, timeout_seconds: float = 10.0
+) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await process.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_seconds
+        )
+    except TimeoutError:
+        process.kill()
+        stdout, stderr = await process.communicate()
+        message = f"命令超过 {timeout_seconds:.0f} 秒未完成：{' '.join(args[:2])}"
+        stderr = stderr + message.encode()
+        return 124, stdout.decode(errors="replace"), stderr.decode(errors="replace")
     return process.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
@@ -56,37 +67,48 @@ async def discover_video_devices(
     settings: VideoSettings | None = None,
 ) -> list[dict[str, Any]]:
     profile = settings or VideoSettings()
-    output: list[dict[str, Any]] = []
-    for device in sorted(glob.glob("/dev/video*")):
-        code, capabilities, _ = await _run_capture("v4l2-ctl", "--all", "-d", device)
-        if code or "Video Capture" not in capabilities:
-            continue
-        code, formats, _ = await _run_capture(
-            "v4l2-ctl", "--list-formats-ext", "-d", device
+    devices = sorted(glob.glob("/dev/video*"))
+
+    async def inspect(device: str) -> dict[str, Any] | None:
+        code, properties, _ = await _run_capture(
+            "udevadm",
+            "info",
+            "--query=property",
+            f"--name={device}",
+            timeout_seconds=3.0,
         )
-        # metadata 节点常能出现在 --all 中，但没有实际像素格式。
-        if code or not re.search(r"\[\d+\]:", formats):
-            continue
-        _, properties, _ = await _run_capture(
-            "udevadm", "info", "--query=property", f"--name={device}"
-        )
+        if code:
+            return None
         props = dict(
             line.split("=", 1) for line in properties.splitlines() if "=" in line
         )
-        output.append(
-            {
-                "device": device,
-                "product": props.get("ID_V4L_PRODUCT", "Unknown camera"),
-                "serial": props.get("ID_SERIAL", ""),
-                "path": props.get("ID_PATH", ""),
-                "interface": props.get("ID_USB_INTERFACE_NUM", ""),
-                "camera_id": _stable_camera_id(props, device),
-                "formats": formats,
-                "supports_default_profile": _supports_profile(formats, profile),
-                "color_capture": "MJPG" in formats or "YUYV" in formats,
-            }
+        if ":capture:" not in props.get("ID_V4L_CAPABILITIES", ""):
+            return None
+        code, formats, _ = await _run_capture(
+            "v4l2-ctl",
+            "--list-formats-ext",
+            "-d",
+            device,
+            timeout_seconds=3.0,
         )
-    return output
+        # metadata 节点常能出现在 --all 中，但没有实际像素格式。
+        if code or not re.search(r"\[\d+\]:", formats):
+            return None
+        return {
+            "device": device,
+            "product": props.get("ID_V4L_PRODUCT", "Unknown camera"),
+            "serial": props.get("ID_SERIAL", ""),
+            "path": props.get("ID_PATH", ""),
+            "interface": props.get("ID_USB_INTERFACE_NUM", ""),
+            "integration": props.get("ID_INTEGRATION", ""),
+            "camera_id": _stable_camera_id(props, device),
+            "formats": formats,
+            "supports_default_profile": _supports_profile(formats, profile),
+            "color_capture": "MJPG" in formats or "YUYV" in formats,
+        }
+
+    inspected = await asyncio.gather(*(inspect(device) for device in devices))
+    return [item for item in inspected if item is not None]
 
 
 def select_video_device(
@@ -143,7 +165,9 @@ class VideoFrameTable:
 
 
 class FFmpegVideoRecorder:
-    def __init__(self, settings: VideoSettings, device: str, output_path: Path) -> None:
+    def __init__(
+        self, settings: VideoSettings, device: str, output_path: Path | None
+    ) -> None:
         self.settings = settings
         self.device = device
         self.output_path = output_path
@@ -211,6 +235,27 @@ class FFmpegVideoRecorder:
                 str(settings.requested_fps),
                 "-i",
                 self.device,
+            ]
+        )
+        if self.output_path is None:
+            command.extend(
+                [
+                    "-vf",
+                    f"fps={settings.preview_fps},scale={settings.preview_width}:-2",
+                    "-c:v",
+                    "mjpeg",
+                    "-q:v",
+                    "7",
+                    "-fps_mode",
+                    "vfr",
+                    "-f",
+                    "image2pipe",
+                    "pipe:1",
+                ]
+            )
+            return command
+        command.extend(
+            [
                 "-filter_complex",
                 split + record_filter + preview_filter,
                 *encoder,
@@ -222,8 +267,10 @@ class FFmpegVideoRecorder:
                 "12M",
                 "-g",
                 str(settings.requested_fps * 2),
+                "-bf",
+                "0",
                 "-fps_mode",
-                "passthrough",
+                "vfr",
                 "-cluster_time_limit",
                 "1000",
                 "-f",
@@ -243,7 +290,8 @@ class FFmpegVideoRecorder:
         return command
 
     async def start(self) -> None:
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.output_path is not None:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.started_monotonic_ns = __import__("time").monotonic_ns()
         self.process = await asyncio.create_subprocess_exec(
             *self.command(),
@@ -338,6 +386,7 @@ async def probe_video_frames(path: Path, recording_start_monotonic_ns: int) -> V
         "-of",
         "json",
         str(path),
+        timeout_seconds=120.0,
     )
     if code:
         raise RuntimeError(f"ffprobe failed: {stderr}")

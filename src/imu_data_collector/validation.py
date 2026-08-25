@@ -9,7 +9,11 @@ from typing import Any
 import h5py
 import numpy as np
 
-from imu_data_collector.constants import CAPTURE_SCHEMA_NAME, CAPTURE_SCHEMA_VERSION
+from imu_data_collector.constants import (
+    CAPTURE_SCHEMA_NAME,
+    CAPTURE_SCHEMA_VERSION,
+    SUPPORTED_CAPTURE_SCHEMA_VERSIONS,
+)
 from imu_data_collector.models import AnnotationDocument, BinaryLabel, EventKind
 
 
@@ -102,8 +106,20 @@ def validate_capture_h5(
     with handle:
         if handle.attrs.get("capture_schema_name") != CAPTURE_SCHEMA_NAME:
             issues.append("invalid capture_schema_name")
-        if handle.attrs.get("capture_schema_version") != CAPTURE_SCHEMA_VERSION:
-            issues.append("invalid capture_schema_version")
+        schema_version = str(handle.attrs.get("capture_schema_version", ""))
+        metrics["capture_schema_version"] = schema_version
+        if schema_version not in SUPPORTED_CAPTURE_SCHEMA_VERSIONS:
+            issues.append("unsupported capture_schema_version")
+        data_tier = str(handle.attrs.get("data_tier", "legacy_unclassified"))
+        training_eligible = bool(handle.attrs.get("training_eligible", False))
+        metrics["data_tier"] = data_tier
+        metrics["training_eligible"] = str(training_eligible).lower()
+        if schema_version == CAPTURE_SCHEMA_VERSION and "data_tier" not in handle.attrs:
+            issues.append("missing data_tier for current schema")
+        if data_tier not in {"test", "prod", "legacy_unclassified"}:
+            issues.append(f"invalid data_tier: {data_tier}")
+        if training_eligible and data_tier != "prod":
+            issues.append("only prod data may be marked training_eligible")
         required = (
             "imu/packets/payload_values",
             "imu/packets/payload_offsets",
@@ -138,6 +154,16 @@ def validate_capture_h5(
         packet_count = len(receive)
         sample_count = len(raw_counts)
         metrics.update(packet_count=packet_count, sample_count=sample_count)
+        callback_drops = int(handle["imu"].attrs.get("callback_drops", -1))
+        metrics["callback_drops"] = callback_drops
+        metrics["observed_rate_hz"] = float(
+            handle["imu"].attrs.get("observed_rate_hz", 0.0)
+        )
+        metrics["ffmpeg_diagnostic_count"] = int(
+            handle["video"].attrs.get("ffmpeg_diagnostic_count", 0)
+        )
+        if len(receive) > 1:
+            metrics["max_packet_gap_ms"] = float(np.diff(receive).max() / 1e6)
         if len(offsets) != packet_count + 1 or offsets[0] != 0:
             issues.append("packet payload offsets have invalid length or origin")
         elif np.any(np.diff(offsets) < 0) or offsets[-1] != len(payload_values):
@@ -148,6 +174,8 @@ def validate_capture_h5(
             issues.append("recording contains no IMU packets")
         if sample_count == 0:
             issues.append("recording contains no parsed IMU samples")
+        if callback_drops > 0:
+            issues.append(f"BLE callback dropped {callback_drops} notifications")
         sample_lengths = {
             sample_count,
             len(trailer),
@@ -183,11 +211,20 @@ def validate_capture_h5(
                     handle["video/frames/recording_time_ns"], dtype=np.int64
                 )
                 metrics["video_frame_count"] = len(video_pts)
+                pts_deltas = np.diff(video_pts)
+                metrics["video_nonpositive_pts_delta_count"] = int(
+                    np.count_nonzero(pts_deltas <= 0)
+                )
+                metrics["video_actual_span_fps"] = (
+                    float((len(video_pts) - 1) * 1e9 / (video_pts[-1] - video_pts[0]))
+                    if len(video_pts) > 1 and video_pts[-1] > video_pts[0]
+                    else 0.0
+                )
                 if not len(video_pts):
                     issues.append("recording contains no video frames")
                 if len(video_pts) != len(video_recording):
                     issues.append("video timestamp dataset length mismatch")
-                if len(video_pts) > 1 and np.any(np.diff(video_pts) <= 0):
+                if len(video_pts) > 1 and np.any(pts_deltas <= 0):
                     issues.append("video PTS are not strictly increasing")
                 mkv_path = Path(str(handle["video"].attrs.get("path", "")))
                 if not mkv_path.name:

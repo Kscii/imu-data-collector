@@ -25,7 +25,12 @@ from imu_data_collector.cw12eu import (
     parse_notification,
     reconstruct_sample_times,
 )
-from imu_data_collector.models import AnnotationDocument, RecordingStartRequest, SyncAnchor
+from imu_data_collector.models import (
+    AnnotationDocument,
+    DataTier,
+    RecordingStartRequest,
+    SyncAnchor,
+)
 from imu_data_collector.sync import SyncModel, fit_sync_model
 from imu_data_collector.validation import (
     read_annotation_document,
@@ -75,6 +80,8 @@ class CaptureH5Writer:
         self.imu_settings = imu_settings
         self.taxonomy = taxonomy
         self.recording_kind = recording_kind
+        if request.data_tier == DataTier.TEST and training_eligible:
+            raise ValueError("test 数据永久禁止标记为可训练")
         self.training_eligible = training_eligible
         self.video_status = video_status
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +100,7 @@ class CaptureH5Writer:
                 "recording_id": self.recording_id,
                 "collection_id": self.request.collection_id,
                 "participant_id": self.request.participant_id,
+                "data_tier": self.request.data_tier.value,
                 "body_location": self.request.body_location,
                 "protocol_id": self.request.protocol_id,
                 "started_at_utc": datetime.now(UTC).isoformat(),
@@ -237,6 +245,22 @@ class CaptureH5Writer:
         )
         handle.flush()
 
+    def set_recording_start(
+        self, recording_start_monotonic_ns: int, started_at_utc: str
+    ) -> None:
+        """在设备均已就绪、尚未写入通知时冻结正式采集起点。"""
+
+        if self.packet_count or self.sample_count:
+            raise RuntimeError("已有 IMU 数据后不能修改正式采集起点")
+        self.recording_start_monotonic_ns = recording_start_monotonic_ns
+        self.handle.attrs.update(
+            {
+                "recording_start_monotonic_ns": recording_start_monotonic_ns,
+                "started_at_utc": started_at_utc,
+            }
+        )
+        self.handle.flush()
+
     def append_experiment_stage(
         self,
         stage_code: str,
@@ -349,6 +373,7 @@ class CaptureH5Writer:
         width: int,
         height: int,
         requested_fps: float,
+        ffmpeg_diagnostics: list[str] | None = None,
     ) -> None:
         video = self.handle["video"]
         frames = video["frames"]
@@ -379,6 +404,10 @@ class CaptureH5Writer:
                 "requested_fps": requested_fps,
                 "actual_median_fps": actual_fps,
                 "frame_count": len(pts),
+                "ffmpeg_diagnostic_count": len(ffmpeg_diagnostics or []),
+                "ffmpeg_diagnostics_json": json.dumps(
+                    ffmpeg_diagnostics or [], ensure_ascii=False
+                ),
             }
         )
         self.handle.flush()
