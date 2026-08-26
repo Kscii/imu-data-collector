@@ -30,8 +30,12 @@ unassigned -> in_progress -> submitted -> accepted -> exported
 - `cw12eu_training_release_NNNN.tar`：把已导出的单录制 H5 汇总成不可变训练发布；manifest
   保存逐文件 SHA-256，SOFT3888 导入器安全校验后拼接为 `cw12eu.h5`。
 
-文件名不编码可变状态。状态来自 catalog 和 `review.json`。已经进入训练发布的录制不能逐条
-硬删除；未发布且未被当前会话占用的本地录制，只有输入完整 recording ID 才能永久删除。
+文件名不编码可变状态。状态来自 catalog 和 `review.json`。每个训练发布除了 TAR 内部 manifest，
+还写入对象存储侧车 `releases/<release_id>/manifest.json`，供删除门禁直接核对 recording ID。
+已经进入任何训练发布的录制不能逐条硬删除；若只发现没有侧车清单的旧 TAR，也保守拒绝删除。
+尚未发布的录制允许九名白名单成员永久删除，但必须二次输入 `DELETE <recording_id>`。删除范围
+包括原始 H5、MKV、MP4、manifest、review、导出、缓存和共享同步实验引用，不设置回收站或
+恢复副本。删除期间 catalog 先标记 `deleting`，并使用对象 generation 防止覆盖并发更新。
 
 标注页可以随时下载当前 `review.json` 快照。只有 `prod`、同步、标注、审核和物理校准全部
 通过后，页面才允许生成并下载 `aligned30.h5`；`test` 只能下载 review，永远不能生成训练
@@ -43,7 +47,8 @@ SOFT3888 的 `imu-data import-team --release ...` 显式校验和导入到
 
 IMU 使用外置同步决定映射到视频时间，取 IMU 与视频公共有效区间作为起点。第 `k` 行的概念
 时间严格为 `k/30 s`。数值由已校准 SI 样本按真实时间线性插值，不外推。区间边界使用首个
-不早于边界的网格点（ceil）；点事件取最近网格点，恰好半格时向后取整。
+不早于边界的网格点（ceil）；派生 onset 复用同一个 ceil 规则以保持等于 fall 起点，人工
+impact 取最近网格点，恰好半格时向后取整。
 
 本轮只生成 IMU 训练文件。未来视频帧对齐必须使用单独的 multimodal schema，使视频帧 `k`
 与 IMU 行 `k` 共用同一时间定义，不能修改当前 SOFT3888 v3 合同。

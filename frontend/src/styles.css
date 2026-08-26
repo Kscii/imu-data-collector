@@ -64,9 +64,12 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .time-readout { font-size: 22px; font-variant-numeric: tabular-nums; }
 .mark-buttons, .marks, .segment-form, .save-row { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
 .marks span { color: #a5b4c8; font: 12px ui-monospace, monospace; background: #0b1525; padding: 6px 8px; border-radius: 6px; }
-.segment-row { display: grid; grid-template-columns: 80px 90px 1fr 220px 60px; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid #24334c; font-size: 13px; }
+.segment-row { display: grid; grid-template-columns: 80px 80px minmax(120px, 1fr) 190px repeat(5, auto); align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid #24334c; font-size: 13px; }
 .save-row { margin-top: 16px; }
 .save-row span { color: #8294ad; font-size: 12px; }
+.danger-zone { margin-top: 18px; padding: 14px; border: 1px solid #7f1d1d; border-radius: 10px; background: #2a1118; }
+.danger-zone label { display: grid; gap: 7px; margin-top: 10px; }
+.danger-zone code { color: #fecaca; user-select: all; }
 .library { display: grid; gap: 10px; }
 .library article { display: grid; grid-template-columns: 1fr auto; gap: 8px; border-bottom: 1px solid #27364f; padding: 12px 0; }
 .library article > div:first-child { display: grid; gap: 4px; }

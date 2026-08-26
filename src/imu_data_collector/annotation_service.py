@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import shutil
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,7 +21,9 @@ from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     AnnotationDocument,
     AnnotationEvent,
+    BinaryLabel,
     CaptureManifestV2,
+    EventKind,
     ReviewDocument,
     ReviewPolicy,
     ReviewWorkflowRequest,
@@ -32,6 +37,8 @@ from imu_data_collector.sync import assess_conditional_fixed_offset
 from imu_data_collector.sync_experiment import read_frame_times, read_sync_window
 from imu_data_collector.validation import validate_annotations
 
+logger = logging.getLogger(__name__)
+
 
 class AnnotationService:
     def __init__(self, settings: Settings, store: ObjectStore) -> None:
@@ -43,6 +50,7 @@ class AnnotationService:
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.review_policy = ReviewPolicy(settings.annotation.review_policy)
         self.reviews = AnnotationReviewStore(store, self.taxonomy, self.review_policy)
+        self._release_delete_lock = threading.RLock()
 
     def refresh(self) -> dict[str, int]:
         imported = 0
@@ -205,16 +213,16 @@ class AnnotationService:
         self, recording_id: str, document: AnnotationDocument
     ) -> AnnotationDocument:
         manifest = self.required_manifest(recording_id)
+        h5_path = self.cached_h5(manifest)
+        enriched = self._canonicalize_and_enrich_events(h5_path, document)
         annotators = {
             item.annotator_id
-            for item in (*document.segments, *document.events, *document.exclusions)
+            for item in (*enriched.segments, *enriched.events, *enriched.exclusions)
         }
         if len(annotators) > 1:
             raise ValueError("一个 review.json 修订只能由一名标注者保存")
         for actor in annotators:
             self._require_allowed_actor(actor)
-        h5_path = self.cached_h5(manifest)
-        enriched = self._enrich_event_indices(h5_path, document)
         issues = validate_annotations(enriched, self.taxonomy, manifest.duration_ns)
         if issues:
             raise ValueError("；".join(issues))
@@ -246,7 +254,7 @@ class AnnotationService:
         return self.reviews.mutate(manifest, current.revision, update).annotations
 
     @staticmethod
-    def _enrich_event_indices(
+    def _canonicalize_and_enrich_events(
         path: Path, document: AnnotationDocument
     ) -> AnnotationDocument:
         with h5py.File(path, "r") as handle:
@@ -264,13 +272,31 @@ class AnnotationService:
             candidates = [item for item in (index - 1, index) if 0 <= item < len(values)]
             return min(candidates, key=lambda item: abs(int(values[item]) - target))
 
+        # onset 是跌倒区间起点的派生事实，前端不再单独标记。丢弃传入的
+        # onset 并依据每个 fall segment 重建，避免旧客户端制造矛盾状态。
+        canonical_events = [
+            event for event in document.events if event.kind != EventKind.ONSET
+        ]
+        canonical_events.extend(
+            AnnotationEvent(
+                segment_id=segment.segment_id,
+                kind=EventKind.ONSET,
+                time_ns=segment.start_ns,
+                annotator_id=segment.annotator_id,
+            )
+            for segment in document.segments
+            if segment.binary_label == BinaryLabel.FALL
+        )
+        canonical_events.sort(
+            key=lambda event: (event.time_ns, event.segment_id, event.kind.value)
+        )
         events = [
             AnnotationEvent(
                 **event.model_dump(exclude={"source_video_frame", "source_imu_sample"}),
                 source_video_frame=nearest(video, event.time_ns),
                 source_imu_sample=nearest(imu, event.time_ns),
             )
-            for event in document.events
+            for event in canonical_events
         ]
         return document.model_copy(update={"events": events})
 
@@ -499,28 +525,168 @@ class AnnotationService:
         return key
 
     def create_release(self) -> str:
-        files: list[tuple[str, str, Path]] = []
-        for manifest in self.catalog.list():
-            review, _generation = self.reviews.load(manifest)
-            if review.workflow.state != ReviewWorkflowState.EXPORTED:
+        with self._release_delete_lock:
+            files: list[tuple[str, str, Path]] = []
+            for manifest in self.catalog.list():
+                if manifest.data_tier.value != "prod":
+                    continue
+                review, _generation = self.reviews.load(manifest)
+                if review.workflow.state != ReviewWorkflowState.EXPORTED:
+                    continue
+                key = f"exports/{manifest.recording_id}/aligned30.h5"
+                path = self.cache_root / manifest.recording_id / "aligned30.h5"
+                self.store.download_file(key, path)
+                files.append((manifest.participant_id, manifest.recording_id, path))
+            if not files:
+                raise ValueError("没有可发布的 prod 导出")
+            release_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            path = self.cache_root / "releases" / f"cw12eu_{release_id}.tar"
+            create_training_release(files, path)
+            key = f"releases/{release_id}/{path.name}"
+            archive_sha256 = sha256_file(path)
+            self.store.put_file(
+                path,
+                key,
+                content_type="application/x-tar",
+                metadata={"sha256": archive_sha256, "release_id": release_id},
+            )
+            self.store.write_json(
+                f"releases/{release_id}/manifest.json",
+                {
+                    "schema_version": "1.0.0",
+                    "release_id": release_id,
+                    "archive_object_key": key,
+                    "archive_sha256": archive_sha256,
+                    "recordings": [
+                        {
+                            "participant_id": participant_id,
+                            "recording_id": recording_id,
+                            "aligned30_sha256": sha256_file(aligned_path),
+                        }
+                        for participant_id, recording_id, aligned_path in files
+                    ],
+                },
+                if_generation_match=0,
+            )
+            return key
+
+    def delete_recording(
+        self,
+        recording_id: str,
+        *,
+        actor_id: str,
+        confirmation: str,
+    ) -> dict[str, Any]:
+        """永久删除尚未进入训练发布的完整录制，不创建恢复副本。"""
+
+        self._require_allowed_actor(actor_id)
+        if confirmation != f"DELETE {recording_id}":
+            raise ValueError(f"二次确认必须完整输入 DELETE {recording_id}")
+        with self._release_delete_lock:
+            entry = self.catalog.get_for_deletion(recording_id)
+            if entry is None:
+                raise KeyError(recording_id)
+            manifest, deletion_state = entry
+            self._assert_recording_not_released(recording_id)
+            if deletion_state == "active":
+                self.catalog.mark_deleting(recording_id)
+
+            self._remove_sync_experiment_references(recording_id)
+            prefixes = (
+                f"captures/{recording_id}/",
+                f"reviews/{recording_id}/",
+                f"exports/{recording_id}/",
+            )
+            objects = {
+                info.key: info for prefix in prefixes for info in self.store.list(prefix)
+            }
+            deleted_objects = 0
+            for info in sorted(
+                objects.values(),
+                key=lambda item: (
+                    0 if item.key == f"captures/{recording_id}/manifest.json" else 1,
+                    item.key,
+                ),
+            ):
+                if self.store.delete(
+                    info.key,
+                    if_generation_match=info.generation,
+                ):
+                    deleted_objects += 1
+
+            cache_directory = (self.cache_root / recording_id).resolve()
+            if not cache_directory.is_relative_to(self.cache_root.resolve()):
+                raise ValueError("缓存目录越出配置的数据根目录")
+            if cache_directory.is_dir():
+                shutil.rmtree(cache_directory)
+            self.catalog.delete(recording_id)
+            logger.warning(
+                "永久删除标注录制 recording_id=%s actor_id=%s objects=%d",
+                recording_id,
+                actor_id,
+                deleted_objects,
+            )
+            return {
+                "recording_id": manifest.recording_id,
+                "deleted_objects": deleted_objects,
+                "deleted": True,
+            }
+
+    def _assert_recording_not_released(self, recording_id: str) -> None:
+        release_objects = self.store.list("releases/")
+        manifest_keys = {
+            item.key for item in release_objects if item.key.endswith("/manifest.json")
+        }
+        for key in sorted(manifest_keys):
+            payload, _generation = self.store.read_json(key)
+            released_ids = {
+                str(item.get("recording_id"))
+                for item in payload.get("recordings", [])
+                if isinstance(item, dict) and item.get("recording_id")
+            }
+            if recording_id in released_ids:
+                raise ValueError("该录制已经进入不可变训练发布，禁止永久删除")
+        for item in release_objects:
+            if not item.key.endswith(".tar"):
                 continue
-            key = f"exports/{manifest.recording_id}/aligned30.h5"
-            path = self.cache_root / manifest.recording_id / "aligned30.h5"
-            self.store.download_file(key, path)
-            files.append((manifest.participant_id, manifest.recording_id, path))
-        if not files:
-            raise ValueError("没有可发布的 prod 导出")
-        release_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = self.cache_root / "releases" / f"cw12eu_{release_id}.tar"
-        create_training_release(files, path)
-        key = f"releases/{release_id}/{path.name}"
-        self.store.put_file(
-            path,
-            key,
-            content_type="application/x-tar",
-            metadata={"sha256": sha256_file(path), "release_id": release_id},
-        )
-        return key
+            parent = item.key.rsplit("/", 1)[0]
+            if f"{parent}/manifest.json" not in manifest_keys:
+                raise ValueError(
+                    "存在缺少发布清单的旧训练 TAR，无法证明该录制未发布，拒绝删除"
+                )
+
+    def _remove_sync_experiment_references(self, recording_id: str) -> None:
+        for info in self.store.list("diagnostics/sync-experiments/"):
+            if not info.key.endswith(".json"):
+                continue
+            payload, generation = self.store.read_json(info.key)
+            document = SyncExperimentDocument.model_validate(payload)
+            observations = [
+                item
+                for item in document.observations
+                if item.recording_id != recording_id
+            ]
+            sources = [
+                item for item in document.sources if item.recording_id != recording_id
+            ]
+            if (
+                len(observations) == len(document.observations)
+                and len(sources) == len(document.sources)
+            ):
+                continue
+            updated = document.model_copy(
+                update={
+                    "revision": document.revision + 1,
+                    "updated_at_utc": datetime.now(UTC).isoformat(),
+                    "observations": observations,
+                    "sources": sources,
+                }
+            )
+            self.store.write_json(
+                info.key,
+                updated.model_dump(mode="json"),
+                if_generation_match=generation,
+            )
 
     def status(self, recording_id: str) -> dict[str, Any]:
         manifest = self.required_manifest(recording_id)

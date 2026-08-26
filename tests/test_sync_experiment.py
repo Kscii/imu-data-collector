@@ -100,6 +100,52 @@ def test_sync_candidate_prefers_first_clear_response_over_largest_peak(
     assert onset["event_robust_z"] > 4
 
 
+def test_sync_confidence_groups_ringing_from_one_physical_tap(tmp_path: Path) -> None:
+    h5_path = tmp_path / "capture.h5"
+    _write_capture(h5_path, "capture")
+
+    with h5py.File(h5_path, "r+") as handle:
+        raw = handle["imu/samples/raw_counts"]
+        raw[...] = 0
+        raw[48, 0] = 2500
+        raw[49, 0] = 0
+        raw[52, 0] = 5000
+        raw[53, 0] = 0
+
+    window = read_sync_window(h5_path, frame_index=60, radius_seconds=0.5)
+
+    assert window["recommendation"]["distinct_response_count"] == 1
+    assert window["recommendation"]["confidence"] == "high"
+    assert window["recommendation"]["score_margin_ratio"] is None
+    onset_candidates = [
+        item
+        for item in window["candidate_peaks"]
+        if item["selection_basis"] == "event_onset"
+    ]
+    assert len({item["response_cluster_id"] for item in onset_candidates}) == 1
+
+
+def test_sync_confidence_keeps_separate_physical_responses_competing(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "capture.h5"
+    _write_capture(h5_path, "capture")
+
+    with h5py.File(h5_path, "r+") as handle:
+        raw = handle["imu/samples/raw_counts"]
+        raw[...] = 0
+        raw[45, 0] = 5000
+        raw[46, 0] = 0
+        raw[55, 0] = 5000
+        raw[56, 0] = 0
+
+    window = read_sync_window(h5_path, frame_index=60, radius_seconds=0.7)
+
+    assert window["recommendation"]["distinct_response_count"] == 2
+    assert window["recommendation"]["confidence"] == "low"
+    assert "另一实体响应" in window["recommendation"]["reason"]
+
+
 def test_sync_experiment_is_atomic_and_enriches_exact_times(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     h5_path = tmp_path / "capture.h5"

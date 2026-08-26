@@ -24,11 +24,14 @@ gs://soft3888-label/
   diagnostics/sync-experiments/<experiment_id>.json
   exports/<recording_id>/aligned30.h5
   releases/<release_id>/*.tar
+  releases/<release_id>/manifest.json
 ```
 
 采集端先校验并上传三个制品，最后以 generation 前置条件写入 manifest。网络中断不会删除本地
 H5/MKV；再次发布会按大小和 SHA-256 幂等跳过一致对象，遇到同名不同内容则拒绝覆盖。
 `test` 可以发布用于功能验收和标注流程测试，但标注端永远拒绝把它导出到训练集。
+发布 TAR 上传成功后再写入同目录侧车 manifest，记录其中的 recording ID 与 H5 哈希。永久
+删除会先查询这些清单；已进入发布或遇到缺少侧车的旧 TAR 时一律拒绝删除。
 
 ## 服务部署
 
@@ -53,6 +56,29 @@ H5/MKV；再次发布会按大小和 SHA-256 幂等跳过一致对象，遇到�
 sudo systemctl status imu-annotation.service
 curl --fail http://127.0.0.1:8766/api/v1/health
 ```
+
+## 推荐的 GitHub Actions 边界
+
+当前继续使用 GCE VM + systemd + GCS。SQLite catalog、按需 H5 缓存和原子 release 都与这套
+运行模型匹配；在 catalog、缓存和并发协调完全外置前，不迁移到无状态且可能多实例的 Cloud
+Run。
+
+GitHub Actions 适合作为可审计的 CI/CD 编排，但生产部署不应由普通 push 自动触发：
+
+1. Pull request 只运行后端测试、Ruff、前端采集版与标注版双构建、SOFT3888 兼容性检查，
+   并上传带 commit SHA 的不可变发布包。
+2. 生产 job 只接受 `workflow_dispatch`，绑定受保护的 `production` environment；环境能力允许
+   时启用 required reviewer，并禁止触发者自行批准。
+3. GitHub 到 GCP 使用 OIDC + Workload Identity Federation 的短期身份，并把 provider 条件
+   限定到准确仓库、分支或 tag；不把服务账号 JSON key 放入 GitHub Secrets。
+4. 部署身份只获得上传 release、连接目标 VM 和执行受限部署入口所需的最小权限。VM SSH
+   后续启用 OS Login/IAP；部署脚本负责解包、锁文件安装、原子切换、健康检查和失败回滚。
+5. workflow 只处理程序制品，绝不下载、打包或上传 GCS 中的参与者 H5/MKV/视频数据。
+
+参考：[GitHub OIDC 到 GCP](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-google-cloud-platform)、
+[GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)、
+[Google auth action](https://github.com/google-github-actions/auth) 和
+[Compute Engine OS Login](https://cloud.google.com/compute/docs/oslogin)。
 
 ## 浏览器访问
 

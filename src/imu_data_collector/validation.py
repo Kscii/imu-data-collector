@@ -126,6 +126,10 @@ def validate_annotations(
         if segment.binary_label == BinaryLabel.FALL:
             if len(onset) > 1 or len(impact) > 1:
                 issues.append(f"fall segment {segment.segment_id} has duplicate onset/impact")
+            if len(onset) == 1 and onset[0] != segment.start_ns:
+                issues.append(
+                    f"fall segment {segment.segment_id} onset must equal segment start"
+                )
             if document.finalized and (len(onset) != 1 or len(impact) != 1):
                 issues.append(
                     f"finalized fall segment {segment.segment_id} requires onset and impact"

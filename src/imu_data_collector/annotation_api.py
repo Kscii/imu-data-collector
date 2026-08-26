@@ -15,13 +15,18 @@ from imu_data_collector.annotation_service import AnnotationService
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.models import (
     AnnotationDocument,
+    AnnotationRecordingDeleteRequest,
     ReviewWorkflowRequest,
     RevisionRequest,
     SyncDocument,
     SyncExperimentDocument,
 )
 from imu_data_collector.review import ReviewConflictError
-from imu_data_collector.storage import ObjectStore, create_object_store
+from imu_data_collector.storage import (
+    ObjectConflictError,
+    ObjectStore,
+    create_object_store,
+)
 
 
 def create_annotation_app(
@@ -229,7 +234,12 @@ def create_annotation_app(
 
     @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
     def aligned30_download(recording_id: str) -> StreamingResponse:
-        required(recording_id)
+        manifest = required(recording_id)
+        if manifest.data_tier.value != "prod":
+            raise HTTPException(
+                status_code=403,
+                detail="test 数据永久禁止下载训练 H5",
+            )
         key = f"exports/{recording_id}/aligned30.h5"
         info = object_store.stat(key)
         if info is None:
@@ -253,6 +263,27 @@ def create_annotation_app(
                 "Cache-Control": "private, no-store",
             },
         )
+
+    @app.delete("/api/v1/recordings/{recording_id}")
+    def delete_recording(
+        recording_id: str,
+        request: AnnotationRecordingDeleteRequest,
+    ) -> dict[str, Any]:
+        try:
+            return service.delete_recording(
+                recording_id,
+                actor_id=request.actor_id,
+                confirmation=request.confirmation,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该录制") from error
+        except ObjectConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="删除期间对象被其他操作更新，请使用同一录制编号重试",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.post("/api/v1/training-releases")
     def release() -> dict[str, str]:

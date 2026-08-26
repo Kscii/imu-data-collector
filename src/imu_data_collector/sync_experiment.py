@@ -23,7 +23,8 @@ from imu_data_collector.models import (
 
 SYNC_EXPERIMENT_SCHEMA_VERSION = "1.0.0"
 ONE_VIDEO_FRAME_NS = 1e9 / 30.0
-PEAK_RECOMMENDATION_ALGORITHM = "tap_onset_v2"
+PEAK_RECOMMENDATION_ALGORITHM = "tap_onset_v3_clustered"
+RESPONSE_CLUSTER_WINDOW_NS = 200_000_000
 
 
 def sync_experiment_path(data_root: Path, experiment_id: str) -> Path:
@@ -242,6 +243,10 @@ def _candidate_peak_details(
             "reason": "窗口内没有可辨认的轻拍响应",
             "expected_video_minus_imu_ns": expected_video_minus_imu_ns,
             "score_margin_ratio": None,
+            "event_robust_z": None,
+            "timing_residual_ms": None,
+            "distinct_response_count": 0,
+            "response_cluster_window_ms": RESPONSE_CLUSTER_WINDOW_NS / 1e6,
         }
 
     # 正式同步的共同语义是“视频首接触帧 ↔ IMU 首个明显响应”，不是最大峰。
@@ -330,35 +335,72 @@ def _candidate_peak_details(
     onset_details = [
         item for item in details if item["selection_basis"] == "event_onset"
     ]
+    # 同一次实体轻拍可能产生多个相邻局部峰，且每个峰都可能回溯出不同的
+    # “首响应”。它们不能互相作为竞争候选，否则一个肉眼和时间上都正确的
+    # 选择会仅因同一次振铃被错误降为低置信度。
+    response_candidates = sorted(onset_details or details, key=lambda item: item["time_ns"])
+    response_clusters: list[list[dict[str, Any]]] = []
+    for item in response_candidates:
+        if (
+            not response_clusters
+            or int(item["time_ns"]) - int(response_clusters[-1][-1]["time_ns"])
+            > RESPONSE_CLUSTER_WINDOW_NS
+        ):
+            response_clusters.append([item])
+        else:
+            response_clusters[-1].append(item)
+
+    cluster_representatives: list[dict[str, Any]] = []
+    for cluster_id, cluster in enumerate(response_clusters, start=1):
+        representative = min(cluster, key=lambda item: item["time_ns"])
+        cluster_score = max(float(item["recommendation_score"]) for item in cluster)
+        cluster_robust_z = max(float(item["event_robust_z"]) for item in cluster)
+        for item in cluster:
+            item["response_cluster_id"] = cluster_id
+            item["response_cluster_size"] = len(cluster)
+        representative["response_cluster_score"] = cluster_score
+        representative["response_cluster_robust_z"] = cluster_robust_z
+        cluster_representatives.append(representative)
+
     ranked = sorted(
-        onset_details or details,
-        key=lambda item: (item["recommendation_score"], item["accel_delta_score"]),
+        cluster_representatives,
+        key=lambda item: (
+            item["response_cluster_score"],
+            item["response_cluster_robust_z"],
+        ),
         reverse=True,
     )
     for rank, item in enumerate(ranked, start=1):
         item["recommendation_rank"] = rank
     chosen = ranked[0]
-    second_score = float(ranked[1]["recommendation_score"]) if len(ranked) > 1 else 0.0
+    second_score = float(ranked[1]["response_cluster_score"]) if len(ranked) > 1 else 0.0
     margin_ratio = (
-        float(chosen["recommendation_score"]) / second_score
+        float(chosen["response_cluster_score"]) / second_score
         if second_score > 0
         else None
     )
     residual_limit_high = 120.0 if expected_video_minus_imu_ns is not None else 250.0
     residual_limit_medium = 200.0 if expected_video_minus_imu_ns is not None else 400.0
     residual_ms = abs(float(chosen["expected_offset_residual_ms"]))
-    robust_z = float(chosen["event_robust_z"])
+    robust_z = float(chosen["response_cluster_robust_z"])
     unambiguous_high = margin_ratio is None or margin_ratio >= 1.5
     unambiguous_medium = margin_ratio is None or margin_ratio >= 1.2
     if robust_z >= 8 and unambiguous_high and residual_ms <= residual_limit_high:
         confidence = "high"
-        reason = "首个响应显著、候选区分清楚且符合当前时间模型"
+        reason = "独立响应显著、与其他实体响应区分清楚且符合当前时间模型"
     elif robust_z >= 4 and unambiguous_medium and residual_ms <= residual_limit_medium:
         confidence = "medium"
-        reason = "存在可用首响应，但显著性、候选间隔或时间位置需要人工复核"
+        reason = "存在可用首响应，但显著性、独立响应间隔或时间位置需要人工复核"
     else:
         confidence = "low"
-        reason = "峰值偏弱、候选接近或时间位置偏离预期，必须人工选择"
+        failed: list[str] = []
+        if robust_z < 4:
+            failed.append("响应显著性不足")
+        if not unambiguous_medium:
+            failed.append("存在分数接近的另一实体响应")
+        if residual_ms > residual_limit_medium:
+            failed.append("时间残差偏大")
+        reason = "、".join(failed or ["候选证据不足"]) + "，必须人工选择"
     details.sort(key=lambda item: item["time_ns"])
     return details, {
         "algorithm": PEAK_RECOMMENDATION_ALGORITHM,
@@ -367,6 +409,10 @@ def _candidate_peak_details(
         "reason": reason,
         "expected_video_minus_imu_ns": expected_video_minus_imu_ns,
         "score_margin_ratio": margin_ratio,
+        "event_robust_z": robust_z,
+        "timing_residual_ms": residual_ms,
+        "distinct_response_count": len(response_clusters),
+        "response_cluster_window_ms": RESPONSE_CLUSTER_WINDOW_NS / 1e6,
     }
 
 

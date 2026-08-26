@@ -33,8 +33,10 @@ from imu_data_collector.maintenance import (
 from imu_data_collector.models import (
     AnnotationDocument,
     AnnotationEvent,
+    BinaryLabel,
     CharacterizationStageRequest,
     CharacterizationStartRequest,
+    EventKind,
     PreviewStartRequest,
     RecordingStartRequest,
     RecordingState,
@@ -839,16 +841,16 @@ class RecordingCoordinator:
         self, recording_id: str, document: AnnotationDocument
     ) -> AnnotationDocument:
         summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        enriched = self._canonicalize_and_enrich_events(h5_path, document)
         annotators = {
             item.annotator_id
-            for item in (*document.segments, *document.events, *document.exclusions)
+            for item in (*enriched.segments, *enriched.events, *enriched.exclusions)
         }
         for annotator in annotators:
             self._require_allowed_unikey(annotator, "annotator_id")
         if len(annotators) > 1:
             raise ValueError("一个 review.json 修订只能由一名标注者保存")
-        h5_path, mkv_path = self._recording_paths(summary)
-        enriched = self._enrich_event_indices(h5_path, document)
         annotation_issues = validate_annotations(
             enriched, self.taxonomy, summary.duration_ns
         )
@@ -895,7 +897,7 @@ class RecordingCoordinator:
         self.catalog.enqueue_upload(recording_id, saved.revision)
         return saved.annotations
 
-    def _enrich_event_indices(
+    def _canonicalize_and_enrich_events(
         self, path: Path, document: AnnotationDocument
     ) -> AnnotationDocument:
         with h5py.File(path, "r") as handle:
@@ -916,13 +918,29 @@ class RecordingCoordinator:
             candidates = [item for item in (index - 1, index) if 0 <= item < len(values)]
             return min(candidates, key=lambda item: abs(int(values[item]) - target))
 
+        canonical_events = [
+            event for event in document.events if event.kind != EventKind.ONSET
+        ]
+        canonical_events.extend(
+            AnnotationEvent(
+                segment_id=segment.segment_id,
+                kind=EventKind.ONSET,
+                time_ns=segment.start_ns,
+                annotator_id=segment.annotator_id,
+            )
+            for segment in document.segments
+            if segment.binary_label == BinaryLabel.FALL
+        )
+        canonical_events.sort(
+            key=lambda event: (event.time_ns, event.segment_id, event.kind.value)
+        )
         events = [
             AnnotationEvent(
                 **event.model_dump(exclude={"source_video_frame", "source_imu_sample"}),
                 source_video_frame=nearest(video_times, event.time_ns),
                 source_imu_sample=nearest(imu_times, event.time_ns),
             )
-            for event in document.events
+            for event in canonical_events
         ]
         return document.model_copy(update={"events": events})
 

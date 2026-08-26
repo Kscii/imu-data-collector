@@ -15,7 +15,9 @@ from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
     AnnotationDocument,
+    AnnotationEvent,
     BinaryLabel,
+    EventKind,
     ReviewDocument,
     ReviewWorkflow,
     ReviewWorkflowState,
@@ -87,11 +89,41 @@ def main() -> None:
                     ActivitySegment(
                         segment_id="seg_001",
                         start_ns=0,
+                        end_ns=410_000_000,
+                        binary_label=BinaryLabel.NON_FALL,
+                        activity_code="walking",
+                        annotator_id="xfan0282",
+                    ),
+                    ActivitySegment(
+                        segment_id="seg_002",
+                        start_ns=410_000_000,
+                        end_ns=1_500_000_000,
+                        binary_label=BinaryLabel.FALL,
+                        activity_code="forward_fall",
+                        annotator_id="xfan0282",
+                    ),
+                    ActivitySegment(
+                        segment_id="seg_003",
+                        start_ns=1_500_000_000,
                         end_ns=2_000_000_000,
                         binary_label=BinaryLabel.NON_FALL,
                         activity_code="walking",
                         annotator_id="xfan0282",
                     )
+                ],
+                events=[
+                    AnnotationEvent(
+                        segment_id="seg_002",
+                        kind=EventKind.ONSET,
+                        time_ns=410_000_000,
+                        annotator_id="xfan0282",
+                    ),
+                    AnnotationEvent(
+                        segment_id="seg_002",
+                        kind=EventKind.IMPACT,
+                        time_ns=1_000_000_000,
+                        annotator_id="xfan0282",
+                    ),
                 ],
             ),
             workflow=ReviewWorkflow(
@@ -109,7 +141,26 @@ def main() -> None:
             taxonomy,
         )
         recordings = list(iter_aligned_recording_file(aligned))
-        if len(recordings) != 1 or recordings[0].supervision_kind != "temporal":
+        recording = recordings[0] if len(recordings) == 1 else None
+        onset = next(
+            (item for item in recording.annotations if item.kind == "onset"),
+            None,
+        ) if recording else None
+        fall_activity = next(
+            (
+                item
+                for item in recording.annotations
+                if item.kind == "activity" and item.code == "forward_fall"
+            ),
+            None,
+        ) if recording else None
+        if (
+            recording is None
+            or recording.supervision_kind != "temporal"
+            or onset is None
+            or fall_activity is None
+            or onset.start_sample != fall_activity.start_sample
+        ):
             raise RuntimeError("SOFT3888 没有按 temporal v3 读取合成产物")
         print(
             f"兼容性通过：{recordings[0].recording_id}，"

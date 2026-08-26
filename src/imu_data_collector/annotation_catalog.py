@@ -24,12 +24,22 @@ class AnnotationCatalog:
                     data_tier TEXT NOT NULL,
                     captured_at_utc TEXT NOT NULL,
                     manifest_generation INTEGER NOT NULL,
-                    manifest_json TEXT NOT NULL
+                    manifest_json TEXT NOT NULL,
+                    deletion_state TEXT NOT NULL DEFAULT 'active'
                 );
                 CREATE INDEX IF NOT EXISTS annotation_recordings_time_idx
                     ON recordings(captured_at_utc DESC);
                 """
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(recordings)").fetchall()
+            }
+            if "deletion_state" not in columns:
+                connection.execute(
+                    "ALTER TABLE recordings ADD COLUMN deletion_state "
+                    "TEXT NOT NULL DEFAULT 'active'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -63,14 +73,46 @@ class AnnotationCatalog:
     def get(self, recording_id: str) -> CaptureManifestV2 | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT manifest_json FROM recordings WHERE recording_id = ?",
+                "SELECT manifest_json FROM recordings "
+                "WHERE recording_id = ? AND deletion_state = 'active'",
                 (recording_id,),
             ).fetchone()
         return CaptureManifestV2.model_validate_json(row[0]) if row else None
 
+    def get_for_deletion(
+        self, recording_id: str
+    ) -> tuple[CaptureManifestV2, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT manifest_json, deletion_state FROM recordings "
+                "WHERE recording_id = ?",
+                (recording_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return CaptureManifestV2.model_validate_json(row[0]), str(row[1])
+
+    def mark_deleting(self, recording_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE recordings SET deletion_state = 'deleting' "
+                "WHERE recording_id = ?",
+                (recording_id,),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(recording_id)
+
+    def delete(self, recording_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM recordings WHERE recording_id = ?",
+                (recording_id,),
+            )
+
     def list(self) -> list[CaptureManifestV2]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT manifest_json FROM recordings ORDER BY captured_at_utc DESC"
+                "SELECT manifest_json FROM recordings WHERE deletion_state = 'active' "
+                "ORDER BY captured_at_utc DESC"
             ).fetchall()
         return [CaptureManifestV2.model_validate_json(row[0]) for row in rows]

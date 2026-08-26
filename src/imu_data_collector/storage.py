@@ -56,6 +56,8 @@ class ObjectStore(Protocol):
 
     def list(self, prefix: str) -> list[ObjectInfo]: ...
 
+    def delete(self, key: str, *, if_generation_match: int | None) -> bool: ...
+
 
 def _safe_key(key: str) -> Path:
     pure = PurePosixPath(key)
@@ -187,6 +189,17 @@ class LocalFilesystemStore:
             if path.is_file()
         ]
 
+    def delete(self, key: str, *, if_generation_match: int | None) -> bool:
+        path = self.resolve(key)
+        if not path.is_file():
+            return False
+        current = path.stat().st_mtime_ns
+        if if_generation_match is not None and current != if_generation_match:
+            raise ObjectConflictError("对象 generation 已更新")
+        path.unlink()
+        self._metadata_path(key).unlink(missing_ok=True)
+        return True
+
     def _info(self, key: str, path: Path) -> ObjectInfo:
         stat = path.stat()
         metadata_path = self._metadata_path(key)
@@ -307,6 +320,19 @@ class GcsObjectStore:
 
     def list(self, prefix: str) -> list[ObjectInfo]:
         return [self._info(blob) for blob in self.client.list_blobs(self.bucket, prefix=prefix)]
+
+    def delete(self, key: str, *, if_generation_match: int | None) -> bool:
+        _safe_key(key)
+        try:
+            self.bucket.blob(key).delete(
+                if_generation_match=if_generation_match,
+                timeout=120,
+            )
+        except NotFound:
+            return False
+        except PreconditionFailed as error:
+            raise ObjectConflictError("对象 generation 已更新") from error
+        return True
 
 
 def create_object_store(

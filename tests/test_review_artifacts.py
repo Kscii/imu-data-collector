@@ -7,7 +7,9 @@ import h5py
 import numpy as np
 import pytest
 
+from imu_data_collector.annotation_service import AnnotationService
 from imu_data_collector.artifacts import (
+    _annotation_rows,
     create_capture_package,
     create_training_release,
     export_aligned30,
@@ -18,7 +20,9 @@ from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
     AnnotationDocument,
+    AnnotationEvent,
     BinaryLabel,
+    EventKind,
     RecordingState,
     RecordingSummary,
     ReviewDocument,
@@ -34,6 +38,7 @@ from imu_data_collector.review import (
     load_review,
     mutate_review,
 )
+from imu_data_collector.validation import validate_annotations
 
 
 def taxonomy() -> dict:
@@ -215,6 +220,152 @@ def test_aligned30_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path
         annotation = handle["annotations"][0]
         assert annotation["kind"].decode() == "activity"
         assert (annotation["start_sample"], annotation["stop_sample"]) == (0, 59)
+
+
+def test_fall_onset_is_derived_from_segment_start_and_impact_is_preserved(
+    tmp_path: Path,
+) -> None:
+    h5_path, _mkv_path = write_source_pair(tmp_path)
+    document = AnnotationDocument(
+        taxonomy_id="fall_binary_v1",
+        taxonomy_version="1.0.0",
+        segments=[
+            ActivitySegment(
+                segment_id="seg_001",
+                start_ns=400_000_000,
+                end_ns=1_600_000_000,
+                binary_label=BinaryLabel.FALL,
+                activity_code="forward_fall",
+                annotator_id="xfan0282",
+            )
+        ],
+        events=[
+            AnnotationEvent(
+                segment_id="seg_001",
+                kind=EventKind.ONSET,
+                time_ns=600_000_000,
+                annotator_id="xfan0282",
+            ),
+            AnnotationEvent(
+                segment_id="seg_001",
+                kind=EventKind.IMPACT,
+                time_ns=1_200_000_000,
+                annotator_id="xfan0282",
+            ),
+        ],
+    )
+
+    enriched = AnnotationService._canonicalize_and_enrich_events(h5_path, document)
+
+    onset = next(item for item in enriched.events if item.kind == EventKind.ONSET)
+    impact = next(item for item in enriched.events if item.kind == EventKind.IMPACT)
+    assert onset.time_ns == 400_000_000
+    assert onset.source_video_frame is not None
+    assert onset.source_imu_sample is not None
+    assert impact.time_ns == 1_200_000_000
+
+
+def test_each_fall_segment_requires_its_own_impact_when_finalized() -> None:
+    segments = [
+        ActivitySegment(
+            segment_id=f"seg_{index:03d}",
+            start_ns=start,
+            end_ns=end,
+            binary_label=BinaryLabel.FALL,
+            activity_code="forward_fall",
+            annotator_id="xfan0282",
+        )
+        for index, (start, end) in enumerate(
+            ((0, 1_000_000_000), (1_000_000_000, 2_000_000_000)),
+            start=1,
+        )
+    ]
+    events = [
+        AnnotationEvent(
+            segment_id=segment.segment_id,
+            kind=kind,
+            time_ns=(
+                segment.start_ns
+                if kind == EventKind.ONSET
+                else segment.start_ns + 500_000_000
+            ),
+            annotator_id="xfan0282",
+        )
+        for segment in segments
+        for kind in (EventKind.ONSET, EventKind.IMPACT)
+    ]
+    document = AnnotationDocument(
+        taxonomy_id="fall_binary_v1",
+        taxonomy_version="1.0.0",
+        finalized=True,
+        segments=segments,
+        events=events,
+    )
+
+    assert validate_annotations(document, taxonomy(), 2_000_000_000) == []
+    missing_second_impact = document.model_copy(
+        update={
+            "events": [
+                event
+                for event in document.events
+                if not (
+                    event.segment_id == "seg_002" and event.kind == EventKind.IMPACT
+                )
+            ]
+        }
+    )
+    assert any(
+        "seg_002 requires onset and impact" in issue
+        for issue in validate_annotations(
+            missing_second_impact,
+            taxonomy(),
+            2_000_000_000,
+        )
+    )
+
+
+def test_aligned_grid_keeps_derived_onset_equal_to_fall_activity_start(
+    tmp_path: Path,
+) -> None:
+    annotations = AnnotationDocument(
+        taxonomy_id="fall_binary_v1",
+        taxonomy_version="1.0.0",
+        segments=[
+            ActivitySegment(
+                segment_id="seg_001",
+                start_ns=410_000_000,
+                end_ns=1_500_000_000,
+                binary_label=BinaryLabel.FALL,
+                activity_code="forward_fall",
+                annotator_id="xfan0282",
+            )
+        ],
+        events=[
+            AnnotationEvent(
+                segment_id="seg_001",
+                kind=EventKind.ONSET,
+                time_ns=410_000_000,
+                annotator_id="xfan0282",
+            ),
+            AnnotationEvent(
+                segment_id="seg_001",
+                kind=EventKind.IMPACT,
+                time_ns=1_000_000_000,
+                annotator_id="xfan0282",
+            ),
+        ],
+    )
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    review = accepted_review(h5_path, mkv_path).model_copy(
+        update={"annotations": annotations}
+    )
+
+    rows = _annotation_rows(review, grid_origin_ns=0, sample_count=100)
+    activity = next(row for row in rows if row["kind"] == "activity")
+    onset = next(row for row in rows if row["kind"] == "onset")
+
+    assert int(activity["start_sample"]) == 13
+    assert int(onset["start_sample"]) == int(activity["start_sample"])
 
 
 def test_aligned30_export_is_blocked_without_verified_calibration(tmp_path: Path) -> None:

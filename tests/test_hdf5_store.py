@@ -141,7 +141,7 @@ def finalized_annotation() -> AnnotationDocument:
             AnnotationEvent(
                 segment_id="fall-1",
                 kind=EventKind.ONSET,
-                time_ns=100_000_000,
+                time_ns=80_000_000,
                 annotator_id="xfan0282",
             ),
             AnnotationEvent(

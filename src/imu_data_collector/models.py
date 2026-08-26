@@ -267,6 +267,17 @@ class RecordingDeleteRequest(BaseModel):
     confirmation: str
 
 
+class AnnotationRecordingDeleteRequest(BaseModel):
+    actor_id: str
+    confirmation: str
+
+    @model_validator(mode="after")
+    def validate_actor(self) -> AnnotationRecordingDeleteRequest:
+        if not UNIKEY_RE.fullmatch(self.actor_id):
+            raise ValueError("actor_id must be a lowercase UniKey-like identifier")
+        return self
+
+
 class RevisionRequest(BaseModel):
     expected_revision: int = Field(ge=0)
 

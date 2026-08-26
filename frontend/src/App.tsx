@@ -174,7 +174,9 @@ type SyncWindow = {
     event_robust_z: number;
     strength_rank: number;
     recommendation_score: number;
-    recommendation_rank: number;
+    recommendation_rank?: number;
+    response_cluster_id?: number;
+    response_cluster_size?: number;
     selection_basis: "event_onset" | "local_peak" | "timing_projection";
   }[];
   recommendation: {
@@ -184,6 +186,10 @@ type SyncWindow = {
     reason: string;
     expected_video_minus_imu_ns: number | null;
     score_margin_ratio: number | null;
+    event_robust_z: number | null;
+    timing_residual_ms: number | null;
+    distinct_response_count: number;
+    response_cluster_window_ms: number;
   };
 };
 
@@ -370,8 +376,16 @@ export default function App() {
   const liveRef = useRef<{ t: number[]; values: number[][] }>({ t: [], values: [] });
   const [, redraw] = useState(0);
 
-  const refreshRecordings = () =>
-    api<Recording[]>("/api/v1/recordings").then(setRecordings).catch((e) => setCaptureError(e.message));
+  const refreshRecordings = async () => {
+    try {
+      const value = await api<Recording[]>("/api/v1/recordings");
+      setRecordings(value);
+      return value;
+    } catch (e) {
+      setCaptureError((e as Error).message);
+      return [];
+    }
+  };
   const refreshCameras = () =>
     api<{ cameras: Camera[] }>("/api/v1/devices").then((value) => {
       setCameras(value.cameras);
@@ -546,7 +560,7 @@ export default function App() {
         />
       )}
       {annotationApplication && taxonomy && (
-        <AnnotationPage recordings={recordings} taxonomy={taxonomy} allowedUnikeys={config?.allowed_unikeys ?? []} />
+        <AnnotationPage recordings={recordings} taxonomy={taxonomy} allowedUnikeys={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
       {!annotationApplication && tab === "library" && <CaptureLibrary recordings={recordings} onChanged={refreshRecordings} />}
     </div>
@@ -661,7 +675,7 @@ function Metric({ label, value, warn = false }: { label: string; value: string |
   return <div className={`metric ${warn ? "warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: Recording[]; taxonomy: Taxonomy; allowedUnikeys: string[] }) {
+function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; allowedUnikeys: string[]; onChanged: () => Promise<Recording[]> }) {
   const [selected, setSelected] = useState("");
   const [doc, setDoc] = useState<AnnotationDocument | null>(null);
   const [timeline, setTimeline] = useState<{ time_s: number[]; values: number[][]; unit: string } | null>(null);
@@ -676,7 +690,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
   const [annotationKind, setAnnotationKind] = useState<"fall" | "non_fall" | "exclude">("non_fall");
   const [activity, setActivity] = useState(taxonomy.non_fall[0].code);
   const [exclusionReason, setExclusionReason] = useState<Exclusion["reason"]>("other");
-  const [marks, setMarks] = useState<{ start?: number; end?: number; onset?: number; impact?: number }>({});
+  const [marks, setMarks] = useState<{ start?: number; end?: number; impact?: number }>({});
   const [currentTime, setCurrentTime] = useState(0);
   const [annotator, setAnnotator] = useState("xfan0282");
   const [sync, setSync] = useState<SyncState | null>(null);
@@ -684,6 +698,9 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
   const [syncRole, setSyncRole] = useState<"start_tap" | "end_tap">("start_tap");
   const [review, setReview] = useState<ReviewDocument | null>(null);
   const [status, setStatus] = useState<RecordingStatus | null>(null);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [error, setError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
 
@@ -717,6 +734,8 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
       setExperimentWindow(null);
       setExperimentImuSample(null);
       setRecommendationOffsetSource("none");
+      setDeleteArmed(false);
+      setDeleteConfirmation("");
       const count = experimentDocument.observations.filter((item) => item.recording_id === selected).length;
       setExperimentLabel(`tap_${String(count + 1).padStart(2, "0")}`);
       const participant = recordings.find((item) => item.recording_id === selected)?.participant_id;
@@ -873,12 +892,61 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
     setExperimentImuSample(null);
   };
 
-  const mark = (name: "start" | "end" | "onset" | "impact") => {
+  const mark = (name: "start" | "end" | "impact") => {
     setMarks((existing) => ({ ...existing, [name]: Math.round(currentTime * 1e9) }));
+  };
+
+  const jumpToRecordingTime = (timeNs: number) => {
+    if (!frameTimes || !video.current) return;
+    const frame = nearestIndex(frameTimes.time_ns, timeNs);
+    video.current.pause();
+    video.current.currentTime = frameTimes.media_time_ns[frame] / 1e9;
+    setCurrentFrame(frame);
+    setCurrentTime(frameTimes.time_ns[frame] / 1e9);
+  };
+
+  const setSegmentImpact = (segment: Segment) => {
+    if (!doc) return;
+    const timeNs = Math.round(currentTime * 1e9);
+    if (timeNs <= segment.start_ns || timeNs >= segment.end_ns) {
+      setError("撞击时刻必须严格位于该跌倒区间内");
+      return;
+    }
+    const retained = doc.events.filter(
+      (event) => !(event.segment_id === segment.segment_id && event.kind === "impact")
+    );
+    setDoc({
+      ...doc,
+      finalized: false,
+      events: [
+        ...retained,
+        {
+          segment_id: segment.segment_id,
+          kind: "impact" as const,
+          time_ns: timeNs,
+          source_video_frame: null,
+          source_imu_sample: null,
+          annotator_id: annotator
+        }
+      ].sort((a, b) => a.time_ns - b.time_ns)
+    });
+    setError("");
   };
 
   const addAnnotationInterval = () => {
     if (!doc || marks.start === undefined || marks.end === undefined) return;
+    if (marks.end <= marks.start) {
+      setError("区间结束必须晚于区间开始");
+      return;
+    }
+    if (
+      annotationKind === "fall"
+      && marks.impact !== undefined
+      && (marks.impact <= marks.start || marks.impact >= marks.end)
+    ) {
+      setError("撞击时刻必须严格位于该跌倒区间内");
+      return;
+    }
     if (annotationKind === "exclude") {
       let ordinal = doc.exclusions.length + 1;
       const existing = new Set(doc.exclusions.map((item) => item.exclusion_id));
@@ -913,11 +981,11 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
       notes: ""
     };
     const events = [...doc.events];
-    if (annotationKind === "fall" && marks.onset !== undefined && marks.impact !== undefined) {
-      events.push(
-        { segment_id: segmentId, kind: "onset", time_ns: marks.onset, source_video_frame: null, source_imu_sample: null, annotator_id: annotator },
-        { segment_id: segmentId, kind: "impact", time_ns: marks.impact, source_video_frame: null, source_imu_sample: null, annotator_id: annotator }
-      );
+    if (annotationKind === "fall") {
+      events.push({ segment_id: segmentId, kind: "onset", time_ns: marks.start, source_video_frame: null, source_imu_sample: null, annotator_id: annotator });
+      if (marks.impact !== undefined) {
+        events.push({ segment_id: segmentId, kind: "impact", time_ns: marks.impact, source_video_frame: null, source_imu_sample: null, annotator_id: annotator });
+      }
     }
     setDoc({ ...doc, segments: [...doc.segments, segment].sort((a, b) => a.start_ns - b.start_ns), events });
     setMarks({});
@@ -977,6 +1045,29 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
     } catch (e) {
       setError((e as Error).message);
+    }
+  };
+
+  const permanentlyDeleteRecording = async () => {
+    if (!selected || deleteConfirmation !== `DELETE ${selected}`) return;
+    setDeleteBusy(true);
+    setError("");
+    try {
+      await api(`/api/v1/recordings/${selected}`, {
+        method: "DELETE",
+        body: JSON.stringify({ actor_id: annotator, confirmation: deleteConfirmation })
+      });
+      const refreshed = await onChanged();
+      setSelected(refreshed[0]?.recording_id ?? "");
+      setDoc(null);
+      setReview(null);
+      setTimeline(null);
+      setDeleteArmed(false);
+      setDeleteConfirmation("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -1077,6 +1168,10 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
   }
   if (durationNs > coverageEnd) coverageGaps.push({ start: coverageEnd, end: durationNs });
   const uncoveredNs = coverageGaps.reduce((total, item) => total + item.end - item.start, 0);
+  const fallWithoutImpactCount = doc?.segments.filter(
+    (segment) => segment.binary_label === "fall"
+      && !doc.events.some((event) => event.segment_id === segment.segment_id && event.kind === "impact")
+  ).length ?? 0;
   const hasFormalAnchors = sync?.anchors.some((item) => item.role === "start_tap")
     && sync.anchors.some((item) => item.role === "end_tap");
 
@@ -1102,7 +1197,6 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
                 if (event.key === "ArrowRight" || event.key === ".") { event.preventDefault(); stepFrame(1); }
                 if (event.key.toLowerCase() === "i") { event.preventDefault(); mark("start"); }
                 if (event.key.toLowerCase() === "o") { event.preventDefault(); mark("end"); }
-                if (event.key === "1" && annotationKind === "fall") { event.preventDefault(); mark("onset"); }
                 if (event.key === "2" && annotationKind === "fall") { event.preventDefault(); mark("impact"); }
                 if (event.key.toLowerCase() === "f") setAnnotationKind("fall");
                 if (event.key.toLowerCase() === "n") setAnnotationKind("non_fall");
@@ -1137,7 +1231,8 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
               <div className={`recommendation-card confidence-${experimentWindow.recommendation.confidence}`}>
                 <strong>自动推荐：{experimentWindow.recommendation.sample_index === null ? "无候选" : `样本 ${experimentWindow.recommendation.sample_index}`}</strong>
                 <span>置信度：{experimentWindow.recommendation.confidence === "high" ? "高" : experimentWindow.recommendation.confidence === "medium" ? "中" : "低"}</span>
-                <span>时间先验：{recommendationOffsetSource === "formal_anchor" ? "本条已确认的另一端锚点" : recommendationOffsetSource === "recording_affine" ? "历史实验本条线性拟合" : recommendationOffsetSource === "recording_offset" ? "历史实验本条固定偏移" : recommendationOffsetSource === "global_offset" ? "历史实验跨录制偏移" : "无"}</span>
+                <span>{recommendationOffsetSource === "formal_anchor" ? "额外时间先验：本条已确认的另一端锚点" : recommendationOffsetSource === "recording_affine" ? "额外时间先验：历史实验本条线性拟合" : recommendationOffsetSource === "recording_offset" ? "额外时间先验：历史实验本条固定偏移" : recommendationOffsetSource === "global_offset" ? "额外时间先验：历史实验跨录制偏移" : "额外时间先验：无；基线：共同主机时钟 0 ms"}</span>
+                <span>实体响应 {experimentWindow.recommendation.distinct_response_count} 个 · 显著性 {experimentWindow.recommendation.event_robust_z?.toFixed(1) ?? "—"} · 时间残差 {experimentWindow.recommendation.timing_residual_ms?.toFixed(1) ?? "—"} ms · 区分比 {experimentWindow.recommendation.score_margin_ratio?.toFixed(2) ?? "唯一响应"}</span>
                 <span>{experimentWindow.recommendation.reason}</span>
               </div>
               <Plot
@@ -1165,7 +1260,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
                 <button className="primary" disabled={experimentImuSample === null || !selectedExperimentIsCandidate || experimentBusy} onClick={confirmFormalAnchor}>确认为{syncRole === "start_tap" ? "开始" : "结束"}轻拍</button>
                 <button disabled={experimentBusy} onClick={() => { setExperimentWindow(null); setExperimentImuSample(null); }}>取消</button>
               </div>
-              {selectedExperimentCandidate && <p className="stage-help">当前候选：事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)} · 本样本突变 {selectedExperimentCandidate.robust_z.toFixed(1)} · 推荐分数 {selectedExperimentCandidate.recommendation_score.toFixed(3)} · 推荐排名 #{selectedExperimentCandidate.recommendation_rank} · {selectedExperimentCandidate.selection_basis === "event_onset" ? "事件首个明显响应" : selectedExperimentCandidate.selection_basis === "timing_projection" ? "时间模型代表样本" : "局部突变峰"}</p>}
+              {selectedExperimentCandidate && <p className="stage-help">当前候选：事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)} · 本样本突变 {selectedExperimentCandidate.robust_z.toFixed(1)} · 推荐分数 {selectedExperimentCandidate.recommendation_score.toFixed(3)} · {selectedExperimentCandidate.recommendation_rank ? `独立响应排名 #${selectedExperimentCandidate.recommendation_rank}` : `同一响应簇 #${selectedExperimentCandidate.response_cluster_id ?? "—"} 的辅助峰`} · {selectedExperimentCandidate.selection_basis === "event_onset" ? "事件首个明显响应" : selectedExperimentCandidate.selection_basis === "timing_projection" ? "时间模型代表样本" : "局部突变峰"}</p>}
               {experimentImuSample !== null && !selectedExperimentIsCandidate && <p className="stage-help warning-text">当前选择不是加速度突变候选，请点击曲线主峰或上方候选按钮。</p>}
               {experimentWindow.recommendation.confidence === "low" && <p className="stage-help warning-text">自动推荐置信度低，请逐个比较候选；程序不会自动保存。</p>}
             </>}
@@ -1210,10 +1305,10 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
             <div className="panel-title">第 2 步 · 区间与跌倒事件标注</div>
             <div className="time-readout">当前 {currentTime.toFixed(3)} s · 帧 {currentFrame}</div>
             <label>标注者 UniKey<select value={annotator} onChange={(e) => setAnnotator(e.target.value)}>{allowedUnikeys.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
-            <div className="mark-buttons"><button onClick={() => mark("start")}>标记区间开始（I）</button><button onClick={() => mark("end")}>标记区间结束（O）</button><button disabled={annotationKind !== "fall"} onClick={() => mark("onset")}>标记跌倒起始（1）</button><button disabled={annotationKind !== "fall"} onClick={() => mark("impact")}>标记撞击时刻（2）</button></div>
-            <div className="marks"><span>动作开始 {seconds(marks.start)}</span><span>动作结束 {seconds(marks.end)}</span><span>跌倒起始 {seconds(marks.onset)}</span><span>撞击时刻 {seconds(marks.impact)}</span></div>
+            <div className="mark-buttons"><button onClick={() => mark("start")}>标记区间开始（I）</button><button onClick={() => mark("end")}>标记区间结束（O）</button><button disabled={annotationKind !== "fall"} onClick={() => mark("impact")}>标记撞击时刻（2）</button></div>
+            <div className="marks"><span>区间开始／跌倒起始 {seconds(marks.start)}</span><span>区间结束 {seconds(marks.end)}</span><span>撞击时刻 {seconds(marks.impact)}</span></div>
             <div className="segment-form"><select value={annotationKind} onChange={(e) => setAnnotationKind(e.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 进入训练</option><option value="fall">跌倒 · 进入训练</option><option value="exclude">明确排除 · 不训练</option></select>{annotationKind === "exclude" ? <select value={exclusionReason} onChange={(e) => setExclusionReason(e.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select value={activity} onChange={(e) => setActivity(e.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" onClick={addAnnotationInterval}>添加区间</button></div>
-            {annotationKind === "fall" && <p className="stage-help">fall 从首次明确失衡开始，经过撞击，到落地后身体大动作停止并稳定。准备阶段和稳定后的自然状态另标 non_fall。</p>}
+            {annotationKind === "fall" && <p className="stage-help">fall 从首次明确失衡开始，经过撞击，到落地后身体大动作停止并稳定。跌倒起始由区间起点自动派生；每个跌倒区间必须各自标记一个撞击时刻。准备阶段和稳定后的自然状态另标 non_fall。</p>}
           </div>
           {doc && <div className="panel segment-table">
             <div className="panel-title">第 3 步 · 全时间轴覆盖与完成检查</div>
@@ -1225,10 +1320,24 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
             <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? `仍有 ${(uncoveredNs / 1e9).toFixed(3)} 秒未标注；草稿允许，完成时禁止。` : "全程已由 fall、non_fall 或 exclude 覆盖。"}</div>
             {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.slice(0, 10).map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); if (video.current && frameTimes) video.current.currentTime = frameTimes.media_time_ns[nearestIndex(frameTimes.time_ns, gap.start)] / 1e9; }}>空白 {index + 1}：{seconds(gap.start)} → {seconds(gap.end)}</button>)}</div>}
             <div className="panel-title subheading">训练区间</div>
-            {doc.segments.map((segment) => <div className="segment-row" key={segment.segment_id}><span>{segment.segment_id}</span><strong>{segment.binary_label === "fall" ? "跌倒" : "非跌倒"}</strong><span>{segment.activity_code}</span><span>{seconds(segment.start_ns)} → {seconds(segment.end_ns)}</span><button onClick={() => setDoc({ ...doc, segments: doc.segments.filter((item) => item.segment_id !== segment.segment_id), events: doc.events.filter((event) => event.segment_id !== segment.segment_id) })}>删除</button></div>)}
+            {doc.segments.map((segment) => {
+              const impact = doc.events.find((event) => event.segment_id === segment.segment_id && event.kind === "impact");
+              return <div className="segment-row" key={segment.segment_id}>
+                <span>{segment.segment_id}</span>
+                <strong>{segment.binary_label === "fall" ? "跌倒" : "非跌倒"}</strong>
+                <span>{segment.activity_code}</span>
+                <span>{seconds(segment.start_ns)} → {seconds(segment.end_ns)}</span>
+                {segment.binary_label === "fall" && <span className={impact ? "success-text" : "warning-text"}>撞击 {seconds(impact?.time_ns)}</span>}
+                {segment.binary_label === "fall" && impact && <button onClick={() => jumpToRecordingTime(impact.time_ns)}>跳转撞击帧</button>}
+                {segment.binary_label === "fall" && <button onClick={() => setSegmentImpact(segment)}>{impact ? "当前帧重设撞击" : "当前帧设为撞击"}</button>}
+                {segment.binary_label === "fall" && impact && <button onClick={() => setDoc({ ...doc, finalized: false, events: doc.events.filter((event) => !(event.segment_id === segment.segment_id && event.kind === "impact")) })}>清除撞击</button>}
+                <button onClick={() => setDoc({ ...doc, segments: doc.segments.filter((item) => item.segment_id !== segment.segment_id), events: doc.events.filter((event) => event.segment_id !== segment.segment_id) })}>删除区间</button>
+              </div>;
+            })}
             <div className="panel-title subheading">明确排除区间</div>
             {doc.exclusions.map((item) => <div className="segment-row" key={item.exclusion_id}><span>{item.exclusion_id}</span><strong>排除</strong><span>{exclusionLabels[item.reason]}</span><span>{seconds(item.start_ns)} → {seconds(item.end_ns)}</span><button onClick={() => setDoc({ ...doc, exclusions: doc.exclusions.filter((candidate) => candidate.exclusion_id !== item.exclusion_id) })}>删除</button></div>)}
-            <div className="save-row"><button onClick={() => save(false)}>保存草稿（Ctrl+S）</button><button className="primary" disabled={uncoveredNs > 0 || sync?.quality !== "verified"} onClick={() => save(true)}>完成并验证标注</button><span>修订 {doc.revision} · {doc.finalized ? "已定稿" : "草稿"} · 同步 {sync?.quality ?? "missing"}</span></div>
+            {fallWithoutImpactCount > 0 && <div className="coverage-summary warning-text">仍有 {fallWithoutImpactCount} 个跌倒区间没有撞击时刻；草稿允许，完成时禁止。</div>}
+            <div className="save-row"><button onClick={() => save(false)}>保存草稿（Ctrl+S）</button><button className="primary" disabled={uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={() => save(true)}>完成并验证标注</button><span>修订 {doc.revision} · {doc.finalized ? "已定稿" : "草稿"} · 同步 {sync?.quality ?? "missing"}</span></div>
           </div>}
           {review && <div className="panel workflow-panel">
             <div className="panel-title">第 4 步 · {review.workflow.review_policy === "single_user" ? "完成标注" : "提交与异人审核"}</div>
@@ -1248,11 +1357,24 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
             <div className="status-grid"><span>数据级别 {recordings.find((item) => item.recording_id === selected)?.data_tier ?? "—"}</span><span>校准 {status?.calibration ?? "—"}</span><span>导出 {status?.export ?? "—"}</span></div>
             <div className="save-row">
               <a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>下载 review.json</a>
-              {status?.export === "exported"
+              {selectedRecording?.data_tier === "prod" && status?.export === "exported"
                 ? <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>下载 aligned30.h5</a>
                 : <button className="primary" disabled={recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" || review.workflow.state !== "accepted" || status?.calibration !== "verified"} onClick={exportAligned30}>生成 aligned30.h5</button>}
             </div>
             {recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" && <p className="stage-help warning-text">当前是 test 数据：可以下载 review.json，但永久禁止生成训练 H5。</p>}
+            <div className="danger-zone">
+              <strong>永久删除整条录制</strong>
+              <p className="stage-help">仅允许删除尚未进入训练发布 TAR 的录制。操作会删除原始 H5、MKV、预览视频、标注、导出、缓存和同步实验引用，且无法恢复。</p>
+              {!deleteArmed
+                ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始永久删除</button>
+                : <>
+                  <label>二次确认：请输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label>
+                  <div className="save-row">
+                    <button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认永久删除</button>
+                    <button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button>
+                  </div>
+                </>}
+            </div>
           </div>}
         </>}
       </section>

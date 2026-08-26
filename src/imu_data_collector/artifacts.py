@@ -176,7 +176,12 @@ def _annotation_rows(
         if start < stop:
             rows.append((0, "exclude", start, stop, exclusion.reason.value))
     for event in document.annotations.events:
-        index = _nearest_grid_index_half_up(event.time_ns - grid_origin_ns)
+        relative_ns = event.time_ns - grid_origin_ns
+        index = (
+            _ceil_grid_index(relative_ns)
+            if event.kind.value == "onset"
+            else _nearest_grid_index_half_up(relative_ns)
+        )
         if 0 <= index < sample_count:
             rows.append(
                 (
