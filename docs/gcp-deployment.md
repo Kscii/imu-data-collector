@@ -136,9 +136,9 @@ curl --fail http://127.0.0.1:8766/api/v1/health
 加入 IAP 但没有私有邮箱映射的账号也被拒绝。合法账号进入后，页首应显示自己的 UniKey，且
 页面不能切换成别人。
 
-SQLite catalog 是可重建索引，丢失后由管理员调用 index refresh；`review.json` 和不可变采集
-制品不依赖 VM 启动盘。不要覆盖对象来“回滚”标注，正式修改通过 revision、重开和重新导出
-完成。
+SQLite catalog 是可重建索引。服务器默认每 10 秒扫描一次 Bucket，新 manifest 会自动进入
+索引；管理员也可以在页面点击“立即扫描 Bucket”强制刷新。`review.json` 和不可变采集制品
+不依赖 VM 启动盘。不要覆盖对象来“回滚”标注，正式修改通过 revision、重开和重新导出完成。
 
 Cloud Monitoring 至少为实例不可达、HTTPS 5xx 和磁盘空间设置基础告警；Billing Budget 建议
 设置 A$50、A$80、A$100 三档通知。Budget 是告警，不会自动停止资源。

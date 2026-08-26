@@ -32,6 +32,8 @@ annotation:
   server_port: 8766
   catalog_path: "~/.local/share/imu-annotation/catalog.sqlite3"
   review_policy: "single_user"
+  # 大于 0 时由服务器后台持续扫描新的完整 manifest；0 表示关闭后台扫描。
+  catalog_refresh_interval_s: 10
 
 storage:
   # 默认不接触云端；需要手动发布时用私有 YAML 切换到 gcs。

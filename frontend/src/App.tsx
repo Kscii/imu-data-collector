@@ -71,6 +71,7 @@ type AppConfig = {
   video?: { width: number; height: number; requested_fps: number; bitrate: string };
   local_actor_id?: string;
   review_policy?: "single_user" | "two_person";
+  catalog_refresh_interval_s?: number;
 };
 
 type Session = {
@@ -430,7 +431,8 @@ export default function App() {
     if (annotationApplication) {
       api<Session>("/api/v1/session").then(setSession).catch((e) => setCaptureError(e.message));
       refreshRecordings();
-      return;
+      const recordingsTimer = window.setInterval(refreshRecordings, 10_000);
+      return () => window.clearInterval(recordingsTimer);
     }
     refreshCameras();
     refreshRecordings();
@@ -721,6 +723,9 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [indexBusy, setIndexBusy] = useState(false);
+  const [indexMessage, setIndexMessage] = useState("");
+  const [copiedRecordingId, setCopiedRecordingId] = useState("");
   const [error, setError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
 
@@ -1088,6 +1093,35 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     }
   };
 
+  const refreshBucket = async () => {
+    setIndexBusy(true);
+    setIndexMessage("");
+    setError("");
+    try {
+      const result = await api<{ imported: number; skipped: number }>(
+        "/api/v1/index/refresh",
+        { method: "POST" }
+      );
+      await onChanged();
+      setIndexMessage(`扫描完成：新增或更新 ${result.imported} 条，跳过异常 ${result.skipped} 条`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setIndexBusy(false);
+    }
+  };
+
+  const copyRecordingId = async () => {
+    if (!selected) return;
+    try {
+      await navigator.clipboard.writeText(selected);
+      setCopiedRecordingId(selected);
+      window.setTimeout(() => setCopiedRecordingId(""), 1800);
+    } catch {
+      setError("浏览器未允许写入剪贴板；可以直接选中上方录制 ID 复制");
+    }
+  };
+
   const choices = annotationKind === "exclude" ? [] : taxonomy[annotationKind];
   const saveSync = async (applyFixedOffset = false) => {
     if (!sync || !selected) return;
@@ -1196,6 +1230,12 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     <main className="annotation-layout">
       <aside className="panel recording-list">
         <div className="panel-title">选择录制</div>
+        <div className="recording-list-actions">
+          {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在扫描…" : "立即扫描 Bucket"}</button>}
+          <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? "已复制" : "复制当前 ID"}</button>
+        </div>
+        {selected && <code className="selected-recording-id" title="可以直接框选复制">{selected}</code>}
+        {indexMessage && <span className="index-message">{indexMessage}</span>}
         {recordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} onClick={() => setSelected(recording.recording_id)}><strong>{recording.participant_id}</strong><span>{recording.recording_id}</span></button>)}
       </aside>
       <section className="annotation-workspace">

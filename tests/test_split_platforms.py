@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -67,6 +68,7 @@ def _settings(tmp_path: Path) -> Settings:
         annotation=AnnotationSettings(
             catalog_path=tmp_path / "annotation.sqlite3",
             review_policy="single_user",
+            catalog_refresh_interval_s=0,
         ),
     )
 
@@ -250,6 +252,45 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         )
         assert forbidden.status_code == 422
         assert "test 数据永久禁止" in forbidden.json()["detail"]
+
+
+def test_annotation_background_refresh_discovers_new_manifest(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.annotation.catalog_refresh_interval_s = 0.02
+    store = LocalFilesystemStore(settings.storage.root)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/recordings").json() == []
+        recording_id = _publish_fixture(store, tmp_path)
+        deadline = time.monotonic() + 1.0
+        recordings: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            recordings = client.get("/api/v1/recordings").json()
+            if recordings:
+                break
+            time.sleep(0.02)
+
+    assert [item["recording_id"] for item in recordings] == [recording_id]
+
+
+def test_annotation_refresh_skips_unchanged_manifest_generation(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    _publish_fixture(store, tmp_path)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/index/refresh").json() == {
+            "imported": 1,
+            "skipped": 0,
+        }
+        assert client.post("/api/v1/index/refresh").json() == {
+            "imported": 0,
+            "skipped": 0,
+        }
 
 
 def test_iap_identity_is_required_mapped_and_cannot_claim_admin(

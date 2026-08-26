@@ -53,22 +53,34 @@ class AnnotationService:
         self.review_policy = ReviewPolicy(settings.annotation.review_policy)
         self.reviews = AnnotationReviewStore(store, self.taxonomy, self.review_policy)
         self._release_delete_lock = threading.RLock()
+        self._catalog_refresh_lock = threading.Lock()
 
     def refresh(self) -> dict[str, int]:
-        imported = 0
-        skipped = 0
-        for info in self.store.list("captures/"):
-            if not info.key.endswith("/manifest.json"):
-                continue
-            try:
-                payload, generation = self.store.read_json(info.key)
-                manifest = CaptureManifestV2.model_validate(payload)
-                self._verify_manifest_objects(manifest)
-                self.catalog.upsert(manifest, generation)
-                imported += 1
-            except (FileNotFoundError, ValueError):
-                skipped += 1
-        return {"imported": imported, "skipped": skipped}
+        """扫描 Bucket，并只校验新增或 generation 已变化的 manifest。"""
+
+        with self._catalog_refresh_lock:
+            imported = 0
+            skipped = 0
+            for info in self.store.list("captures/"):
+                if not info.key.endswith("/manifest.json"):
+                    continue
+                recording_id = info.key.removeprefix("captures/").removesuffix(
+                    "/manifest.json"
+                )
+                if not recording_id or "/" in recording_id:
+                    skipped += 1
+                    continue
+                if self.catalog.manifest_generation(recording_id) == info.generation:
+                    continue
+                try:
+                    payload, generation = self.store.read_json(info.key)
+                    manifest = CaptureManifestV2.model_validate(payload)
+                    self._verify_manifest_objects(manifest)
+                    self.catalog.upsert(manifest, generation)
+                    imported += 1
+                except (FileNotFoundError, ValueError):
+                    skipped += 1
+            return {"imported": imported, "skipped": skipped}
 
     def _verify_manifest_objects(self, manifest: CaptureManifestV2) -> None:
         for artifact in manifest.artifacts:

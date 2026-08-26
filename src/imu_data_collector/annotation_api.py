@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -36,6 +39,8 @@ from imu_data_collector.storage import (
     create_object_store,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def create_annotation_app(
     settings: Settings | None = None,
@@ -51,7 +56,39 @@ def create_annotation_app(
     )
     service = AnnotationService(active, object_store)
     authenticator = Authenticator(active, token_verifier)
-    app = FastAPI(title="IMU 标注平台", version="0.2.0")
+    refresh_stop = threading.Event()
+
+    def refresh_catalog_loop() -> None:
+        interval = active.annotation.catalog_refresh_interval_s
+        while not refresh_stop.is_set():
+            try:
+                result = service.refresh()
+                if result["imported"] or result["skipped"]:
+                    logger.info("后台刷新录制索引：%s", result)
+            except Exception:
+                logger.exception("后台刷新录制索引失败，继续使用已有 catalog")
+            refresh_stop.wait(interval)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        interval = active.annotation.catalog_refresh_interval_s
+        refresh_thread: threading.Thread | None = None
+        if interval > 0:
+            refresh_stop.clear()
+            refresh_thread = threading.Thread(
+                target=refresh_catalog_loop,
+                name="annotation-catalog-refresh",
+                daemon=True,
+            )
+            refresh_thread.start()
+        try:
+            yield
+        finally:
+            refresh_stop.set()
+            if refresh_thread is not None:
+                refresh_thread.join(timeout=2.0)
+
+    app = FastAPI(title="IMU 标注平台", version="0.2.0", lifespan=lifespan)
     app.state.annotation_service = service
     app.state.authenticator = authenticator
 
@@ -106,6 +143,7 @@ def create_annotation_app(
             "auth_mode": active.auth.mode,
             "current_unikey": actor.unikey,
             "review_policy": service.review_policy.value,
+            "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "storage": {
                 "backend": active.storage.backend,
                 "bucket": active.storage.bucket,
