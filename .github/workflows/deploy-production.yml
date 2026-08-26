@@ -71,7 +71,7 @@ jobs:
           ZONE: ${{ vars.GCP_ZONE }}
           VM: ${{ vars.GCP_VM }}
         run: |
-          gcloud compute scp --quiet --tunnel-through-iap \
+          gcloud compute scp --quiet --tunnel-through-iap --scp-flag=-O \
             --project "${PROJECT_ID}" --zone "${ZONE}" \
             "${BUNDLE}" "${VM}:/tmp/${BUNDLE}"
           gcloud compute ssh --quiet --tunnel-through-iap \
