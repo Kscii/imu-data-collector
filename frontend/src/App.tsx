@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot from "./Plot";
 
+document.title = __APP_KIND__ === "annotation" ? "IMU 标注平台" : "IMU 数采平台";
+
 type Recording = {
   recording_id: string;
   collection_id: string;

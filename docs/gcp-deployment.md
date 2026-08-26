@@ -44,8 +44,10 @@ H5/MKV；再次发布会按大小和 SHA-256 幂等跳过一致对象，遇到�
 ```
 
 更新前在本机完成 `uv run pytest`、`uv run ruff check .` 和前端双构建。部署包必须包含
-`frontend/dist-annotation`。每个 release 在部署阶段用 `uv sync --frozen --no-dev --python 3.12`
-建立只读 `.venv`，运行阶段不再解析或更新依赖；切换 `current` 后重启服务，并检查：
+`frontend/dist-annotation`。受管 Python 固定安装在 `/opt/imu-annotation/python`，不能留在
+`/root/.local/share/uv/python`，否则 `ProtectHome=true` 会使服务入口不可执行。每个 release
+在部署阶段用这个解释器执行 `uv sync --frozen --no-dev` 建立只读 `.venv`，运行阶段不再解析
+或更新依赖；切换 `current` 后重启服务，并检查：
 
 ```bash
 sudo systemctl status imu-annotation.service
