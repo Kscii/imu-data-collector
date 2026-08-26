@@ -4,8 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
+    "dev": "vite --host 127.0.0.1 --mode capture",
+    "dev:annotation": "vite --host 127.0.0.1 --mode annotation",
+    "build": "npm run build:capture && npm run build:annotation",
+    "build:capture": "tsc -b && vite build --mode capture",
+    "build:annotation": "tsc -b && vite build --mode annotation",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

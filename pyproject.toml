@@ -8,6 +8,7 @@ dependencies = [
     "bleak>=2.0.0",
     "dbus-fast>=5.0.22 ; sys_platform == 'linux'",
     "fastapi>=0.116.0",
+    "google-cloud-storage>=3.13.1",
     "h5py>=3.14.0",
     "numpy>=2.2.0",
     "pydantic>=2.11.0",
@@ -17,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 imu-collector = "imu_data_collector.cli:main"
+imu-annotation = "imu_data_collector.annotation_cli:main"
 
 [dependency-groups]
 dev = [

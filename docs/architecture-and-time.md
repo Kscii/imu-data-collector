@@ -7,7 +7,7 @@
 推荐分三层：
 
 1. **采集原始层**：保存通知原始字节、主机 `CLOCK_MONOTONIC` 接收时刻、候选样本和视频真实 PTS；不重采样。
-2. **同步标注层**：录制首尾各使用一次镜头可见、IMU 可见的外壳轻拍；人工配对“视频首接触帧”和“IMU 首个明显响应”。默认保留共同主机时钟，只有满足条件时才应用 `video_time = imu_time + fixed_offset`。当前同步、标注和审核快照写入外置 `review.json`。
+2. **同步标注层**：采集端把不可变制品发布到对象存储，独立标注端读取浏览代理和 H5。录制首尾各使用一次镜头可见、IMU 可见的外壳轻拍；人工配对“视频首接触帧”和“IMU 首个明显响应”。默认保留共同主机时钟，只有满足条件时才应用 `video_time = imu_time + fixed_offset`。当前同步、标注和审核快照写入对象存储的 `review.json`。
 3. **训练冻结层**：在 IMU/视频公共有效区间上插值到严格 30 Hz，保留 activity/onset/impact/exclude 标注，运行质量门禁，写入可复现的三表 HDF5。训练窗口跳过 exclude；原始 H5/MKV 永不被覆盖。
 
 录制前的设备预览是独立的内存态：连接后持续解析 IMU 通知并输出摄像头低帧率 MJPEG，
@@ -58,7 +58,7 @@ schema `1.3.0` 起保留以下不可变或可重建证据：
 在同步方法尚未验证期间，逐帧人工观察写入独立的
 `_diagnostics/sync_validation_01/*.sync-experiment.json`，不得调用正式 `/sync` 写入。实验分析
 始终从 `time_monotonic_ns - recording_start_monotonic_ns` 重新得到 host-only 时间。正式同步、
-标注和审核只更新相邻 `review.json`，不能修改原始包、原始计数、主机时间或 MKV。
+标注和审核只更新对象存储中的 `review.json`，不能修改原始包、原始计数、主机时间或 MKV。
 
 ## 文件组织
 
@@ -72,10 +72,11 @@ schema `1.3.0` 起保留以下不可变或可重建证据：
     <UTC_timestamp>_<participant_unikey>/
       <recording_id>.h5
       <recording_id>.mkv
-      review.json
-      aligned30.h5                 # 仅通过全部门禁后按需生成
-      <recording_id>.capture.tar   # 按需生成，不包含 review.json
 ```
+
+GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest，可变审核快照放在
+`reviews/<recording_id>/review.json`，训练派生放在 `exports/` 和 `releases/`。本地事实目录不因
+上传、标注或导出而改变。
 
 `_diagnostics` 与正式 collection 分离，诊断 H5 根属性含
 `recording_kind=imu_characterization`、`video_status=not_requested` 和
@@ -114,4 +115,4 @@ FFmpeg 的诊断文本会以 JSON 列表随视频元数据保存。例如罗技 
 稳定报告一次 `overread 8`，但重复 20 秒实测均为 601 帧、30.0 FPS，且 PTS 无重复或
 倒退。因此它暂按非致命诊断保留；帧数、时间戳或进程退出状态异常仍由质量门禁独立判定。
 
-视频体积可按码率预估：6 Mbit/s 约为 2.7 GB/小时，实际还受场景复杂度、编码器和容器开销影响。一个 10–30 分钟录制约 0.45–1.35 GB。Git LFS 技术上能存大文件，但不适合作为持续增长原始视频库：配额、克隆成本、历史不可变和权限治理都不理想。代码、schema、manifest 和小型测试样本进 Git；原始 H5/MKV 走对象存储。当前只实现 `LocalFilesystemStore`；未来服务器使用 Sydney 区域 GCS，部署前再接入真实鉴权和可续传上传。
+视频体积可按码率预估：6 Mbit/s 约为 2.7 GB/小时，实际还受场景复杂度、编码器和容器开销影响。一个 10–30 分钟录制约 0.45–1.35 GB。Git LFS 技术上能存大文件，但不适合作为持续增长原始视频库：配额、克隆成本、历史不可变和权限治理都不理想。代码、schema、manifest 和小型测试样本进 Git；原始 H5/MKV 走对象存储。当前实现本地硬链接优先交接和 Sydney 区域 GCS；手动发布保留哈希与幂等边界，后台队列和自动恢复下载留待后续。

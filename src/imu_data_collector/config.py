@@ -48,12 +48,24 @@ class UploadSettings:
 class StorageSettings:
     backend: str = "local"
     root: Path = Path("~/.local/share/imu-data-collector/objects")
+    bucket: str | None = None
+    project: str | None = None
+    cache_root: Path = Path("~/.cache/imu-annotation")
 
 
 @dataclass(slots=True)
 class AuthSettings:
     mode: str = "local"
     iap_audience: str | None = None
+    local_actor_id: str = "xfan0282"
+
+
+@dataclass(slots=True)
+class AnnotationSettings:
+    server_host: str = "127.0.0.1"
+    server_port: int = 8766
+    catalog_path: Path = Path("~/.local/share/imu-annotation/catalog.sqlite3")
+    review_policy: str = "single_user"
 
 
 @dataclass(slots=True)
@@ -85,12 +97,15 @@ class Settings:
     upload: UploadSettings = field(default_factory=UploadSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     auth: AuthSettings = field(default_factory=AuthSettings)
+    annotation: AnnotationSettings = field(default_factory=AnnotationSettings)
     identity: IdentitySettings = field(default_factory=IdentitySettings)
 
     def resolve_paths(self, project_root: Path) -> None:
         self.data_root = self.data_root.expanduser().resolve()
         self.catalog_path = self.catalog_path.expanduser().resolve()
         self.storage.root = self.storage.root.expanduser().resolve()
+        self.storage.cache_root = self.storage.cache_root.expanduser().resolve()
+        self.annotation.catalog_path = self.annotation.catalog_path.expanduser().resolve()
         taxonomy = self.activity_taxonomy_path.expanduser()
         if not taxonomy.is_absolute():
             taxonomy = project_root / taxonomy
@@ -105,8 +120,14 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     storage_values = values.pop("storage", {})
     if "root" in storage_values:
         storage_values["root"] = Path(storage_values["root"])
+    if "cache_root" in storage_values:
+        storage_values["cache_root"] = Path(storage_values["cache_root"])
     storage = StorageSettings(**storage_values)
     auth = AuthSettings(**values.pop("auth", {}))
+    annotation_values = values.pop("annotation", {})
+    if "catalog_path" in annotation_values:
+        annotation_values["catalog_path"] = Path(annotation_values["catalog_path"])
+    annotation = AnnotationSettings(**annotation_values)
     identity_values = values.pop("identity", {})
     for tuple_key in ("allowed_unikeys", "admins"):
         if tuple_key in identity_values:
@@ -121,6 +142,7 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         upload=upload,
         storage=storage,
         auth=auth,
+        annotation=annotation,
         identity=identity,
         **values,
     )

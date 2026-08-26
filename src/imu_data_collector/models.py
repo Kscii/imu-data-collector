@@ -38,6 +38,24 @@ class DataTier(StrEnum):
     PROD = "prod"
 
 
+class PublishState(StrEnum):
+    """采集制品从本机交付到标注存储的状态。"""
+
+    NOT_REQUESTED = "not_requested"
+    PACKAGING = "packaging"
+    UPLOADING = "uploading"
+    VERIFYING = "verifying"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+
+class ReviewPolicy(StrEnum):
+    """标注完成后是否强制由另一名用户审核。"""
+
+    SINGLE_USER = "single_user"
+    TWO_PERSON = "two_person"
+
+
 class BinaryLabel(StrEnum):
     FALL = "fall"
     NON_FALL = "non_fall"
@@ -209,6 +227,7 @@ class ReviewWorkflow(BaseModel):
     reviewer_id: str | None = None
     review_comment: str = Field(default="", max_length=2000)
     updated_at_utc: str | None = None
+    review_policy: ReviewPolicy = ReviewPolicy.TWO_PERSON
 
     @model_validator(mode="after")
     def validate_ids(self) -> ReviewWorkflow:
@@ -363,3 +382,58 @@ class RecordingSummary(BaseModel):
     mkv_path: str | None = None
     issues: list[str] = Field(default_factory=list)
     upload_state: str = "not_requested"
+
+
+class ArtifactDescriptor(BaseModel):
+    """不可变采集制品在对象存储中的身份。"""
+
+    role: Literal["capture_h5", "video_mkv", "preview_mp4"]
+    object_key: str = Field(min_length=1, max_length=1024)
+    filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_type: str = Field(min_length=1, max_length=128)
+
+
+class CalibrationProfile(BaseModel):
+    """录制时生效的物理尺度配置；未验证时禁止训练导出。"""
+
+    profile_id: str = "unverified"
+    verified: bool = False
+    accel_counts_per_g: float | None = Field(default=None, gt=0)
+    gyro_counts_per_dps: float | None = Field(default=None, gt=0)
+
+
+class CaptureManifestV2(BaseModel):
+    """采集端与标注端之间唯一稳定的公开交接合同。"""
+
+    schema_version: Literal["2.0.0"] = "2.0.0"
+    recording_id: str
+    collection_id: str
+    participant_id: str
+    data_tier: DataTier
+    body_location: Literal["chest"] = "chest"
+    captured_at_utc: str
+    duration_ns: int = Field(gt=0)
+    source_h5_schema_version: str
+    software_revision: str
+    calibration: CalibrationProfile = Field(default_factory=CalibrationProfile)
+    artifacts: list[ArtifactDescriptor]
+
+    @model_validator(mode="after")
+    def validate_artifacts(self) -> CaptureManifestV2:
+        roles = [item.role for item in self.artifacts]
+        required = {"capture_h5", "video_mkv", "preview_mp4"}
+        if set(roles) != required or len(roles) != len(required):
+            raise ValueError("manifest 必须且只能包含 H5、MKV 和 MP4 三种制品")
+        prefix = f"captures/{self.recording_id}/"
+        if any(not item.object_key.startswith(prefix) for item in self.artifacts):
+            raise ValueError("manifest 制品对象键必须位于本录制前缀")
+        return self
+
+
+class PublishStatus(BaseModel):
+    recording_id: str
+    state: PublishState = PublishState.NOT_REQUESTED
+    message: str = ""
+    completed_artifacts: int = Field(default=0, ge=0, le=3)

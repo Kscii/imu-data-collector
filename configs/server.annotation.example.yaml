@@ -1,0 +1,34 @@
+# 云端标注服务结构化配置示例；部署时复制到 /etc/imu-annotation/config.yaml。
+activity_taxonomy_path: "/opt/imu-annotation/current/configs/activities.yaml"
+
+identity:
+  allowed_unikeys:
+    - "rkim6933"
+    - "zche0826"
+    - "jzho8728"
+    - "jzha9115"
+    - "xfan0282"
+    - "yniu0950"
+    - "hche5673"
+    - "jmia0254"
+    - "xliu0452"
+  admins:
+    - "xfan0282"
+
+auth:
+  # 当前仅通过 SSH 隧道单人访问；未来开放网络前必须接入真实身份认证。
+  mode: "local"
+  local_actor_id: "xfan0282"
+
+annotation:
+  server_host: "127.0.0.1"
+  server_port: 8766
+  catalog_path: "/var/lib/imu-annotation/catalog.sqlite3"
+  review_policy: "single_user"
+
+storage:
+  backend: "gcs"
+  bucket: "soft3888-label"
+  project: "project-51b589c7-8d5e-4e78-a10"
+  cache_root: "/var/lib/imu-annotation/cache"
+

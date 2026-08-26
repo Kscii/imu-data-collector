@@ -45,13 +45,14 @@ from imu_data_collector.models import (
     SyncDocument,
     SyncExperimentDocument,
 )
+from imu_data_collector.publisher import publish_recording
 from imu_data_collector.review import (
     ReviewConflictError,
     load_review,
     mutate_review,
     workflow_with_timestamp,
 )
-from imu_data_collector.storage import LocalFilesystemStore
+from imu_data_collector.storage import create_object_store
 from imu_data_collector.sync import assess_conditional_fixed_offset
 from imu_data_collector.sync_experiment import (
     load_sync_experiment,
@@ -76,9 +77,12 @@ class RecordingCoordinator:
         self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.catalog = RecordingCatalog(settings.catalog_path)
         self.remote = RcloneRemoteStore(settings.upload)
-        if settings.storage.backend != "local":
-            raise ValueError("当前版本只支持 storage.backend=local")
-        self.object_store = LocalFilesystemStore(settings.storage.root)
+        self.object_store = create_object_store(
+            settings.storage.backend,
+            settings.storage.root,
+            settings.storage.bucket,
+            settings.storage.project,
+        )
         self.state = RecordingState.IDLE
         self.current: RecordingSummary | None = None
         self.ble: CW12EUBleSource | None = None
@@ -479,17 +483,6 @@ class RecordingCoordinator:
                 }
             )
             self.catalog.upsert(self.current)
-            if final_h5.is_file() and final_mkv.is_file():
-                try:
-                    load_review(final_h5, final_mkv, self.taxonomy)
-                except (OSError, ValueError) as error:
-                    self.current = self.current.model_copy(
-                        update={
-                            "state": RecordingState.NEEDS_ATTENTION,
-                            "issues": [*self.current.issues, f"创建 review.json 失败：{error}"],
-                        }
-                    )
-                    self.catalog.upsert(self.current)
             self.mode = None
             self.ble = None
             self.video = None
@@ -1026,6 +1019,40 @@ class RecordingCoordinator:
         )
         updated = summary.model_copy(update={"upload_state": "verified"})
         self.catalog.upsert(updated)
+
+    async def publish(self, recording_id: str) -> dict[str, Any]:
+        """由用户明确触发，把一次完整录制交付给独立标注存储。"""
+
+        summary = self._required_summary(recording_id)
+        if summary.state != RecordingState.READY:
+            raise ValueError("只有通过采集验证的 ready 录制可以发布")
+        if self.current and self.current.recording_id == recording_id:
+            raise ValueError("当前会话仍在使用该录制")
+        updating = summary.model_copy(update={"upload_state": "packaging"})
+        self.catalog.upsert(updating)
+        try:
+            updating = updating.model_copy(update={"upload_state": "uploading"})
+            self.catalog.upsert(updating)
+            manifest = await publish_recording(updating, self.settings, self.object_store)
+            updating = updating.model_copy(update={"upload_state": "verifying"})
+            self.catalog.upsert(updating)
+            manifest_key = f"captures/{recording_id}/manifest.json"
+            if self.object_store.stat(manifest_key) is None:
+                raise RuntimeError("远端 manifest 验证失败")
+            updating = updating.model_copy(update={"upload_state": "published"})
+            self.catalog.upsert(updating)
+            return manifest.model_dump(mode="json")
+        except Exception:
+            self.catalog.upsert(updating.model_copy(update={"upload_state": "failed"}))
+            raise
+
+    def publish_estimate(self, recording_id: str) -> dict[str, int | str]:
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        return {
+            "recording_id": recording_id,
+            "estimated_bytes": h5_path.stat().st_size + 2 * mkv_path.stat().st_size,
+        }
 
     def annotations(self, recording_id: str) -> AnnotationDocument:
         summary = self._required_summary(recording_id)

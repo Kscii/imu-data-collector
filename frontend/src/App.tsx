@@ -60,12 +60,15 @@ type Taxonomy = {
 };
 
 type AppConfig = {
+  application: "capture" | "annotation";
   allowed_unikeys: string[];
-  admin_unikeys: string[];
-  data_tiers: ("test" | "prod")[];
-  default_data_tier: "test" | "prod";
-  data_root: string;
-  video: { width: number; height: number; requested_fps: number; bitrate: string };
+  admin_unikeys?: string[];
+  data_tiers?: ("test" | "prod")[];
+  default_data_tier?: "test" | "prod";
+  data_root?: string;
+  video?: { width: number; height: number; requested_fps: number; bitrate: string };
+  local_actor_id?: string;
+  review_policy?: "single_user" | "two_person";
 };
 
 type ReviewDocument = {
@@ -78,6 +81,7 @@ type ReviewDocument = {
     reviewer_id: string | null;
     review_comment: string;
     updated_at_utc: string | null;
+    review_policy: "single_user" | "two_person";
   };
   annotations: AnnotationDocument;
 };
@@ -345,7 +349,11 @@ function issueLabel(issue: string) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"capture" | "characterize" | "annotate" | "library">("capture");
+  const annotationApplication = __APP_KIND__ === "annotation";
+  const diagnosticsVisible = new URLSearchParams(location.search).has("diagnostics");
+  const [tab, setTab] = useState<"capture" | "characterize" | "annotate" | "library">(
+    annotationApplication ? "annotate" : "capture"
+  );
   const [live, setLive] = useState<any>({ state: "idle", imu: {}, video: {} });
   const [participant, setParticipant] = useState("xfan0282");
   const [collection, setCollection] = useState("xfan0282_test_01");
@@ -380,8 +388,14 @@ export default function App() {
       if (!value.allowed_unikeys.includes(participant) && value.allowed_unikeys.length) {
         setParticipant(value.allowed_unikeys[0]);
       }
-      setDataTier(value.default_data_tier);
+      if (value.default_data_tier) setDataTier(value.default_data_tier);
     }).catch((e) => setCaptureError(e.message));
+    if (annotationApplication) {
+      api("/api/v1/index/refresh", { method: "POST" })
+        .then(refreshRecordings)
+        .catch((e) => setCaptureError(e.message));
+      return;
+    }
     refreshCameras();
     refreshRecordings();
     const protocol = location.protocol === "https:" ? "wss" : "ws";
@@ -453,17 +467,19 @@ export default function App() {
     <div className="app-shell">
       <header>
         <div>
-          <span className="eyebrow">CW12EU-T · 本机采集</span>
-          <h1>IMU 数采平台</h1>
+          <span className="eyebrow">{annotationApplication ? "CW12EU-T · 独立标注" : "CW12EU-T · 本机采集"}</span>
+          <h1>{annotationApplication ? "IMU 标注平台" : "IMU 数采平台"}</h1>
         </div>
-        <div className={`state state-${live.state}`}>{live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
+        <div className={`state state-${live.state}`}>{annotationApplication ? "制品模式" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav>
-        <button className={tab === "capture" ? "active" : ""} onClick={() => setTab("capture")}>采集</button>
-        <button className={tab === "characterize" ? "active" : ""} onClick={() => setTab("characterize")}>IMU 表征</button>
-        <button className={tab === "annotate" ? "active" : ""} onClick={() => setTab("annotate")}>标注</button>
-        <button className={tab === "library" ? "active" : ""} onClick={() => { setTab("library"); refreshRecordings(); }}>记录</button>
+        {annotationApplication ? <button className="active">标注与同步</button> : <>
+          <button className={tab === "capture" ? "active" : ""} onClick={() => setTab("capture")}>采集</button>
+          <button className={tab === "library" ? "active" : ""} onClick={() => { setTab("library"); refreshRecordings(); }}>记录与发布</button>
+          {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => setTab("characterize")}>IMU 诊断</button>}
+        </>}
       </nav>
+      {annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
       {tab === "capture" && captureError && <div className="error-banner">{captureError}</div>}
       {tab === "capture" && (
         <CapturePage
@@ -492,10 +508,10 @@ export default function App() {
           chart={liveRef.current}
         />
       )}
-      {tab === "annotate" && taxonomy && (
+      {annotationApplication && taxonomy && (
         <AnnotationPage recordings={recordings} taxonomy={taxonomy} allowedUnikeys={config?.allowed_unikeys ?? []} />
       )}
-      {tab === "library" && <Library recordings={recordings} onChanged={refreshRecordings} />}
+      {!annotationApplication && tab === "library" && <CaptureLibrary recordings={recordings} onChanged={refreshRecordings} />}
     </div>
   );
 }
@@ -632,6 +648,10 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
   const [review, setReview] = useState<ReviewDocument | null>(null);
   const [error, setError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (!selected && recordings.length) setSelected(recordings[0].recording_id);
+  }, [recordings, selected]);
 
   useEffect(() => {
     if (!selected) return;
@@ -1150,14 +1170,14 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
             <div className="save-row"><button onClick={() => save(false)}>保存草稿（Ctrl+S）</button><button className="primary" disabled={uncoveredNs > 0 || sync?.quality !== "verified"} onClick={() => save(true)}>完成并验证标注</button><span>修订 {doc.revision} · {doc.finalized ? "已定稿" : "草稿"} · 同步 {sync?.quality ?? "missing"}</span></div>
           </div>}
           {review && <div className="panel workflow-panel">
-            <div className="panel-title">第 4 步 · 提交与异人审核</div>
+            <div className="panel-title">第 4 步 · {review.workflow.review_policy === "single_user" ? "完成标注" : "提交与异人审核"}</div>
             <p>当前状态：<strong>{review.workflow.state}</strong> · review revision {review.revision} · 标注者 {review.workflow.annotator_id ?? "未分配"} · 审核者 {review.workflow.reviewer_id ?? "未分配"}</p>
             {review.workflow.review_comment && <p className="stage-help">审核意见：{review.workflow.review_comment}</p>}
             <div className="save-row">
               <button disabled={!['unassigned', 'in_progress'].includes(review.workflow.state)} onClick={() => changeWorkflow("assign")}>以当前 UniKey 领取</button>
-              <button className="primary" disabled={review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || !doc?.finalized} onClick={() => changeWorkflow("submit")}>提交审核</button>
-              <button className="primary" disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("accept")}>审核通过</button>
-              <button disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("reject")}>驳回</button>
+              <button className="primary" disabled={review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || !doc?.finalized} onClick={() => changeWorkflow("submit")}>{review.workflow.review_policy === "single_user" ? "完成标注" : "提交审核"}</button>
+              {review.workflow.review_policy === "two_person" && <button className="primary" disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("accept")}>审核通过</button>}
+              {review.workflow.review_policy === "two_person" && <button disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("reject")}>驳回</button>}
               <button disabled={!['accepted', 'exported'].includes(review.workflow.state)} onClick={() => changeWorkflow("reopen")}>管理员重开</button>
             </div>
           </div>}
@@ -1165,6 +1185,95 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
       </section>
     </main>
   );
+}
+
+function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; onChanged: () => void }) {
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState("");
+  const [incomplete, setIncomplete] = useState<{ relative_path: string; size_bytes: number; reason: string }[]>([]);
+
+  const publish = async (recording: Recording) => {
+    setError("");
+    setMessage("");
+    setBusy(recording.recording_id);
+    try {
+      const estimate = await api<{ estimated_bytes: number }>(`/api/v1/recordings/${recording.recording_id}/publish/estimate`);
+      const gib = estimate.estimated_bytes / 1024 ** 3;
+      if (!window.confirm(`将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。\n预计读取或上传约 ${gib.toFixed(2)} GiB，继续吗？`)) return;
+      await api(`/api/v1/recordings/${recording.recording_id}/publish`, { method: "POST" });
+      setMessage(`已发布到标注存储：${recording.recording_id}`);
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+      onChanged();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const deleteRecording = async (recordingId: string) => {
+    const confirmation = window.prompt(`永久删除不可恢复。请输入完整 recording_id：\n${recordingId}`);
+    if (confirmation === null) return;
+    setError("");
+    try {
+      await api(`/api/v1/recordings/${recordingId}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation })
+      });
+      setMessage(`已永久删除本地录制：${recordingId}`);
+      onChanged();
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  const scanIncomplete = async () => {
+    setError("");
+    try { setIncomplete(await api("/api/v1/maintenance/incomplete")); }
+    catch (e) { setError((e as Error).message); }
+  };
+
+  const quarantine = async (relativePath: string) => {
+    setError("");
+    try {
+      await api("/api/v1/maintenance/quarantine", {
+        method: "POST",
+        body: JSON.stringify({ relative_path: relativePath })
+      });
+      await scanIncomplete();
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  const rebuild = async () => {
+    setError("");
+    try {
+      const result = await api<{ imported: number; skipped: number }>("/api/v1/maintenance/rebuild-catalog", { method: "POST" });
+      setMessage(`目录重建完成：导入 ${result.imported}，跳过 ${result.skipped}`);
+      onChanged();
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  return <main>
+    {error && <div className="error-banner">{error}</div>}
+    {message && <div className="success-banner">{message}</div>}
+    <section className="panel library">
+      <div className="panel-title">本地录制与手动发布</div>
+      <p className="stage-help">这里只负责确认采集结果并交给标注存储；同步、标注、审核和训练导出全部在独立标注平台完成。</p>
+      {recordings.map((recording) => <article key={recording.recording_id}>
+        <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {recording.data_tier} · {seconds(recording.duration_ns)}</span></div>
+        <div className="status-grid"><span>采集 {recording.state}</span><span>发布 {recording.upload_state}</span></div>
+        <div className="save-row">
+          <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id || recording.upload_state === "published"} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : recording.upload_state === "published" ? "已发布" : "估算并发布"}</button>
+          <button className="danger" disabled={Boolean(busy)} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
+        </div>
+        {recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
+      </article>)}
+    </section>
+    <section className="panel library">
+      <div className="panel-title">本地维护</div>
+      <div className="save-row"><button onClick={scanIncomplete}>扫描不完整文件</button><button onClick={rebuild}>从目录重建索引</button></div>
+      {incomplete.length === 0 ? <span className="muted">尚未扫描，或未发现不完整文件。</span> : incomplete.map((item) => <article key={item.relative_path}><div><strong>{item.relative_path}</strong><span>{item.reason} · {(item.size_bytes / 1024 ** 2).toFixed(2)} MiB</span></div><button onClick={() => quarantine(item.relative_path)}>隔离</button></article>)}
+    </section>
+  </main>;
 }
 
 function Library({ recordings, onChanged }: { recordings: Recording[]; onChanged: () => void }) {

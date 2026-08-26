@@ -21,14 +21,25 @@ identity:
     - "xfan0282"
 
 auth:
-  # 本机开发固定为 local；生产服务器必须改成 iap，且不允许自动回退。
+  # 本机和 SSH 隧道单人开发使用 local；开放团队访问前必须接入真实身份认证。
   mode: "local"
   iap_audience: null
+  local_actor_id: "xfan0282"
+
+annotation:
+  # 独立标注应用；服务器同样只监听回环地址，通过 SSH 隧道访问。
+  server_host: "127.0.0.1"
+  server_port: 8766
+  catalog_path: "~/.local/share/imu-annotation/catalog.sqlite3"
+  review_policy: "single_user"
 
 storage:
-  # 当前只实现本地对象存储；未来 GCS 实现沿用同一个对象键接口。
+  # 默认不接触云端；需要手动发布时用私有 YAML 切换到 gcs。
   backend: "local"
   root: "~/.local/share/imu-data-collector/objects"
+  bucket: null
+  project: null
+  cache_root: "~/.cache/imu-annotation"
 
 imu:
   name: "CW12EU-T"

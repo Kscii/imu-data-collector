@@ -18,8 +18,8 @@ from pathlib import Path
 import h5py
 import uvicorn
 
-from imu_data_collector.api import create_app
 from imu_data_collector.ble import CW12EUBleSource
+from imu_data_collector.capture_api import create_capture_app
 from imu_data_collector.characterization import (
     correct_characterization_stage,
     recover_interrupted_characterization,
@@ -377,7 +377,11 @@ def main() -> None:
                 args=(webui_url,),
                 daemon=True,
             ).start()
-        uvicorn.run(create_app(settings), host=settings.server_host, port=settings.server_port)
+        uvicorn.run(
+            create_capture_app(settings),
+            host=settings.server_host,
+            port=settings.server_port,
+        )
     elif args.command == "validate":
         with h5py.File(args.path, "r") as handle:
             require_video = (

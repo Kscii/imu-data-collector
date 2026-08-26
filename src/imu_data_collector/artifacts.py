@@ -240,6 +240,8 @@ def export_aligned30(
     output_path: Path,
     imu_settings: ImuSettings,
     taxonomy: dict,
+    *,
+    source_hashes_verified: bool = False,
 ) -> Path:
     if document.workflow.state not in {
         ReviewWorkflowState.ACCEPTED,
@@ -248,9 +250,10 @@ def export_aligned30(
         raise ValueError("只有审核通过的录制可以导出训练数据")
     if not imu_settings.accel_counts_per_g or not imu_settings.gyro_counts_per_dps:
         raise ValueError("真实 IMU 尺度校准尚未验证，禁止导出正式训练数据")
-    issues = verify_source_artifacts(document, h5_path, mkv_path)
-    if issues:
-        raise ValueError("；".join(issues))
+    if not source_hashes_verified:
+        issues = verify_source_artifacts(document, h5_path, mkv_path)
+        if issues:
+            raise ValueError("；".join(issues))
     assessment = assess_conditional_fixed_offset(document.sync)
     if assessment.quality != "verified":
         raise ValueError("同步尚未验证，禁止导出正式训练数据")

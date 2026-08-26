@@ -2,9 +2,10 @@
 
 ## 本地录制原子单位
 
-每个 `recording_id` 有独立目录。正常收尾后事实层是同名 H5/MKV；两者不再因同步、标注或
-审核而修改。第一次访问旧录制时，平台从 H5 的兼容快照迁移并生成相邻 `review.json`，其中
-记录源文件大小和 SHA-256。
+每个 `recording_id` 有独立本地目录。正常收尾后事实层是同名 H5/MKV；两者不再因同步、
+标注或审核而修改。用户在采集页确认后手动发布 `capture.h5`、`video.mkv`、可重建的
+`preview.mp4`，最后写入 `manifest.json`。只有 manifest 已出现且三个对象的大小与 SHA-256
+一致，标注端才会索引该录制。
 
 `review.json` 只保存当前同步、标注、工作流状态、最新审核意见和单调增加的 revision。并发
 保存必须携带预期 revision；过期写入返回冲突，不覆盖新结果。不保留完整编辑历史。
@@ -17,12 +18,13 @@ unassigned -> in_progress -> submitted -> accepted -> exported
                     +-- reject --+
 ```
 
-标注者不能审核自己的提交。管理员可重开 accepted/exported，重开会使当前导出状态失效。
+`review_policy=single_user` 时 submit 直接进入 accepted；`two_person` 时才经过 submitted 且
+标注者不能审核自己的提交。管理员只可重开 accepted/exported，重开会使当前导出状态失效。
 
 ## 文件产物
 
-- `<recording_id>.capture.tar`：手动按需生成的无压缩源包，包含 manifest、capture H5 和 MKV，
-  不包含 `review.json`。
+- `captures/<recording_id>/manifest.json`：采集端与标注端唯一稳定交接合同，引用原始 H5、
+  MKV 和 MP4 代理及其 SHA-256。
 - `aligned30.h5`：通过全部门禁后生成的单录制训练文件，只有 `/samples`、`/sequences`、
   `/annotations` 三个根数据集。
 - `cw12eu_training_release_NNNN.tar`：把已导出的单录制 H5 汇总成不可变训练发布；manifest
@@ -42,12 +44,13 @@ IMU 使用外置同步决定映射到视频时间，取 IMU 与视频公共有�
 
 ## 配置与秘密
 
-服务器结构化配置放 `/etc/imu-annotation/config.yaml`，建议 root/服务用户所有、权限 `0600`。
-九名用户的已验证 Google 邮箱/subject、UniKey 和角色属于结构化配置，不属于环境变量。
+服务器结构化配置放 `/etc/imu-annotation/config.yaml`，建议 root 所有、服务可读、权限
+`0640` 或更严格。九名 UniKey、角色、审核策略、bucket 和路径属于结构化配置，不属于环境变量。
 
 真正的 OAuth client secret 等秘密放单独 `secret.env`，权限同样为 `0600`。仓库只提交
 `configs/default.yaml` 与 `configs/secret.env.example`，不提交真实配置或秘密。未来 VM 使用
 绑定服务账号访问 GCS，不下载服务账号 JSON key。
 
-当前只实现 `LocalFilesystemStore`。获得服务器后再实现 Sydney 区域 GCS、可续传上传、短期
-签名 URL、浏览器 MP4 代理和 IAP JWT 验证；生产 IAP 模式不得回退到本机身份头。
+当前已实现 `LocalFilesystemStore` 与使用 ADC 的 `GcsObjectStore`、浏览器 MP4 代理、对象
+generation 并发控制和 manifest-last 发布。服务器通过专用服务账号访问 Sydney GCS；本轮
+仅通过 SSH 隧道单人使用。后台队列、上传进度、自动重试和团队身份认证仍是后续迭代。
