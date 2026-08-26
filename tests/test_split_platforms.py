@@ -134,3 +134,10 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
 
         review = client.get(f"/api/v1/recordings/{recording_id}/review").json()
         assert review["workflow"]["review_policy"] == "single_user"
+
+        forbidden = client.post(
+            f"/api/v1/recordings/{recording_id}/aligned30",
+            json={"expected_revision": 0},
+        )
+        assert forbidden.status_code == 422
+        assert "test 数据永久禁止" in forbidden.json()["detail"]
