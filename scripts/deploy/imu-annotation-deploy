@@ -14,7 +14,12 @@ release_dir="${release_root}/${release_id}"
 incoming="${release_root}/.incoming-${release_id}"
 current_link=/opt/imu-annotation/current
 previous=""
-python_candidates=(/opt/imu-annotation/python/*/bin/python3.12)
+python_root=/opt/imu-annotation/python
+mapfile -t python_candidates < <(
+  find "${python_root}" -mindepth 3 -maxdepth 3 -type f -executable \
+    -path "${python_root}/cpython-3.12.*-linux-x86_64-gnu/bin/python3.12" \
+    -print | sort -V
+)
 
 [[ ${bundle} =~ ^/tmp/imu-annotation-[0-9a-f]{40}\.tar\.gz$ ]] || {
   echo "部署包路径不符合白名单" >&2
@@ -32,8 +37,14 @@ python_candidates=(/opt/imu-annotation/python/*/bin/python3.12)
   echo "部署包不存在" >&2
   exit 1
 }
-[[ ${#python_candidates[@]} -eq 1 && -x ${python_candidates[0]} ]] || {
-  echo "受管 Python 路径不唯一或不可执行" >&2
+[[ ${#python_candidates[@]} -gt 0 ]] || {
+  echo "没有找到可执行的 Python 3.12 受管补丁版本" >&2
+  exit 1
+}
+managed_python=${python_candidates[$((${#python_candidates[@]} - 1))]}
+python_version=$("${managed_python}" --version 2>&1)
+[[ ${python_version} == Python\ 3.12.* ]] || {
+  echo "受管 Python 版本不符合要求：${python_version}" >&2
   exit 1
 }
 
@@ -62,7 +73,7 @@ if [[ ! -d ${release_dir} ]]; then
   chown -R kscii:kscii "${incoming}" /var/lib/imu-annotation
   runuser -u kscii -- /usr/local/bin/uv sync \
     --frozen --no-dev --project "${incoming}" \
-    --python "${python_candidates[0]}"
+    --python "${managed_python}"
   chmod -R a-w "${incoming}"
   mv "${incoming}" "${release_dir}"
 fi
