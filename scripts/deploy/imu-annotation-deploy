@@ -13,6 +13,8 @@ release_root=/opt/imu-annotation/releases
 release_dir="${release_root}/${release_id}"
 incoming="${release_root}/.incoming-${release_id}"
 current_link=/opt/imu-annotation/current
+config_path=/etc/imu-annotation/config.yaml
+ready_marker="${release_dir}/.deployment-ready"
 previous=""
 python_root=/opt/imu-annotation/python
 mapfile -t python_candidates < <(
@@ -48,6 +50,14 @@ python_version=$("${managed_python}" --version 2>&1)
   exit 1
 }
 
+preflight_release() {
+  local candidate=$1
+  [[ -x ${candidate}/.venv/bin/imu-annotation ]] || return 1
+  runuser -u kscii -- "${candidate}/.venv/bin/python" -c \
+    'from pathlib import Path; import sys; from imu_data_collector.config import load_settings; load_settings(Path(sys.argv[1]))' \
+    "${config_path}"
+}
+
 actual_sha256=$(sha256sum "${bundle}" | cut -d ' ' -f 1)
 [[ ${actual_sha256} == "${expected_sha256}" ]] || {
   echo "部署包 SHA-256 不匹配" >&2
@@ -66,16 +76,49 @@ if [[ -L ${current_link} ]]; then
   previous=$(readlink -f "${current_link}")
 fi
 
+if [[ -d ${release_dir} && ! -f ${ready_marker} ]]; then
+  [[ ${previous} != "${release_dir}" ]] || {
+    echo "当前 release 缺少完成标记，拒绝原地重建" >&2
+    exit 1
+  }
+  rm -rf -- "${release_dir}"
+fi
+
 if [[ ! -d ${release_dir} ]]; then
   rm -rf -- "${incoming}"
   mkdir -p "${incoming}"
   tar -xzf "${bundle}" --no-same-owner --no-same-permissions -C "${incoming}"
   chown -R kscii:kscii "${incoming}" /var/lib/imu-annotation
-  runuser -u kscii -- /usr/local/bin/uv sync \
-    --frozen --no-dev --project "${incoming}" \
-    --python "${managed_python}"
-  chmod -R a-w "${incoming}"
   mv "${incoming}" "${release_dir}"
+  if ! runuser -u kscii -- /usr/local/bin/uv sync \
+    --frozen --no-dev --project "${release_dir}" \
+    --python "${managed_python}"; then
+    rm -rf -- "${release_dir}"
+    echo "受管虚拟环境安装失败，未切换 current" >&2
+    exit 1
+  fi
+  if ! preflight_release "${release_dir}"; then
+    rm -rf -- "${release_dir}"
+    echo "新 release 入口、导入或配置预检失败，未切换 current" >&2
+    exit 1
+  fi
+  printf '%s\n' "${release_id}" >"${ready_marker}"
+  chmod -R a-w "${release_dir}"
+fi
+
+[[ $(<"${ready_marker}") == "${release_id}" ]] || {
+  echo "release 完成标记无效" >&2
+  exit 1
+}
+preflight_release "${release_dir}" || {
+  echo "新 release 入口、导入或配置预检失败" >&2
+  exit 1
+}
+if [[ -n ${previous} ]]; then
+  preflight_release "${previous}" || {
+    echo "当前私有配置与上一版本不兼容，无法保证失败回滚" >&2
+    exit 1
+  }
 fi
 
 install -m 0644 "${release_dir}/configs/systemd/imu-annotation.service" \

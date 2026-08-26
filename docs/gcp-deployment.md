@@ -105,8 +105,11 @@ tunnel、OS Admin Login 和目标 VM 部署所需能力，不授予 GCS 参与�
 `imu-annotation-rollback` 安装到 `/usr/local/sbin/`。部署入口验证文件名、commit、SHA-256 和
 TAR 路径，只从 `/opt/imu-annotation/python/cpython-3.12.*-linux-x86_64-gnu/` 中选择最新的
 完整补丁版本并再次核对解释器版本。它不会把 `cpython-3.12-linux-x86_64-gnu` 这类通用目录
-误判为第二套解释器。随后使用锁文件建立只读虚拟环境，再原子切换 symlink、重启并检查
-回环健康接口。新版本
+误判为第二套解释器。源码先进入临时目录，移动到最终 release 路径后才使用锁文件建立
+虚拟环境，避免入口脚本和可编辑安装残留 `.incoming-*` 绝对路径。入口、Python 导入、当前私有
+配置和上一版本回滚兼容性全部预检通过后，才写入 `.deployment-ready` 完成标记并原子切换
+symlink、重启和检查回环健康接口。自动部署包固定文件顺序、时间戳和属主，并排除 Python
+缓存。新版本
 失败时自动尝试回到上一版本。回滚 workflow 只能切到服务器已保留的 release 目录。
 
 服务运行身份 `kscii` 通过 VM 专用服务账号访问 GCS，不保存服务账号 JSON key。应用绑定

@@ -9,10 +9,32 @@ fi
 release_id=$1
 release_dir="/opt/imu-annotation/releases/${release_id}"
 current_link=/opt/imu-annotation/current
-[[ -d ${release_dir} ]] || {
+config_path=/etc/imu-annotation/config.yaml
+previous=""
+
+preflight_release() {
+  local candidate=$1
+  [[ -x ${candidate}/.venv/bin/imu-annotation ]] || return 1
+  runuser -u kscii -- "${candidate}/.venv/bin/python" -c \
+    'from pathlib import Path; import sys; from imu_data_collector.config import load_settings; load_settings(Path(sys.argv[1]))' \
+    "${config_path}"
+}
+
+[[ -d ${release_dir} && -f ${release_dir}/.deployment-ready ]] || {
   echo "服务器没有这个已部署版本：${release_id}" >&2
   exit 1
 }
+preflight_release "${release_dir}" || {
+  echo "目标版本入口、导入或私有配置预检失败" >&2
+  exit 1
+}
+if [[ -L ${current_link} ]]; then
+  previous=$(readlink -f "${current_link}")
+  preflight_release "${previous}" || {
+    echo "当前版本无法通过回滚保护预检" >&2
+    exit 1
+  }
+fi
 
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
@@ -26,5 +48,10 @@ for _attempt in $(seq 1 20); do
   sleep 1
 done
 
+if [[ -n ${previous} ]]; then
+  ln -s "${previous}" "${current_link}.failed"
+  mv -Tf "${current_link}.failed" "${current_link}"
+  systemctl restart imu-annotation.service
+fi
 echo "回滚版本健康检查失败" >&2
 exit 1
