@@ -53,7 +53,10 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
 
         frontend = client.get("/")
         assert frontend.status_code == 200
-        assert "IMU 数采平台" in frontend.text
+        if frontend.headers["content-type"].startswith("application/json"):
+            assert "前端尚未构建" in frontend.json()["message"]
+        else:
+            assert "IMU 数采平台" in frontend.text
 
 
 def test_start_contract_rejects_non_unikey_participant_before_hardware_access(

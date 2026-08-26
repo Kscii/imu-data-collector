@@ -22,10 +22,10 @@
 Cloudflare 只新增 `imu` 子域，不修改当前根域记录。`imu` 使用指向负载均衡静态 IPv4 的 A
 记录并保持 **DNS only（灰云）**，让 Google 托管证书和 IAP 直接终止 HTTPS。
 
-VM 目标标签使用 `imu-annotation`。专用防火墙先允许 Google Front End/健康检查来源
-`35.191.0.0/16`、`130.211.0.0/22` 访问 8766，允许 IAP TCP 转发来源
-`35.235.240.0/20` 访问 SSH，然后用更低优先级的 target-tag deny 规则阻断其他入站流量。
-不要修改项目内供其他 VM 使用的共享默认规则。
+VM 目标标签使用 `imu-annotation`。专用防火墙只允许 Google Front End/健康检查来源
+`35.191.0.0/16`、`130.211.0.0/22` 访问 8766。当前 VM 同时承载根域既有服务，因此不增加
+覆盖整台 VM 的 deny，也不修改供其他服务/VM 使用的 22、80、443、8000 或共享默认规则；
+这些既有规则本身并没有开放 8766。
 
 ## 双重身份门禁
 
@@ -85,8 +85,8 @@ GCP_ZONE=australia-southeast1-a
 GCP_VM=soft3888-label
 ```
 
-WIF provider 的 attribute condition 必须同时限制
-`repository == Kscii/imu-data-collector` 和 `ref == refs/heads/main`。部署服务账号只授予 IAP
+WIF provider 的 attribute condition 必须同时限制不可变 repository ID `1347062318` 和
+`ref == refs/heads/main`。部署服务账号只授予 IAP
 tunnel、OS Admin Login 和目标 VM 部署所需能力，不授予 GCS 参与者数据权限。workflow 只处理
 源码和静态前端，不下载 H5/MKV。
 
@@ -107,8 +107,8 @@ TAR 路径，使用锁文件建立只读虚拟环境，再原子切换 symlink�
 失败时自动尝试回到上一版本。回滚 workflow 只能切到服务器已保留的 release 目录。
 
 服务运行身份 `kscii` 通过 VM 专用服务账号访问 GCS，不保存服务账号 JSON key。应用绑定
-`0.0.0.0:8766` 是为了接收负载均衡流量；这只有在上述 target-tag 防火墙 deny 已生效后才
-允许。健康检查 `/api/v1/health` 不包含敏感数据；其余 `/api/v1/*` 都要求可信身份。
+`0.0.0.0:8766` 是为了接收负载均衡流量；防火墙仅给 Google Front End 来源开放该端口。
+健康检查 `/api/v1/health` 不包含敏感数据；其余 `/api/v1/*` 都要求可信身份。
 
 ## 发布验收和故障处理
 
