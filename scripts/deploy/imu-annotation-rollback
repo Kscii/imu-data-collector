@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
+  echo "用法：imu-annotation-rollback <40位commit>" >&2
+  exit 2
+fi
+
+release_id=$1
+release_dir="/opt/imu-annotation/releases/${release_id}"
+current_link=/opt/imu-annotation/current
+[[ -d ${release_dir} ]] || {
+  echo "服务器没有这个已部署版本：${release_id}" >&2
+  exit 1
+}
+
+ln -s "${release_dir}" "${current_link}.next"
+mv -Tf "${current_link}.next" "${current_link}"
+systemctl restart imu-annotation.service
+
+for _attempt in $(seq 1 20); do
+  if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null; then
+    echo "回滚完成：${release_id}"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "回滚版本健康检查失败" >&2
+exit 1

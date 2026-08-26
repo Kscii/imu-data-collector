@@ -82,6 +82,7 @@ class IdentitySettings:
         "xliu0452",
     )
     admins: tuple[str, ...] = ("xfan0282",)
+    email_to_unikey: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -132,6 +133,11 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     for tuple_key in ("allowed_unikeys", "admins"):
         if tuple_key in identity_values:
             identity_values[tuple_key] = tuple(identity_values[tuple_key])
+    if "email_to_unikey" in identity_values:
+        identity_values["email_to_unikey"] = {
+            str(email).strip().lower(): str(unikey)
+            for email, unikey in identity_values["email_to_unikey"].items()
+        }
     identity = IdentitySettings(**identity_values)
     for key in ("data_root", "catalog_path", "activity_taxonomy_path"):
         if key in values:

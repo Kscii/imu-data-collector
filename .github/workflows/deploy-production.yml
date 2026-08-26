@@ -1,0 +1,80 @@
+name: 部署生产环境
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 输入 DEPLOY PRODUCTION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY PRODUCTION'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://imu.kscii.tech
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 重新执行发布门禁
+        run: |
+          uv sync --frozen --dev
+          uv run ruff check src tests scripts/verify-soft3888-compatibility.py
+          uv run pytest -q
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+      - name: 生成最小部署包
+        id: bundle
+        run: |
+          bundle="imu-annotation-${GITHUB_SHA}.tar.gz"
+          tar -czf "${bundle}" \
+            LICENSE README.md pyproject.toml uv.lock \
+            configs/activities.yaml configs/systemd/imu-annotation.service \
+            configs/systemd/imu-annotation-gc.service \
+            configs/systemd/imu-annotation-gc.timer \
+            frontend/dist-annotation src
+          digest="$(sha256sum "${bundle}" | cut -d ' ' -f 1)"
+          echo "path=${bundle}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${digest}" >> "${GITHUB_OUTPUT}"
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: ">= 416.0.0"
+      - name: 通过 IAP 上传并原子部署
+        env:
+          BUNDLE: ${{ steps.bundle.outputs.path }}
+          BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          ZONE: ${{ vars.GCP_ZONE }}
+          VM: ${{ vars.GCP_VM }}
+        run: |
+          gcloud compute scp --quiet --tunnel-through-iap \
+            --project "${PROJECT_ID}" --zone "${ZONE}" \
+            "${BUNDLE}" "${VM}:/tmp/${BUNDLE}"
+          gcloud compute ssh --quiet --tunnel-through-iap \
+            --project "${PROJECT_ID}" --zone "${ZONE}" "${VM}" \
+            --command "sudo /usr/local/sbin/imu-annotation-deploy /tmp/${BUNDLE} ${GITHUB_SHA} ${BUNDLE_SHA256}"
+      - name: 验证公网入口
+        run: curl --fail --silent --show-error --output /dev/null https://imu.kscii.tech/api/v1/health

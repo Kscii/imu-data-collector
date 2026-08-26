@@ -108,7 +108,15 @@ def create_training_release(
             info.mtime = 0
             archive.addfile(info, io.BytesIO(manifest_bytes))
             for archive_path, source in archive_items:
-                archive.add(source, arcname=archive_path, recursive=False)
+                info = archive.gettarinfo(str(source), arcname=archive_path)
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                info.mtime = 0
+                info.mode = 0o644
+                with source.open("rb") as handle:
+                    archive.addfile(info, handle)
         temporary.replace(output_path)
     finally:
         temporary.unlink(missing_ok=True)

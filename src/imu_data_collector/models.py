@@ -256,11 +256,13 @@ class ReviewWorkflowRequest(BaseModel):
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2000)
 
-    @model_validator(mode="after")
-    def validate_actor(self) -> ReviewWorkflowRequest:
-        if not UNIKEY_RE.fullmatch(self.actor_id):
-            raise ValueError("actor_id must be a lowercase UniKey-like identifier")
-        return self
+
+class AnnotationReviewWorkflowRequest(BaseModel):
+    """公网标注端请求；操作者只能由服务端登录会话提供。"""
+
+    action: Literal["assign", "submit", "accept", "reject", "reopen", "mark_exported"]
+    expected_revision: int = Field(ge=0)
+    comment: str = Field(default="", max_length=2000)
 
 
 class RecordingDeleteRequest(BaseModel):
@@ -268,14 +270,12 @@ class RecordingDeleteRequest(BaseModel):
 
 
 class AnnotationRecordingDeleteRequest(BaseModel):
-    actor_id: str
     confirmation: str
 
-    @model_validator(mode="after")
-    def validate_actor(self) -> AnnotationRecordingDeleteRequest:
-        if not UNIKEY_RE.fullmatch(self.actor_id):
-            raise ValueError("actor_id must be a lowercase UniKey-like identifier")
-        return self
+
+class TrainingReleaseRevokeRequest(BaseModel):
+    confirmation: str
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class RevisionRequest(BaseModel):

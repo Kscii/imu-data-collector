@@ -32,10 +32,21 @@ unassigned -> in_progress -> submitted -> accepted -> exported
 
 文件名不编码可变状态。状态来自 catalog 和 `review.json`。每个训练发布除了 TAR 内部 manifest，
 还写入对象存储侧车 `releases/<release_id>/manifest.json`，供删除门禁直接核对 recording ID。
-已经进入任何训练发布的录制不能逐条硬删除；若只发现没有侧车清单的旧 TAR，也保守拒绝删除。
-尚未发布的录制允许九名白名单成员永久删除，但必须二次输入 `DELETE <recording_id>`。删除范围
-包括原始 H5、MKV、MP4、manifest、review、导出、缓存和共享同步实验引用，不设置回收站或
-恢复副本。删除期间 catalog 先标记 `deleting`，并使用对象 generation 防止覆盖并发更新。
+已经进入有效训练发布的录制不能逐条删除；若只发现没有侧车清单的旧 TAR，也保守拒绝删除。
+尚未发布的录制允许九名白名单成员删除，但必须二次输入 `DELETE <recording_id>`。删除范围
+包括原始 H5、MKV、MP4、manifest、review、导出、缓存和共享同步实验引用。应用立即隐藏并
+删除活动对象，GCS 存储桶提供 7 天软删除；删除期间 catalog 先标记 `deleting`，并使用对象
+generation 防止覆盖并发更新。
+
+所有白名单成员都可以创建、列出和下载训练发布。发布使用当前已导出 prod 录制及其 H5
+SHA-256 计算内容指纹；内容完全相同时直接返回现有发布，不重复占用空间。撤销必须输入
+`REVOKE <release_id>` 并填写原因：系统先写入墓碑使其立即从列表消失和停止下载，再删除活动
+manifest/TAR，最后把墓碑标为 `revoked`。中途失败可用同一确认重试。墓碑只保留发布编号、
+操作者、原因、内容指纹和文件哈希等小型审计信息，不保留 TAR。
+
+每日垃圾回收只检查 `captures/<recording_id>/`：一组对象超过 7 天仍没有 manifest 才视为
+中断上传并清除；时间不足、时间戳未知或已有 manifest 的组全部跳过。先运行
+`imu-annotation cleanup-orphans --dry-run` 可只查看候选。
 
 标注页可以随时下载当前 `review.json` 快照。只有 `prod`、同步、标注、审核和物理校准全部
 通过后，页面才允许生成并下载 `aligned30.h5`；`test` 只能下载 review，永远不能生成训练
@@ -56,12 +67,14 @@ impact 取最近网格点，恰好半格时向后取整。
 ## 配置与秘密
 
 服务器结构化配置放 `/etc/imu-annotation/config.yaml`，建议 root 所有、服务可读、权限
-`0640` 或更严格。九名 UniKey、角色、审核策略、bucket 和路径属于结构化配置，不属于环境变量。
+`0640` 或更严格。九名 UniKey、邮箱到 UniKey 的私有映射、角色、审核策略、bucket 和路径
+属于结构化配置，不属于环境变量。邮箱映射含个人账号，只写服务器私有 YAML，不提交仓库。
 
 真正的 OAuth client secret 等秘密放单独 `secret.env`，权限同样为 `0600`。仓库只提交
 `configs/default.yaml` 与 `configs/secret.env.example`，不提交真实配置或秘密。未来 VM 使用
 绑定服务账号访问 GCS，不下载服务账号 JSON key。
 
 当前已实现 `LocalFilesystemStore` 与使用 ADC 的 `GcsObjectStore`、浏览器 MP4 代理、对象
-generation 并发控制和 manifest-last 发布。服务器通过专用服务账号访问 Sydney GCS；本轮
-仅通过 SSH 隧道单人使用。后台队列、上传进度、自动重试和团队身份认证仍是后续迭代。
+generation 并发控制和 manifest-last 发布。服务器通过专用服务账号访问 Sydney GCS；公网
+访问使用 Google IAP JWT，再经过应用私有邮箱映射和 UniKey 白名单。后台队列、上传进度和
+自动重试仍是后续迭代。

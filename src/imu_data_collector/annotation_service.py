@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import shutil
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +23,12 @@ from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     AnnotationDocument,
     AnnotationEvent,
+    AnnotationReviewWorkflowRequest,
     BinaryLabel,
     CaptureManifestV2,
     EventKind,
     ReviewDocument,
     ReviewPolicy,
-    ReviewWorkflowRequest,
     ReviewWorkflowState,
     SyncDocument,
     SyncExperimentDocument,
@@ -108,20 +110,28 @@ class AnnotationService:
             return SyncExperimentDocument(experiment_id=experiment_id)
 
     def save_sync_experiment(
-        self, experiment_id: str, document: SyncExperimentDocument
+        self,
+        experiment_id: str,
+        document: SyncExperimentDocument,
+        actor_id: str,
     ) -> SyncExperimentDocument:
+        self._require_allowed_actor(actor_id)
         if document.experiment_id != experiment_id:
             raise ValueError("experiment_id 与 URL 不一致")
         current = self.sync_experiment(experiment_id)
         if document.revision != current.revision:
             raise ReviewConflictError("同步诊断观察已更新，请刷新后重试")
-        for observation in document.observations:
-            self._require_allowed_actor(observation.reviewer_id)
+        observations = [
+            observation.model_copy(update={"reviewer_id": actor_id})
+            for observation in document.observations
+        ]
+        for observation in observations:
             self.required_manifest(observation.recording_id)
         saved = document.model_copy(
             update={
                 "revision": current.revision + 1,
                 "updated_at_utc": datetime.now(UTC).isoformat(),
+                "observations": observations,
             }
         )
         key = f"diagnostics/sync-experiments/{experiment_id}.json"
@@ -210,10 +220,30 @@ class AnnotationService:
         return self.review(recording_id).annotations
 
     def save_annotations(
-        self, recording_id: str, document: AnnotationDocument
+        self,
+        recording_id: str,
+        document: AnnotationDocument,
+        actor_id: str,
     ) -> AnnotationDocument:
+        self._require_allowed_actor(actor_id)
         manifest = self.required_manifest(recording_id)
         h5_path = self.cached_h5(manifest)
+        document = document.model_copy(
+            update={
+                "segments": [
+                    item.model_copy(update={"annotator_id": actor_id})
+                    for item in document.segments
+                ],
+                "events": [
+                    item.model_copy(update={"annotator_id": actor_id})
+                    for item in document.events
+                ],
+                "exclusions": [
+                    item.model_copy(update={"annotator_id": actor_id})
+                    for item in document.exclusions
+                ],
+            }
+        )
         enriched = self._canonicalize_and_enrich_events(h5_path, document)
         annotators = {
             item.annotator_id
@@ -221,8 +251,6 @@ class AnnotationService:
         }
         if len(annotators) > 1:
             raise ValueError("一个 review.json 修订只能由一名标注者保存")
-        for actor in annotators:
-            self._require_allowed_actor(actor)
         issues = validate_annotations(enriched, self.taxonomy, manifest.duration_ns)
         if issues:
             raise ValueError("；".join(issues))
@@ -239,7 +267,7 @@ class AnnotationService:
                 ReviewWorkflowState.EXPORTED,
             }:
                 raise ValueError("已提交或完成的标注必须先重开")
-            actor = next(iter(annotators), review.workflow.annotator_id)
+            actor = next(iter(annotators), actor_id)
             workflow = review.workflow
             if workflow.state == ReviewWorkflowState.UNASSIGNED:
                 workflow = workflow_with_timestamp(
@@ -300,17 +328,23 @@ class AnnotationService:
         ]
         return document.model_copy(update={"events": events})
 
-    def save_sync(self, recording_id: str, document: SyncDocument) -> dict[str, Any]:
+    def save_sync(
+        self,
+        recording_id: str,
+        document: SyncDocument,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        self._require_allowed_actor(actor_id)
         manifest = self.required_manifest(recording_id)
-        for actor in {
-            value
-            for value in (
-                document.reviewer_id,
-                *(item.reviewer_id for item in document.anchors),
-            )
-            if value
-        }:
-            self._require_allowed_actor(actor)
+        document = document.model_copy(
+            update={
+                "reviewer_id": actor_id,
+                "anchors": [
+                    item.model_copy(update={"reviewer_id": actor_id})
+                    for item in document.anchors
+                ],
+            }
+        )
         h5_path = self.cached_h5(manifest)
         self._validate_sync_sources(h5_path, document)
         assessment = assess_conditional_fixed_offset(document)
@@ -402,9 +436,12 @@ class AnnotationService:
         }
 
     def update_workflow(
-        self, recording_id: str, request: ReviewWorkflowRequest
+        self,
+        recording_id: str,
+        request: AnnotationReviewWorkflowRequest,
+        actor_id: str,
     ) -> ReviewDocument:
-        self._require_allowed_actor(request.actor_id)
+        self._require_allowed_actor(actor_id)
         manifest = self.required_manifest(recording_id)
 
         def update(review: ReviewDocument) -> ReviewDocument:
@@ -419,14 +456,14 @@ class AnnotationService:
                 workflow = workflow_with_timestamp(
                     workflow,
                     state=ReviewWorkflowState.IN_PROGRESS,
-                    annotator_id=request.actor_id,
+                    annotator_id=actor_id,
                     reviewer_id=None,
                     review_comment="",
                 )
             elif action == "submit":
                 if workflow.state != ReviewWorkflowState.IN_PROGRESS:
                     raise ValueError("只有进行中的标注可以完成")
-                if workflow.annotator_id != request.actor_id:
+                if workflow.annotator_id != actor_id:
                     raise ValueError("只有当前标注者可以完成")
                 if not review.annotations.finalized:
                     raise ValueError("完成前必须定稿标注")
@@ -445,7 +482,7 @@ class AnnotationService:
                     raise ValueError("单人策略没有独立审核步骤")
                 if workflow.state != ReviewWorkflowState.SUBMITTED:
                     raise ValueError("只有已提交标注可以审核")
-                if workflow.annotator_id == request.actor_id:
+                if workflow.annotator_id == actor_id:
                     raise ValueError("标注者不能审核自己的标注")
                 if action == "reject" and not request.comment.strip():
                     raise ValueError("驳回必须填写意见")
@@ -456,11 +493,11 @@ class AnnotationService:
                         if action == "accept"
                         else ReviewWorkflowState.IN_PROGRESS
                     ),
-                    reviewer_id=request.actor_id,
+                    reviewer_id=actor_id,
                     review_comment=request.comment.strip(),
                 )
             elif action == "reopen":
-                if request.actor_id not in self.settings.identity.admins:
+                if actor_id not in self.settings.identity.admins:
                     raise ValueError("只有管理员可以重开")
                 if workflow.state not in {
                     ReviewWorkflowState.ACCEPTED,
@@ -524,9 +561,13 @@ class AnnotationService:
         self.reviews.mutate(manifest, expected_revision, mark_exported)
         return key
 
-    def create_release(self) -> str:
+    def create_release(self, actor_id: str) -> dict[str, Any]:
+        """把当前全部已导出 prod 数据发布为幂等的不可变快照。"""
+
+        self._require_allowed_actor(actor_id)
         with self._release_delete_lock:
             files: list[tuple[str, str, Path]] = []
+            recordings: list[dict[str, str]] = []
             for manifest in self.catalog.list():
                 if manifest.data_tier.value != "prod":
                     continue
@@ -536,10 +577,32 @@ class AnnotationService:
                 key = f"exports/{manifest.recording_id}/aligned30.h5"
                 path = self.cache_root / manifest.recording_id / "aligned30.h5"
                 self.store.download_file(key, path)
+                digest = sha256_file(path)
                 files.append((manifest.participant_id, manifest.recording_id, path))
+                recordings.append(
+                    {
+                        "participant_id": manifest.participant_id,
+                        "recording_id": manifest.recording_id,
+                        "aligned30_sha256": digest,
+                    }
+                )
             if not files:
                 raise ValueError("没有可发布的 prod 导出")
-            release_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            recordings.sort(key=lambda item: (item["participant_id"], item["recording_id"]))
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    recordings,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            for existing in self.list_releases():
+                if existing.get("content_fingerprint") == fingerprint:
+                    return {**existing, "created": False}
+
+            timestamp = datetime.now(UTC)
+            release_id = f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}-{fingerprint[:8]}"
             path = self.cache_root / "releases" / f"cw12eu_{release_id}.tar"
             create_training_release(files, path)
             key = f"releases/{release_id}/{path.name}"
@@ -550,25 +613,207 @@ class AnnotationService:
                 content_type="application/x-tar",
                 metadata={"sha256": archive_sha256, "release_id": release_id},
             )
+            payload: dict[str, Any] = {
+                "schema_version": "2.0.0",
+                "release_id": release_id,
+                "created_at_utc": timestamp.isoformat(),
+                "created_by": actor_id,
+                "content_fingerprint": fingerprint,
+                "archive_object_key": key,
+                "archive_sha256": archive_sha256,
+                "archive_size_bytes": path.stat().st_size,
+                "recordings": recordings,
+            }
             self.store.write_json(
                 f"releases/{release_id}/manifest.json",
-                {
-                    "schema_version": "1.0.0",
-                    "release_id": release_id,
-                    "archive_object_key": key,
-                    "archive_sha256": archive_sha256,
-                    "recordings": [
-                        {
-                            "participant_id": participant_id,
-                            "recording_id": recording_id,
-                            "aligned30_sha256": sha256_file(aligned_path),
-                        }
-                        for participant_id, recording_id, aligned_path in files
-                    ],
-                },
+                payload,
                 if_generation_match=0,
             )
-            return key
+            logger.info(
+                "创建训练发布 release_id=%s actor_id=%s recordings=%d",
+                release_id,
+                actor_id,
+                len(recordings),
+            )
+            return {**self._release_summary(payload), "created": True}
+
+    def list_releases(self) -> list[dict[str, Any]]:
+        """列出仍可下载的训练发布；撤销项不出现在普通列表。"""
+
+        tombstoned = {
+            item.key.removeprefix("release-tombstones/").removesuffix(".json")
+            for item in self.store.list("release-tombstones/")
+            if item.key.endswith(".json")
+        }
+        releases: list[dict[str, Any]] = []
+        for info in self.store.list("releases/"):
+            if not info.key.endswith("/manifest.json"):
+                continue
+            payload, _generation = self.store.read_json(info.key)
+            release_id = str(payload.get("release_id", ""))
+            if not release_id or release_id in tombstoned:
+                continue
+            releases.append(self._release_summary(payload))
+        return sorted(
+            releases,
+            key=lambda item: str(item.get("created_at_utc") or item["release_id"]),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _release_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "release_id": str(payload["release_id"]),
+            "created_at_utc": payload.get("created_at_utc"),
+            "created_by": payload.get("created_by"),
+            "content_fingerprint": payload.get("content_fingerprint"),
+            "archive_object_key": str(payload["archive_object_key"]),
+            "archive_sha256": str(payload["archive_sha256"]),
+            "archive_size_bytes": int(payload.get("archive_size_bytes", 0)),
+            "recording_count": len(payload.get("recordings", [])),
+            "status": "active",
+        }
+
+    def release_download(self, release_id: str) -> tuple[dict[str, Any], Any]:
+        """返回有效发布清单和 TAR 对象信息。"""
+
+        self._validate_release_id(release_id)
+        if self.store.stat(f"release-tombstones/{release_id}.json") is not None:
+            raise RuntimeError("该训练发布已经撤销")
+        try:
+            payload, _generation = self.store.read_json(
+                f"releases/{release_id}/manifest.json"
+            )
+        except FileNotFoundError as error:
+            raise KeyError(release_id) from error
+        archive = self.store.stat(str(payload["archive_object_key"]))
+        if archive is None:
+            raise ValueError("训练发布 TAR 缺失")
+        return payload, archive
+
+    def release_status(self, release_id: str) -> dict[str, Any]:
+        self._validate_release_id(release_id)
+        tombstone_key = f"release-tombstones/{release_id}.json"
+        try:
+            tombstone, _generation = self.store.read_json(tombstone_key)
+            return {
+                "release_id": release_id,
+                "status": str(tombstone.get("status", "revoked")),
+                "revoked_at_utc": tombstone.get("revoked_at_utc"),
+                "revoked_by": tombstone.get("revoked_by"),
+                "reason": tombstone.get("reason"),
+                "archive_sha256": tombstone.get("archive_sha256"),
+            }
+        except FileNotFoundError:
+            pass
+        try:
+            payload, _generation = self.store.read_json(
+                f"releases/{release_id}/manifest.json"
+            )
+        except FileNotFoundError as error:
+            raise KeyError(release_id) from error
+        return self._release_summary(payload)
+
+    def revoke_release(
+        self,
+        release_id: str,
+        *,
+        actor_id: str,
+        confirmation: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """撤销错误发布，并让平台立即停止展示和下载。"""
+
+        self._require_allowed_actor(actor_id)
+        self._validate_release_id(release_id)
+        if confirmation != f"REVOKE {release_id}":
+            raise ValueError(f"二次确认必须完整输入 REVOKE {release_id}")
+        if not reason.strip():
+            raise ValueError("撤销训练发布必须填写原因")
+        with self._release_delete_lock:
+            tombstone_key = f"release-tombstones/{release_id}.json"
+            try:
+                tombstone, tombstone_generation = self.store.read_json(tombstone_key)
+                if tombstone.get("status") == "revoked":
+                    return {
+                        "release_id": release_id,
+                        "status": "revoked",
+                        "revoked": True,
+                    }
+            except FileNotFoundError:
+                tombstone = None
+                tombstone_generation = None
+            manifest_key = f"releases/{release_id}/manifest.json"
+            manifest_generation: int | None = None
+            if tombstone is None:
+                try:
+                    payload, manifest_generation = self.store.read_json(manifest_key)
+                except FileNotFoundError as error:
+                    raise KeyError(release_id) from error
+                tombstone = {
+                    "schema_version": "1.0.0",
+                    "release_id": release_id,
+                    "status": "revoking",
+                    "revoked_at_utc": datetime.now(UTC).isoformat(),
+                    "revoked_by": actor_id,
+                    "reason": reason.strip(),
+                    "manifest_object_key": manifest_key,
+                    "archive_object_key": payload["archive_object_key"],
+                    "archive_sha256": payload.get("archive_sha256"),
+                    "content_fingerprint": payload.get("content_fingerprint"),
+                    "recordings": payload.get("recordings", []),
+                }
+                written = self.store.write_json(
+                    tombstone_key,
+                    tombstone,
+                    if_generation_match=0,
+                )
+                tombstone_generation = written.generation
+            else:
+                manifest = self.store.stat(manifest_key)
+                if manifest is not None:
+                    manifest_generation = manifest.generation
+
+            archive_key = str(tombstone.get("archive_object_key", ""))
+            if not archive_key:
+                candidates = [
+                    item
+                    for item in self.store.list(f"releases/{release_id}/")
+                    if item.key.endswith(".tar")
+                ]
+                if len(candidates) != 1:
+                    raise ValueError("撤销状态缺少唯一的训练发布 TAR，需人工检查")
+                archive_key = candidates[0].key
+                tombstone["archive_object_key"] = archive_key
+            archive = self.store.stat(archive_key)
+            if manifest_generation is not None:
+                self.store.delete(
+                    manifest_key,
+                    if_generation_match=manifest_generation,
+                )
+            if archive is not None:
+                self.store.delete(
+                    archive_key,
+                    if_generation_match=archive.generation,
+                )
+            tombstone["status"] = "revoked"
+            self.store.write_json(
+                tombstone_key,
+                tombstone,
+                if_generation_match=tombstone_generation,
+            )
+            logger.warning(
+                "撤销训练发布 release_id=%s actor_id=%s reason=%s",
+                release_id,
+                actor_id,
+                reason.strip(),
+            )
+            return {"release_id": release_id, "status": "revoked", "revoked": True}
+
+    @staticmethod
+    def _validate_release_id(release_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", release_id):
+            raise ValueError("release_id 格式无效")
 
     def delete_recording(
         self,
@@ -577,7 +822,7 @@ class AnnotationService:
         actor_id: str,
         confirmation: str,
     ) -> dict[str, Any]:
-        """永久删除尚未进入训练发布的完整录制，不创建恢复副本。"""
+        """删除尚未进入有效训练发布的完整录制。"""
 
         self._require_allowed_actor(actor_id)
         if confirmation != f"DELETE {recording_id}":
@@ -621,7 +866,7 @@ class AnnotationService:
                 shutil.rmtree(cache_directory)
             self.catalog.delete(recording_id)
             logger.warning(
-                "永久删除标注录制 recording_id=%s actor_id=%s objects=%d",
+                "删除标注录制 recording_id=%s actor_id=%s objects=%d",
                 recording_id,
                 actor_id,
                 deleted_objects,
@@ -634,8 +879,16 @@ class AnnotationService:
 
     def _assert_recording_not_released(self, recording_id: str) -> None:
         release_objects = self.store.list("releases/")
+        tombstoned = {
+            item.key.removeprefix("release-tombstones/").removesuffix(".json")
+            for item in self.store.list("release-tombstones/")
+            if item.key.endswith(".json")
+        }
         manifest_keys = {
-            item.key for item in release_objects if item.key.endswith("/manifest.json")
+            item.key
+            for item in release_objects
+            if item.key.endswith("/manifest.json")
+            and item.key.split("/", 2)[1] not in tombstoned
         }
         for key in sorted(manifest_keys):
             payload, _generation = self.store.read_json(key)
@@ -650,10 +903,70 @@ class AnnotationService:
             if not item.key.endswith(".tar"):
                 continue
             parent = item.key.rsplit("/", 1)[0]
+            release_id = parent.split("/", 1)[1]
+            if release_id in tombstoned:
+                continue
             if f"{parent}/manifest.json" not in manifest_keys:
                 raise ValueError(
                     "存在缺少发布清单的旧训练 TAR，无法证明该录制未发布，拒绝删除"
                 )
+
+    def cleanup_orphan_uploads(
+        self,
+        *,
+        min_age: timedelta = timedelta(days=7),
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """清理长期没有 manifest 的中断上传，不触碰完整录制。"""
+
+        if min_age <= timedelta(0):
+            raise ValueError("孤儿对象最小保留时间必须大于 0")
+        cutoff = (now or datetime.now(UTC)) - min_age
+        groups: dict[str, list[Any]] = {}
+        for info in self.store.list("captures/"):
+            parts = info.key.split("/")
+            if len(parts) < 3 or parts[0] != "captures":
+                continue
+            groups.setdefault(parts[1], []).append(info)
+
+        orphan_recordings = 0
+        candidate_objects = 0
+        candidate_bytes = 0
+        deleted_objects = 0
+        for recording_id, objects in sorted(groups.items()):
+            manifest_key = f"captures/{recording_id}/manifest.json"
+            if any(item.key == manifest_key for item in objects):
+                continue
+            timestamps = [item.updated_at_utc for item in objects]
+            if not timestamps or any(value is None for value in timestamps):
+                continue
+            if max(value for value in timestamps if value is not None) > cutoff:
+                continue
+            orphan_recordings += 1
+            candidate_objects += len(objects)
+            candidate_bytes += sum(item.size_bytes for item in objects)
+            if dry_run:
+                continue
+            for info in objects:
+                if self.store.delete(
+                    info.key,
+                    if_generation_match=info.generation,
+                ):
+                    deleted_objects += 1
+            cache_directory = (self.cache_root / recording_id).resolve()
+            if cache_directory.is_relative_to(self.cache_root.resolve()):
+                shutil.rmtree(cache_directory, ignore_errors=True)
+        result = {
+            "dry_run": dry_run,
+            "cutoff_utc": cutoff.isoformat(),
+            "orphan_recordings": orphan_recordings,
+            "candidate_objects": candidate_objects,
+            "candidate_bytes": candidate_bytes,
+            "deleted_objects": deleted_objects,
+        }
+        logger.info("孤儿上传清理结果 %s", result)
+        return result
 
     def _remove_sync_experiment_references(self, recording_id: str) -> None:
         for info in self.store.list("diagnostics/sync-experiments/"):

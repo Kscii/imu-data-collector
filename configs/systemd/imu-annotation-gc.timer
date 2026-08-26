@@ -1,0 +1,11 @@
+[Unit]
+Description=每天清理 IMU 标注平台中断上传
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=imu-annotation-gc.service
+
+[Install]
+WantedBy=timers.target

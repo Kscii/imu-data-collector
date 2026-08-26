@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "bleak>=2.0.0",
+    "cachecontrol>=0.14.3",
     "dbus-fast>=5.0.22 ; sys_platform == 'linux'",
     "fastapi>=0.116.0",
     "google-cloud-storage>=3.13.1",
@@ -13,6 +14,7 @@ dependencies = [
     "numpy>=2.2.0",
     "pydantic>=2.11.0",
     "pyyaml>=6.0.2",
+    "requests>=2.32.0",
     "uvicorn[standard]>=0.35.0",
 ]
 

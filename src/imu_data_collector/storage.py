@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -21,6 +22,7 @@ class ObjectInfo:
     generation: int
     content_type: str | None
     metadata: dict[str, str]
+    updated_at_utc: datetime | None = None
 
 
 class ObjectConflictError(RuntimeError):
@@ -212,6 +214,7 @@ class LocalFilesystemStore:
             stat.st_mtime_ns,
             payload.get("content_type"),
             payload.get("metadata", {}),
+            datetime.fromtimestamp(stat.st_mtime, tz=UTC),
         )
 
 
@@ -230,6 +233,7 @@ class GcsObjectStore:
             generation=int(blob.generation or 0),
             content_type=blob.content_type,
             metadata=dict(blob.metadata or {}),
+            updated_at_utc=blob.updated,
         )
 
     def put_file(

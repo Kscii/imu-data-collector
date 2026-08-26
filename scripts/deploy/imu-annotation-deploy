@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 3 ]]; then
+  echo "用法：imu-annotation-deploy <部署包> <40位commit> <sha256>" >&2
+  exit 2
+fi
+
+bundle=$1
+release_id=$2
+expected_sha256=$3
+release_root=/opt/imu-annotation/releases
+release_dir="${release_root}/${release_id}"
+incoming="${release_root}/.incoming-${release_id}"
+current_link=/opt/imu-annotation/current
+previous=""
+
+[[ ${bundle} =~ ^/tmp/imu-annotation-[0-9a-f]{40}\.tar\.gz$ ]] || {
+  echo "部署包路径不符合白名单" >&2
+  exit 2
+}
+[[ ${release_id} =~ ^[0-9a-f]{40}$ ]] || {
+  echo "release_id 必须是 40 位小写 Git commit" >&2
+  exit 2
+}
+[[ ${expected_sha256} =~ ^[0-9a-f]{64}$ ]] || {
+  echo "SHA-256 格式无效" >&2
+  exit 2
+}
+[[ -f ${bundle} ]] || {
+  echo "部署包不存在" >&2
+  exit 1
+}
+
+actual_sha256=$(sha256sum "${bundle}" | cut -d ' ' -f 1)
+[[ ${actual_sha256} == "${expected_sha256}" ]] || {
+  echo "部署包 SHA-256 不匹配" >&2
+  exit 1
+}
+
+while IFS= read -r entry; do
+  [[ ${entry} != /* && ${entry} != ../* && ${entry} != */../* ]] || {
+    echo "部署包包含不安全路径：${entry}" >&2
+    exit 1
+  }
+done < <(tar -tzf "${bundle}")
+
+mkdir -p "${release_root}" /var/lib/imu-annotation/cache
+if [[ -L ${current_link} ]]; then
+  previous=$(readlink -f "${current_link}")
+fi
+
+if [[ ! -d ${release_dir} ]]; then
+  rm -rf -- "${incoming}"
+  mkdir -p "${incoming}"
+  tar -xzf "${bundle}" --no-same-owner --no-same-permissions -C "${incoming}"
+  chown -R kscii:kscii "${incoming}" /var/lib/imu-annotation
+  runuser -u kscii -- /usr/local/bin/uv sync \
+    --frozen --no-dev --project "${incoming}" \
+    --python /opt/imu-annotation/python/bin/python
+  chmod -R a-w "${incoming}"
+  mv "${incoming}" "${release_dir}"
+fi
+
+install -m 0644 "${release_dir}/configs/systemd/imu-annotation.service" \
+  /etc/systemd/system/imu-annotation.service
+install -m 0644 "${release_dir}/configs/systemd/imu-annotation-gc.service" \
+  /etc/systemd/system/imu-annotation-gc.service
+install -m 0644 "${release_dir}/configs/systemd/imu-annotation-gc.timer" \
+  /etc/systemd/system/imu-annotation-gc.timer
+
+ln -s "${release_dir}" "${current_link}.next"
+mv -Tf "${current_link}.next" "${current_link}"
+systemctl daemon-reload
+systemctl enable --now imu-annotation-gc.timer
+systemctl restart imu-annotation.service
+
+healthy=false
+for _attempt in $(seq 1 20); do
+  if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null; then
+    healthy=true
+    break
+  fi
+  sleep 1
+done
+
+if [[ ${healthy} != true ]]; then
+  if [[ -n ${previous} && -d ${previous} ]]; then
+    ln -s "${previous}" "${current_link}.failed"
+    mv -Tf "${current_link}.failed" "${current_link}"
+    systemctl restart imu-annotation.service
+  fi
+  echo "新版本健康检查失败，已尝试切回上一版本" >&2
+  exit 1
+fi
+
+rm -f -- "${bundle}"
+echo "部署完成：${release_id}"

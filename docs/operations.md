@@ -63,9 +63,9 @@ WebUI/离线 PTS 的实际 FPS 为准；平台不通过复制画面伪装成 30 
 数据级别写入 H5 和本地 catalog，不能依靠批次名中的字符串推断，也不在普通界面提供
 录制后的修改入口。旧版缺少该字段的数据按 `legacy_unclassified` 处理并禁止训练。
 
-当前允许的参与者、操作者和标注者统一配置在
-`configs/default.yaml` 的 `identity.allowed_unikeys`。WebUI 下拉框用于减少录入错误，
-后端白名单是最终门禁；格式正确但不在名单中的字符串仍会被拒绝。
+当前允许的参与者配置在 `configs/default.yaml` 的 `identity.allowed_unikeys`。本机采集 WebUI
+使用下拉框减少录入错误。云端标注平台不允许手动切换操作者；Google IAP 登录邮箱必须同时
+存在于服务器私有 `identity.email_to_unikey` 映射，得到的 UniKey 还必须在允许名单中。
 
 摄像头使用 udev 的序列号与 USB interface 组成稳定 `camera_id`。以当前内置摄像头为例，
 WebUI 应选择彩色 1080p30 MJPEG 主节点，而不是同一设备的灰度或 metadata 辅助节点。

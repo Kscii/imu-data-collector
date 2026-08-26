@@ -19,3 +19,5 @@ data/
 *.annotating.h5
 *.syncing.h5
 frontend/*.tsbuildinfo
+# google-github-actions/auth 生成的临时凭据
+gha-creds-*.json

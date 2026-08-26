@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot from "./Plot";
 
-document.title = __APP_KIND__ === "annotation" ? "IMU 标注平台" : "IMU 数采平台";
+document.title = __APP_KIND__ === "annotation" ? "IMU Data Collector · 标注平台" : "IMU 数采平台";
 
 type Recording = {
   recording_id: string;
@@ -71,6 +71,25 @@ type AppConfig = {
   video?: { width: number; height: number; requested_fps: number; bitrate: string };
   local_actor_id?: string;
   review_policy?: "single_user" | "two_person";
+};
+
+type Session = {
+  unikey: string;
+  email: string | null;
+  is_admin: boolean;
+  auth_mode: "local" | "iap";
+};
+
+type TrainingRelease = {
+  release_id: string;
+  created_at_utc: string | null;
+  created_by: string | null;
+  content_fingerprint: string | null;
+  archive_sha256: string;
+  archive_size_bytes: number;
+  recording_count: number;
+  status: "active";
+  created?: boolean;
 };
 
 type ReviewDocument = {
@@ -371,6 +390,7 @@ export default function App() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [taxonomy, setTaxonomy] = useState<Taxonomy | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [cameraId, setCameraId] = useState("");
   const liveRef = useRef<{ t: number[]; values: number[][] }>({ t: [], values: [] });
@@ -408,9 +428,8 @@ export default function App() {
       if (value.default_data_tier) setDataTier(value.default_data_tier);
     }).catch((e) => setCaptureError(e.message));
     if (annotationApplication) {
-      api("/api/v1/index/refresh", { method: "POST" })
-        .then(refreshRecordings)
-        .catch((e) => setCaptureError(e.message));
+      api<Session>("/api/v1/session").then(setSession).catch((e) => setCaptureError(e.message));
+      refreshRecordings();
       return;
     }
     refreshCameras();
@@ -519,12 +538,12 @@ export default function App() {
       <header>
         <div>
           <span className="eyebrow">{annotationApplication ? "CW12EU-T · 独立标注" : "CW12EU-T · 本机采集"}</span>
-          <h1>{annotationApplication ? "IMU 标注平台" : "IMU 数采平台"}</h1>
+          <h1>{annotationApplication ? "IMU Data Collector" : "IMU 数采平台"}</h1>
         </div>
-        <div className={`state state-${live.state}`}>{annotationApplication ? "制品模式" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
+        <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav>
-        {annotationApplication ? <button className="active">标注与同步</button> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => setTab("annotate")}>标注与同步</button><button className={tab === "library" ? "active" : ""} onClick={() => setTab("library")}>训练发布</button></> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => setTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { setTab("library"); refreshRecordings(); }}>记录与发布</button>
           {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => setTab("characterize")}>IMU 诊断</button>}
@@ -559,9 +578,10 @@ export default function App() {
           chart={liveRef.current}
         />
       )}
-      {annotationApplication && taxonomy && (
-        <AnnotationPage recordings={recordings} taxonomy={taxonomy} allowedUnikeys={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
+      {annotationApplication && tab === "annotate" && taxonomy && session && (
+        <AnnotationPage recordings={recordings} taxonomy={taxonomy} session={session} onChanged={refreshRecordings} />
       )}
+      {annotationApplication && tab === "library" && session && <TrainingReleasesPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary recordings={recordings} onChanged={refreshRecordings} />}
     </div>
   );
@@ -675,7 +695,7 @@ function Metric({ label, value, warn = false }: { label: string; value: string |
   return <div className={`metric ${warn ? "warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; allowedUnikeys: string[]; onChanged: () => Promise<Recording[]> }) {
+function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; session: Session; onChanged: () => Promise<Recording[]> }) {
   const [selected, setSelected] = useState("");
   const [doc, setDoc] = useState<AnnotationDocument | null>(null);
   const [timeline, setTimeline] = useState<{ time_s: number[]; values: number[][]; unit: string } | null>(null);
@@ -692,7 +712,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
   const [exclusionReason, setExclusionReason] = useState<Exclusion["reason"]>("other");
   const [marks, setMarks] = useState<{ start?: number; end?: number; impact?: number }>({});
   const [currentTime, setCurrentTime] = useState(0);
-  const [annotator, setAnnotator] = useState("xfan0282");
+  const annotator = session.unikey;
   const [sync, setSync] = useState<SyncState | null>(null);
   const [selectedImuTime, setSelectedImuTime] = useState<number | null>(null);
   const [syncRole, setSyncRole] = useState<"start_tap" | "end_tap">("start_tap");
@@ -738,8 +758,6 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
       setDeleteConfirmation("");
       const count = experimentDocument.observations.filter((item) => item.recording_id === selected).length;
       setExperimentLabel(`tap_${String(count + 1).padStart(2, "0")}`);
-      const participant = recordings.find((item) => item.recording_id === selected)?.participant_id;
-      if (participant && allowedUnikeys.includes(participant)) setAnnotator(participant);
     }).catch((e) => {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     });
@@ -1021,7 +1039,6 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
         method: "POST",
         body: JSON.stringify({
           action,
-          actor_id: annotator,
           expected_revision: review.revision,
           comment
         })
@@ -1055,7 +1072,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
     try {
       await api(`/api/v1/recordings/${selected}`, {
         method: "DELETE",
-        body: JSON.stringify({ actor_id: annotator, confirmation: deleteConfirmation })
+        body: JSON.stringify({ confirmation: deleteConfirmation })
       });
       const refreshed = await onChanged();
       setSelected(refreshed[0]?.recording_id ?? "");
@@ -1304,7 +1321,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
           <div className="panel annotation-controls">
             <div className="panel-title">第 2 步 · 区间与跌倒事件标注</div>
             <div className="time-readout">当前 {currentTime.toFixed(3)} s · 帧 {currentFrame}</div>
-            <label>标注者 UniKey<select value={annotator} onChange={(e) => setAnnotator(e.target.value)}>{allowedUnikeys.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
+            <div className="status-grid"><span>当前标注者 {annotator}</span><span>身份由登录会话验证，不可在页面切换</span></div>
             <div className="mark-buttons"><button onClick={() => mark("start")}>标记区间开始（I）</button><button onClick={() => mark("end")}>标记区间结束（O）</button><button disabled={annotationKind !== "fall"} onClick={() => mark("impact")}>标记撞击时刻（2）</button></div>
             <div className="marks"><span>区间开始／跌倒起始 {seconds(marks.start)}</span><span>区间结束 {seconds(marks.end)}</span><span>撞击时刻 {seconds(marks.impact)}</span></div>
             <div className="segment-form"><select value={annotationKind} onChange={(e) => setAnnotationKind(e.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 进入训练</option><option value="fall">跌倒 · 进入训练</option><option value="exclude">明确排除 · 不训练</option></select>{annotationKind === "exclude" ? <select value={exclusionReason} onChange={(e) => setExclusionReason(e.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select value={activity} onChange={(e) => setActivity(e.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" onClick={addAnnotationInterval}>添加区间</button></div>
@@ -1364,13 +1381,13 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
             {recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" && <p className="stage-help warning-text">当前是 test 数据：可以下载 review.json，但永久禁止生成训练 H5。</p>}
             <div className="danger-zone">
               <strong>永久删除整条录制</strong>
-              <p className="stage-help">仅允许删除尚未进入训练发布 TAR 的录制。操作会删除原始 H5、MKV、预览视频、标注、导出、缓存和同步实验引用，且无法恢复。</p>
+              <p className="stage-help">仅允许删除尚未进入有效训练发布 TAR 的录制。平台会立即隐藏并删除原始 H5、MKV、预览视频、标注、导出、缓存和同步实验引用；GCS 仍按存储桶策略提供 7 天软删除恢复窗口。</p>
               {!deleteArmed
                 ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始永久删除</button>
                 : <>
                   <label>二次确认：请输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label>
                   <div className="save-row">
-                    <button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认永久删除</button>
+                    <button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除并立即隐藏</button>
                     <button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button>
                   </div>
                 </>}
@@ -1380,6 +1397,85 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys, onChanged }: { r
       </section>
     </main>
   );
+}
+
+function TrainingReleasesPage({ session }: { session: Session }) {
+  const [releases, setReleases] = useState<TrainingRelease[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const refresh = async () => {
+    setReleases(await api<TrainingRelease[]>("/api/v1/training-releases"));
+  };
+
+  useEffect(() => {
+    refresh().catch((value) => setError((value as Error).message));
+  }, []);
+
+  const createRelease = async () => {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api<TrainingRelease>("/api/v1/training-releases", { method: "POST" });
+      setMessage(result.created
+        ? `已创建训练发布 ${result.release_id}`
+        : `内容没有变化，继续使用已有发布 ${result.release_id}`);
+      await refresh();
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeRelease = async (releaseId: string) => {
+    const confirmation = window.prompt(`撤销后将立即停止展示和下载。请输入：\nREVOKE ${releaseId}`);
+    if (confirmation === null) return;
+    const reason = window.prompt("请输入撤销原因；该原因会保留在轻量墓碑记录中：");
+    if (reason === null || !reason.trim()) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await api(`/api/v1/training-releases/${releaseId}/revoke`, {
+        method: "POST",
+        body: JSON.stringify({ confirmation, reason })
+      });
+      setMessage(`已撤销并隐藏训练发布 ${releaseId}`);
+      await refresh();
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <main>
+    {error && <div className="error-banner">{error}</div>}
+    {message && <div className="success-banner">{message}</div>}
+    <section className="panel library">
+      <div className="panel-title">训练发布</div>
+      <p className="stage-help">发布只包含已通过审核、校准和导出门禁的 prod 录制。相同内容不会重复创建；test 数据永远不会进入 TAR。</p>
+      <div className="save-row">
+        <button className="primary" disabled={busy} onClick={createRelease}>{busy ? "正在处理…" : "创建当前训练发布"}</button>
+        <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>刷新列表</button>
+        <span>当前操作者 {session.unikey} · 所有白名单成员均可创建、下载与撤销</span>
+      </div>
+      {releases.length === 0 ? <span className="muted">目前没有有效训练发布。</span> : releases.map((release) => <article key={release.release_id}>
+        <div>
+          <strong>{release.release_id}</strong>
+          <span>{release.recording_count} 条录制 · {(release.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · 创建者 {release.created_by ?? "未知"}</span>
+          <span>SHA-256 {release.archive_sha256}</span>
+        </div>
+        <div className="save-row">
+          <a className="button-link primary" href={`/api/v1/training-releases/${release.release_id}/download`} download>下载 TAR</a>
+          <button className="danger" disabled={busy} onClick={() => revokeRelease(release.release_id)}>撤销</button>
+        </div>
+      </article>)}
+    </section>
+  </main>;
 }
 
 function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; onChanged: () => void }) {

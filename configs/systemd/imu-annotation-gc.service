@@ -1,0 +1,17 @@
+[Unit]
+Description=IMU 标注平台孤儿上传清理
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kscii
+Group=kscii
+WorkingDirectory=/opt/imu-annotation/current
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/imu-annotation/current/.venv/bin/imu-annotation --config /etc/imu-annotation/config.yaml cleanup-orphans --min-age-days 7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/imu-annotation

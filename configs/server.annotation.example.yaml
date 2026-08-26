@@ -14,14 +14,18 @@ identity:
     - "xliu0452"
   admins:
     - "xfan0282"
+  # 真实邮箱映射只写入服务器 /etc 配置，不提交仓库。
+  email_to_unikey:
+    "member@example.com": "xfan0282"
 
 auth:
-  # 当前仅通过 SSH 隧道单人访问；未来开放网络前必须接入真实身份认证。
-  mode: "local"
-  local_actor_id: "xfan0282"
+  mode: "iap"
+  # 创建 backend service 后，用实际 project number 与 backend service ID 替换。
+  iap_audience: "/projects/123456789/global/backendServices/123456789"
 
 annotation:
-  server_host: "127.0.0.1"
+  # 只允许负载均衡来源访问 8766；应用本身仍校验 IAP 签名 JWT。
+  server_host: "0.0.0.0"
   server_port: 8766
   catalog_path: "/var/lib/imu-annotation/catalog.sqlite3"
   review_policy: "single_user"
@@ -31,4 +35,3 @@ storage:
   bucket: "soft3888-label"
   project: "project-51b589c7-8d5e-4e78-a10"
   cache_root: "/var/lib/imu-annotation/cache"
-

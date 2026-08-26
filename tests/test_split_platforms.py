@@ -1,4 +1,6 @@
+import os
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -6,7 +8,13 @@ from fastapi.testclient import TestClient
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.annotation_catalog import AnnotationCatalog
 from imu_data_collector.capture_api import create_capture_app
-from imu_data_collector.config import AnnotationSettings, Settings, StorageSettings
+from imu_data_collector.config import (
+    AnnotationSettings,
+    AuthSettings,
+    IdentitySettings,
+    Settings,
+    StorageSettings,
+)
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ArtifactDescriptor,
@@ -29,6 +37,18 @@ class FailOnceDeleteStore(LocalFilesystemStore):
         if self.fail_once and key.endswith("/preview.mp4"):
             self.fail_once = False
             raise ObjectConflictError("模拟 generation 冲突")
+        return super().delete(key, if_generation_match=if_generation_match)
+
+
+class FailOnceReleaseDeleteStore(LocalFilesystemStore):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.fail_once = True
+
+    def delete(self, key: str, *, if_generation_match: int | None) -> bool:
+        if self.fail_once and key.endswith(".tar"):
+            self.fail_once = False
+            raise ObjectConflictError("模拟训练发布 TAR generation 冲突")
         return super().delete(key, if_generation_match=if_generation_match)
 
 
@@ -217,6 +237,57 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         assert "test 数据永久禁止" in forbidden.json()["detail"]
 
 
+def test_iap_identity_is_required_mapped_and_cannot_claim_admin(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.auth = AuthSettings(mode="iap", iap_audience="/projects/123/apps/app")
+    settings.identity = IdentitySettings(
+        email_to_unikey={
+            "owner@example.com": "xfan0282",
+            "member@example.com": "rkim6933",
+        }
+    )
+
+    def verify(token: str, audience: str) -> dict[str, str]:
+        assert audience == "/projects/123/apps/app"
+        email = {
+            "owner-token": "owner@example.com",
+            "member-token": "member@example.com",
+            "unknown-token": "unknown@example.com",
+        }[token]
+        return {"email": email, "sub": f"subject-{email}"}
+
+    app = create_annotation_app(
+        settings,
+        LocalFilesystemStore(settings.storage.root),
+        token_verifier=verify,
+    )
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        assert client.get("/api/v1/session").status_code == 401
+        unknown = client.get(
+            "/api/v1/session",
+            headers={"X-Goog-IAP-JWT-Assertion": "unknown-token"},
+        )
+        assert unknown.status_code == 403
+
+        member_headers = {"X-Goog-IAP-JWT-Assertion": "member-token"}
+        member = client.get("/api/v1/session", headers=member_headers)
+        assert member.json() == {
+            "unikey": "rkim6933",
+            "email": "member@example.com",
+            "is_admin": False,
+            "auth_mode": "iap",
+        }
+        assert client.post("/api/v1/index/refresh", headers=member_headers).status_code == 403
+
+        owner_headers = {"X-Goog-IAP-JWT-Assertion": "owner-token"}
+        owner = client.get("/api/v1/session", headers=owner_headers)
+        assert owner.json()["is_admin"] is True
+        assert client.post("/api/v1/index/refresh", headers=owner_headers).status_code == 200
+
+
 def test_annotation_delete_removes_unreleased_recording_and_shared_references(
     tmp_path: Path,
     caplog,
@@ -276,16 +347,6 @@ def test_annotation_delete_removes_unreleased_recording_and_shared_references(
             json={"actor_id": "xfan0282", "confirmation": recording_id},
         )
         assert wrong.status_code == 422
-        outsider = client.request(
-            "DELETE",
-            f"/api/v1/recordings/{recording_id}",
-            json={
-                "actor_id": "abcd1234",
-                "confirmation": f"DELETE {recording_id}",
-            },
-        )
-        assert outsider.status_code == 422
-        assert "允许名单" in outsider.json()["detail"]
         deleted = client.request(
             "DELETE",
             f"/api/v1/recordings/{recording_id}",
@@ -299,7 +360,8 @@ def test_annotation_delete_removes_unreleased_recording_and_shared_references(
         assert client.get(f"/api/v1/recordings/{recording_id}").status_code == 404
 
     assert f"recording_id={recording_id}" in caplog.text
-    assert "actor_id=rkim6933" in caplog.text
+    assert "actor_id=xfan0282" in caplog.text
+    assert "actor_id=rkim6933" not in caplog.text
 
     assert store.list(f"captures/{recording_id}/") == []
     assert store.list(f"reviews/{recording_id}/") == []
@@ -414,10 +476,176 @@ def test_training_release_writes_queryable_sidecar_manifest(tmp_path: Path) -> N
             if_generation_match=generation,
         )
         released = client.post("/api/v1/training-releases")
+        repeated = client.post("/api/v1/training-releases")
+        listed = client.get("/api/v1/training-releases")
 
     assert released.status_code == 200
-    archive_key = released.json()["object_key"]
+    assert released.json()["created"] is True
+    assert repeated.json()["created"] is False
+    assert repeated.json()["release_id"] == released.json()["release_id"]
+    assert [item["release_id"] for item in listed.json()] == [
+        released.json()["release_id"]
+    ]
+    archive_key = released.json()["archive_object_key"]
     sidecar_key = f"{archive_key.rsplit('/', 1)[0]}/manifest.json"
     sidecar, _generation = store.read_json(sidecar_key)
     assert sidecar["archive_object_key"] == archive_key
     assert [item["recording_id"] for item in sidecar["recordings"]] == [recording_id]
+
+
+def test_training_release_range_download_and_revoke(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
+    aligned = tmp_path / "aligned.h5"
+    aligned.write_bytes(b"aligned")
+    store.put_file(
+        aligned,
+        f"exports/{recording_id}/aligned30.h5",
+        content_type="application/x-hdf5",
+    )
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        client.post("/api/v1/index/refresh")
+        service = app.state.annotation_service
+        manifest = service.required_manifest(recording_id)
+        review, generation = service.reviews.load(manifest)
+        store.write_json(
+            f"reviews/{recording_id}/review.json",
+            review.model_copy(
+                update={
+                    "workflow": review.workflow.model_copy(
+                        update={"state": ReviewWorkflowState.EXPORTED}
+                    )
+                }
+            ).model_dump(mode="json"),
+            if_generation_match=generation,
+        )
+        release = client.post("/api/v1/training-releases").json()
+        release_id = release["release_id"]
+        partial = client.get(
+            f"/api/v1/training-releases/{release_id}/download",
+            headers={"Range": "bytes=0-9"},
+        )
+        assert partial.status_code == 206
+        assert len(partial.content) == 10
+        assert partial.headers["content-range"].startswith("bytes 0-9/")
+
+        wrong = client.post(
+            f"/api/v1/training-releases/{release_id}/revoke",
+            json={"confirmation": release_id, "reason": "错误数据"},
+        )
+        assert wrong.status_code == 422
+        revoked = client.post(
+            f"/api/v1/training-releases/{release_id}/revoke",
+            json={
+                "confirmation": f"REVOKE {release_id}",
+                "reason": "错误数据",
+            },
+        )
+        assert revoked.json()["status"] == "revoked"
+        assert client.get("/api/v1/training-releases").json() == []
+        assert client.get(
+            f"/api/v1/training-releases/{release_id}/download"
+        ).status_code == 410
+        status = client.get(
+            f"/api/v1/training-releases/{release_id}/status"
+        ).json()
+        assert status["status"] == "revoked"
+        assert status["reason"] == "错误数据"
+
+        deleted = client.request(
+            "DELETE",
+            f"/api/v1/recordings/{recording_id}",
+            json={"confirmation": f"DELETE {recording_id}"},
+        )
+        assert deleted.status_code == 200
+
+
+def test_training_release_revoke_retries_after_partial_delete(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = FailOnceReleaseDeleteStore(settings.storage.root)
+    recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
+    aligned = tmp_path / "aligned.h5"
+    aligned.write_bytes(b"aligned")
+    store.put_file(
+        aligned,
+        f"exports/{recording_id}/aligned30.h5",
+        content_type="application/x-hdf5",
+    )
+    app = create_annotation_app(settings, store)
+    with TestClient(app) as client:
+        client.post("/api/v1/index/refresh")
+        service = app.state.annotation_service
+        manifest = service.required_manifest(recording_id)
+        review, generation = service.reviews.load(manifest)
+        store.write_json(
+            f"reviews/{recording_id}/review.json",
+            review.model_copy(
+                update={
+                    "workflow": review.workflow.model_copy(
+                        update={"state": ReviewWorkflowState.EXPORTED}
+                    )
+                }
+            ).model_dump(mode="json"),
+            if_generation_match=generation,
+        )
+        release_id = client.post("/api/v1/training-releases").json()["release_id"]
+        body = {
+            "confirmation": f"REVOKE {release_id}",
+            "reason": "需要重做",
+        }
+        first = client.post(
+            f"/api/v1/training-releases/{release_id}/revoke", json=body
+        )
+        assert first.status_code == 409
+        assert client.get("/api/v1/training-releases").json() == []
+        assert client.get(
+            f"/api/v1/training-releases/{release_id}/status"
+        ).json()["status"] == "revoking"
+
+        second = client.post(
+            f"/api/v1/training-releases/{release_id}/revoke", json=body
+        )
+        assert second.status_code == 200
+        assert second.json()["status"] == "revoked"
+
+
+def test_cleanup_only_old_capture_groups_without_manifest(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    for ordinal, key in enumerate(
+        (
+            "captures/old-orphan/chunk.bin",
+            "captures/recent-orphan/chunk.bin",
+            "captures/complete/chunk.bin",
+        )
+    ):
+        source = tmp_path / f"chunk-{ordinal}.bin"
+        source.write_bytes(f"chunk-{ordinal}".encode())
+        store.put_file(source, key, content_type="application/octet-stream")
+    store.write_json(
+        "captures/complete/manifest.json",
+        {"recording_id": "complete"},
+        if_generation_match=0,
+    )
+    now = datetime(2026, 8, 26, tzinfo=UTC)
+    old = (now - timedelta(days=8)).timestamp()
+    os.utime(store.resolve("captures/old-orphan/chunk.bin"), (old, old))
+    os.utime(store.resolve("captures/complete/chunk.bin"), (old, old))
+    os.utime(store.resolve("captures/complete/manifest.json"), (old, old))
+    recent = (now - timedelta(days=1)).timestamp()
+    os.utime(store.resolve("captures/recent-orphan/chunk.bin"), (recent, recent))
+    service = create_annotation_app(settings, store).state.annotation_service
+
+    preview = service.cleanup_orphan_uploads(now=now, dry_run=True)
+    assert preview["orphan_recordings"] == 1
+    assert preview["candidate_objects"] == 1
+    assert store.stat("captures/old-orphan/chunk.bin") is not None
+
+    deleted = service.cleanup_orphan_uploads(now=now)
+    assert deleted["deleted_objects"] == 1
+    assert store.stat("captures/old-orphan/chunk.bin") is None
+    assert store.stat("captures/recent-orphan/chunk.bin") is not None
+    assert store.stat("captures/complete/chunk.bin") is not None
