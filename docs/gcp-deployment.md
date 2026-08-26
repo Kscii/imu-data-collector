@@ -87,9 +87,14 @@ GCP_VM=soft3888-label
 ```
 
 WIF provider 的 attribute condition 必须同时限制不可变 repository ID `1347062318` 和
-`ref == refs/heads/main`。部署服务账号只授予 IAP
-tunnel、OS Admin Login 和目标 VM 部署所需能力，不授予 GCS 参与者数据权限。workflow 只处理
-源码和静态前端，不下载 H5/MKV。
+`ref == refs/heads/main`。目标 VM 单独启用 OS Login；部署服务账号授予 IAP tunnel、OS Admin
+Login，并仅在 VM 附加的运行时服务账号上授予 Service Account User。部署账号没有直接的 GCS
+角色，workflow 也不下载 H5/MKV；但 OS Admin 可以在 VM 内取得该 VM 运行时身份，因此仍应把
+部署身份视为生产特权身份，保持 WIF 仓库和 main ref 限制。
+
+OpenSSH 默认 SFTP 模式在 GitHub Runner 经 IAP/OS Login 上传时会建立远端空文件但不继续传输。
+生产 workflow 明确向 `gcloud compute scp` 传入 `--scp-flag=-O` 使用传统 SCP；真实探针必须以
+远端文件大小和 SHA-256 一致为通过条件，不能只依据 SSH 会话已建立。
 
 ## VM 原子部署
 
