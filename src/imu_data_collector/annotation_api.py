@@ -182,6 +182,30 @@ def create_annotation_app(
             },
         )
 
+    @app.get("/api/v1/recordings/{recording_id}/capture-h5/download")
+    def capture_h5_download(recording_id: str) -> StreamingResponse:
+        manifest = required(recording_id)
+        artifact = service._artifact(manifest, "capture_h5")
+
+        def stream():
+            cursor = 0
+            while cursor < artifact.size_bytes:
+                chunk_end = min(artifact.size_bytes - 1, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(artifact.object_key, cursor, chunk_end)
+                cursor = chunk_end + 1
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/x-hdf5",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{recording_id}.capture.h5"'
+                ),
+                "Content-Length": str(artifact.size_bytes),
+                "Cache-Control": "private, no-store",
+            },
+        )
+
     @app.get("/api/v1/recordings/{recording_id}/timeline")
     def timeline(
         recording_id: str,
