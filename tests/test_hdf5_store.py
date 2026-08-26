@@ -27,8 +27,11 @@ from imu_data_collector.models import (
     BinaryLabel,
     DataTier,
     EventKind,
+    ExclusionInterval,
+    ExclusionReason,
     RecordingStartRequest,
     SyncAnchor,
+    SyncDocument,
 )
 from imu_data_collector.validation import validate_capture_h5
 
@@ -40,6 +43,36 @@ def taxonomy() -> dict:
         "fall": [{"code": "forward_fall", "display_name_zh": "向前跌倒"}],
         "non_fall": [{"code": "walking", "display_name_zh": "行走"}],
     }
+
+
+def formal_anchor(
+    role: str,
+    imu_time_ns: int,
+    video_time_ns: int,
+    *,
+    source_video_frame: int = 0,
+    source_imu_sample: int = 0,
+    video_interval_start_ns: int | None = None,
+    imu_interval_start_ns: int | None = None,
+) -> SyncAnchor:
+    return SyncAnchor(
+        role=role,
+        imu_time_ns=imu_time_ns,
+        video_time_ns=video_time_ns,
+        source_video_frame=source_video_frame,
+        source_imu_sample=source_imu_sample,
+        video_interval_start_ns=(
+            max(0, video_time_ns - 33_333_333)
+            if video_interval_start_ns is None
+            else video_interval_start_ns
+        ),
+        imu_interval_start_ns=(
+            max(0, imu_time_ns - 40_000_000)
+            if imu_interval_start_ns is None
+            else imu_interval_start_ns
+        ),
+        reviewer_id="xfan0282",
+    )
 
 
 def build_capture(tmp_path: Path) -> Path:
@@ -55,7 +88,7 @@ def build_capture(tmp_path: Path) -> Path:
         ImuSettings(),
         taxonomy(),
     )
-    for index, receive_time in enumerate((1_100_000_000, 1_166_666_666, 1_233_333_332)):
+    for index, receive_time in enumerate((1_100_000_000, 1_180_000_000, 1_260_000_000)):
         payload = b"".join(
             [
                 pack_test_frame(
@@ -70,7 +103,7 @@ def build_capture(tmp_path: Path) -> Path:
         )
         assert writer.append_notification(payload, receive_time) == 2
     rate, _ = writer.reconstruct_times()
-    assert rate == pytest.approx(30.0, rel=0.02)
+    assert rate == pytest.approx(25.0, rel=0.02)
     writer.write_video_frames(
         pts_monotonic_ns=start_ns
         + np.asarray([50_000_000, 83_333_333, 116_666_666, 149_999_999]),
@@ -118,7 +151,37 @@ def finalized_annotation() -> AnnotationDocument:
                 annotator_id="xfan0282",
             ),
         ],
+        exclusions=[
+            ExclusionInterval(
+                exclusion_id="setup",
+                start_ns=0,
+                end_ns=80_000_000,
+                reason=ExclusionReason.SETUP,
+                annotator_id="xfan0282",
+            ),
+            ExclusionInterval(
+                exclusion_id="end_guard",
+                start_ns=220_000_000,
+                end_ns=260_000_000,
+                reason=ExclusionReason.SYNC_TAP,
+                annotator_id="xfan0282",
+            ),
+        ],
     )
+
+
+def verify_host_sync(path: Path) -> None:
+    model = replace_sync_atomic(
+        path,
+        SyncDocument(
+            anchors=[
+                formal_anchor("start_tap", 80_000_000, 90_000_000),
+                formal_anchor("end_tap", 200_000_000, 210_000_000),
+            ]
+        ),
+        taxonomy(),
+    )
+    assert model.quality == "verified"
 
 
 def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None:
@@ -134,11 +197,19 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
         assert str(handle.attrs["data_tier"]) == "test"
         assert not bool(handle.attrs["training_eligible"])
         assert int(handle["video"].attrs["ffmpeg_diagnostic_count"]) == 1
+        assert handle["video/frames/media_time_ns"][:].tolist() == [
+            0,
+            33_333_333,
+            66_666_666,
+            99_999_999,
+        ]
+        assert handle["video"].attrs["media_timeline_origin"] == "first_encoded_frame"
         assert json.loads(handle["video"].attrs["ffmpeg_diagnostics_json"]) == [
             "[mjpeg] overread 8"
         ]
 
     document = finalized_annotation()
+    verify_host_sync(path)
     replace_annotations_atomic(path, document, taxonomy())
 
     stored = read_annotations(path)
@@ -203,6 +274,7 @@ def test_legacy_schema_without_data_tier_remains_structurally_readable(
 
 def test_invalid_annotation_does_not_replace_existing_revision(tmp_path: Path) -> None:
     path = build_capture(tmp_path)
+    verify_host_sync(path)
     replace_annotations_atomic(path, finalized_annotation(), taxonomy())
     invalid = finalized_annotation().model_copy(
         update={
@@ -226,20 +298,70 @@ def test_sync_update_uses_recording_relative_anchor_times(tmp_path: Path) -> Non
     path = build_capture(tmp_path)
     model = replace_sync_atomic(
         path,
-        [
-            SyncAnchor(imu_time_ns=80_000_000, video_time_ns=90_000_000),
-            SyncAnchor(imu_time_ns=200_000_000, video_time_ns=210_000_000),
-        ],
+        SyncDocument(
+            anchors=[
+                formal_anchor("start_tap", 80_000_000, 90_000_000),
+                formal_anchor("end_tap", 200_000_000, 210_000_000),
+            ]
+        ),
         taxonomy(),
     )
 
     assert model.quality == "verified"
+    assert model.estimated_offset_ns == 10_000_000
+    assert model.applied_offset_ns == 0
     with h5py.File(path, "r") as handle:
         times = np.asarray(handle["imu/samples/recording_time_ns"])
+        aligned = np.asarray(handle["imu/samples/aligned_video_time_ns"])
         assert times[0] < 200_000_000
+        assert np.array_equal(times, aligned)
         assert str(handle["sync"].attrs["quality"]) == "verified"
-        assert handle["sync/labels"].asstr()[:].tolist() == ["tap", "tap"]
+        assert handle["sync/roles"].asstr()[:].tolist() == ["start_tap", "end_tap"]
     assert validate_capture_h5(path, taxonomy(), require_sync=True).ready
+
+
+def test_conditional_fixed_offset_requires_confirmation_and_preserves_raw_time(
+    tmp_path: Path,
+) -> None:
+    path = build_capture(tmp_path)
+    anchors = [
+        formal_anchor(
+            "start_tap",
+            20_000_000,
+            170_000_000,
+            video_interval_start_ns=136_666_667,
+            imu_interval_start_ns=0,
+        ),
+        formal_anchor(
+            "end_tap",
+            80_000_000,
+            250_000_000,
+            video_interval_start_ns=216_666_667,
+            imu_interval_start_ns=40_000_000,
+        ),
+    ]
+    with h5py.File(path, "r") as handle:
+        raw_time_before = np.asarray(handle["imu/samples/time_monotonic_ns"]).copy()
+
+    pending = replace_sync_atomic(path, SyncDocument(anchors=anchors), taxonomy())
+    assert pending.recommendation == "apply_fixed_offset"
+    assert pending.quality == "awaiting_confirmation"
+    assert pending.estimated_offset_ns == 160_000_000
+
+    applied = replace_sync_atomic(
+        path,
+        SyncDocument(anchors=anchors, apply_fixed_offset=True),
+        taxonomy(),
+    )
+    assert applied.quality == "verified"
+    assert applied.applied_offset_ns == 160_000_000
+    with h5py.File(path, "r") as handle:
+        assert np.array_equal(
+            raw_time_before, np.asarray(handle["imu/samples/time_monotonic_ns"])
+        )
+        recording = np.asarray(handle["imu/samples/recording_time_ns"])
+        aligned = np.asarray(handle["imu/samples/aligned_video_time_ns"])
+        assert np.array_equal(aligned, recording + 160_000_000)
 
 
 def test_characterization_h5_and_report_are_never_training_eligible(

@@ -30,8 +30,13 @@ from imu_data_collector.models import (
     DataTier,
     RecordingStartRequest,
     SyncAnchor,
+    SyncDocument,
 )
-from imu_data_collector.sync import SyncModel, fit_sync_model
+from imu_data_collector.sync import (
+    ConditionalSyncAssessment,
+    SyncModel,
+    assess_conditional_fixed_offset,
+)
 from imu_data_collector.validation import (
     read_annotation_document,
     validate_annotations,
@@ -127,6 +132,7 @@ class CaptureH5Writer:
                 "expected_rate_hz": self.imu_settings.expected_rate_hz,
                 "expected_rate_status": self.imu_settings.expected_rate_status,
                 "frame_size_bytes": self.imu_settings.frame_size_bytes,
+                "callback_drops": 0,
                 "byte_order": "big_endian_hypothesis",
                 "frame_layout_status": "hypothesis_pending_characterization",
             }
@@ -155,10 +161,23 @@ class CaptureH5Writer:
         )
         for name, dtype in (
             ("receive_time_ns", "i8"),
+            ("fitted_packet_end_time_ns", "i8"),
+            ("fit_residual_ns", "i8"),
             ("sample_count", "u2"),
             ("parse_valid", "?"),
         ):
             packets.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(1_024,))
+
+        connection_events = imu.create_group("connection_events")
+        text = h5py.string_dtype("utf-8")
+        for name, dtype in (
+            ("event", text),
+            ("time_monotonic_ns", "i8"),
+            ("notes", text),
+        ):
+            connection_events.create_dataset(
+                name, shape=(0,), maxshape=(None,), dtype=dtype
+            )
 
         samples = imu.create_group("samples")
         samples.create_dataset(
@@ -206,6 +225,7 @@ class CaptureH5Writer:
             ("sample_in_packet", "u2"),
             ("time_monotonic_ns", "i8"),
             ("recording_time_ns", "i8"),
+            ("aligned_video_time_ns", "i8"),
             ("time_quality", "u1"),
         ):
             samples.create_dataset(
@@ -234,7 +254,17 @@ class CaptureH5Writer:
         ):
             stages.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype)
         sync = handle.create_group("sync")
-        sync.attrs.update({"quality": "missing", "scale": 1.0, "offset_ns": 0.0})
+        sync.attrs.update(
+            {
+                "policy": "conditional_fixed_offset_v1",
+                "quality": "missing",
+                "decision": "host_only",
+                "scale": 1.0,
+                "estimated_offset_ns": 0,
+                "applied_offset_ns": 0,
+                "offset_ns": 0,
+            }
+        )
         sync.create_dataset("imu_anchor_ns", shape=(0,), maxshape=(None,), dtype="i8")
         sync.create_dataset("video_anchor_ns", shape=(0,), maxshape=(None,), dtype="i8")
         self._write_annotations_group(
@@ -244,6 +274,20 @@ class CaptureH5Writer:
             )
         )
         handle.flush()
+
+    def append_connection_event(
+        self, event: str, time_monotonic_ns: int, notes: str = ""
+    ) -> None:
+        events = self.handle["imu/connection_events"]
+        for name, value in (
+            ("event", event),
+            ("time_monotonic_ns", time_monotonic_ns),
+            ("notes", notes),
+        ):
+            dataset = events[name]
+            dataset.resize((len(dataset) + 1,))
+            dataset[-1] = value
+        self.handle.flush()
 
     def set_recording_start(
         self, recording_start_monotonic_ns: int, started_at_utc: str
@@ -293,6 +337,11 @@ class CaptureH5Writer:
         offsets.resize((len(offsets) + 1,))
         offsets[-1] = len(payload_values)
         _resize_append(packets["receive_time_ns"], np.asarray([receive_time_ns], dtype=np.int64))
+        _resize_append(
+            packets["fitted_packet_end_time_ns"],
+            np.asarray([-1], dtype=np.int64),
+        )
+        _resize_append(packets["fit_residual_ns"], np.asarray([0], dtype=np.int64))
 
         try:
             parsed = parse_notification(payload, self.imu_settings.frame_size_bytes)
@@ -335,6 +384,10 @@ class CaptureH5Writer:
             samples["recording_time_ns"], provisional - self.recording_start_monotonic_ns
         )
         _resize_append(
+            samples["aligned_video_time_ns"],
+            provisional - self.recording_start_monotonic_ns,
+        )
+        _resize_append(
             samples["time_quality"], np.full(parsed.sample_count, 1, dtype=np.uint8)
         )
         self.packet_count += 1
@@ -357,8 +410,31 @@ class CaptureH5Writer:
             raise ValueError("reconstructed sample count does not match parsed samples")
         dataset[:] = times
         self.handle["imu/samples/time_quality"][:] = 2
+        relative = times - self.recording_start_monotonic_ns
+        self.handle["imu/samples/recording_time_ns"][:] = relative
+        self.handle["imu/samples/aligned_video_time_ns"][:] = relative
+        valid_indices = np.flatnonzero(valid)
+        fitted_packet_end = self.handle["imu/packets/fitted_packet_end_time_ns"]
+        fit_residual = self.handle["imu/packets/fit_residual_ns"]
+        if len(times):
+            valid_ends = np.cumsum(counts, dtype=np.int64) - 1
+            fitted_values = times[valid_ends]
+            fitted_packet_end[valid_indices] = fitted_values
+            fit_residual[valid_indices] = receive - fitted_values
         self.handle["imu"].attrs["observed_rate_hz"] = rate
         self.handle["imu"].attrs["packet_end_fit_residual_rms_ns"] = residual
+        valid_residual = np.asarray(fit_residual, dtype=np.int64)[valid]
+        self.handle["imu"].attrs["packet_end_fit_residual_max_abs_ns"] = (
+            int(np.max(np.abs(valid_residual))) if len(valid_residual) else 0
+        )
+        self.handle["imu"].attrs["packet_end_fit_residual_p95_abs_ns"] = (
+            float(np.percentile(np.abs(valid_residual), 95))
+            if len(valid_residual)
+            else 0.0
+        )
+        self.handle["imu"].attrs["max_packet_gap_ns"] = (
+            int(np.max(np.diff(receive))) if len(receive) > 1 else 0
+        )
         self.handle.flush()
         return rate, residual
 
@@ -366,6 +442,7 @@ class CaptureH5Writer:
         self,
         *,
         pts_monotonic_ns: np.ndarray,
+        media_time_ns: np.ndarray | None = None,
         duration_ns: np.ndarray,
         key_frame: np.ndarray,
         video_path: Path,
@@ -380,11 +457,17 @@ class CaptureH5Writer:
         for name in tuple(frames.keys()):
             del frames[name]
         pts = np.asarray(pts_monotonic_ns, dtype=np.int64)
+        media_times = (
+            np.asarray(media_time_ns, dtype=np.int64)
+            if media_time_ns is not None
+            else pts - pts[0] if len(pts) else np.asarray([], dtype=np.int64)
+        )
         durations = np.asarray(duration_ns, dtype=np.int64)
         keys = np.asarray(key_frame, dtype=np.bool_)
-        if not (len(pts) == len(durations) == len(keys)):
+        if not (len(pts) == len(media_times) == len(durations) == len(keys)):
             raise ValueError("video frame arrays must have equal length")
         frames.create_dataset("pts_monotonic_ns", data=pts, chunks=True)
+        frames.create_dataset("media_time_ns", data=media_times, chunks=True)
         frames.create_dataset("duration_ns", data=durations, chunks=True)
         frames.create_dataset("key_frame", data=keys, chunks=True)
         frames.create_dataset(
@@ -404,6 +487,8 @@ class CaptureH5Writer:
                 "requested_fps": requested_fps,
                 "actual_median_fps": actual_fps,
                 "frame_count": len(pts),
+                "media_timeline_origin": "first_encoded_frame",
+                "source_pts_origin_monotonic_ns": int(pts[0]) if len(pts) else -1,
                 "ffmpeg_diagnostic_count": len(ffmpeg_diagnostics or []),
                 "ffmpeg_diagnostics_json": json.dumps(
                     ffmpeg_diagnostics or [], ensure_ascii=False
@@ -413,42 +498,112 @@ class CaptureH5Writer:
         self.handle.flush()
 
     def write_sync(self, anchors: list[SyncAnchor]) -> SyncModel:
-        imu_anchor = np.asarray([anchor.imu_time_ns for anchor in anchors], dtype=np.int64)
-        video_anchor = np.asarray([anchor.video_time_ns for anchor in anchors], dtype=np.int64)
-        model = fit_sync_model(imu_anchor, video_anchor)
+        """初始化无锚点状态；旧仿射拟合仅保留为只读兼容实现。"""
+
+        if anchors:
+            raise ValueError("正式同步请使用条件式固定偏移接口")
         sync = self.handle["sync"]
         sync.attrs["anchor_clock_domain"] = "recording_relative_ns"
-        if "labels" in sync:
-            del sync["labels"]
-        sync.create_dataset(
-            "labels",
-            data=np.asarray(
-                [anchor.label for anchor in anchors], dtype=h5py.string_dtype("utf-8")
-            ),
-            maxshape=(None,),
-        )
-        for name, values in (("imu_anchor_ns", imu_anchor), ("video_anchor_ns", video_anchor)):
+        for name in ("labels", "roles", "reviewer_ids"):
+            if name in sync:
+                del sync[name]
+        for name in ("imu_anchor_ns", "video_anchor_ns"):
             dataset = sync[name]
-            dataset.resize((len(values),))
-            dataset[:] = values
+            dataset.resize((0,))
         sync.attrs.update(
             {
-                "scale": model.scale,
-                "offset_ns": model.offset_ns,
-                "residual_rms_ns": model.residual_rms_ns,
-                "quality": model.quality,
+                "policy": "conditional_fixed_offset_v1",
+                "scale": 1.0,
+                "estimated_offset_ns": 0,
+                "applied_offset_ns": 0,
+                "offset_ns": 0,
+                "residual_rms_ns": float("nan"),
+                "quality": "missing",
+                "decision": "host_only",
             }
         )
         sample_times = np.asarray(
             self.handle["imu/samples/time_monotonic_ns"], dtype=np.int64
         )
         if len(sample_times):
-            imu_recording_time = sample_times - self.recording_start_monotonic_ns
-            self.handle["imu/samples/recording_time_ns"][:] = model.imu_to_video(
-                imu_recording_time
-            )
+            relative = sample_times - self.recording_start_monotonic_ns
+            self.handle["imu/samples/recording_time_ns"][:] = relative
+            if "aligned_video_time_ns" in self.handle["imu/samples"]:
+                self.handle["imu/samples/aligned_video_time_ns"][:] = relative
         self.handle.flush()
-        return model
+        return SyncModel(1.0, 0.0, float("nan"), "host_only")
+
+    def write_conditional_sync(
+        self, document: SyncDocument
+    ) -> ConditionalSyncAssessment:
+        assessment = assess_conditional_fixed_offset(document)
+        sync = self.handle["sync"]
+        sync.attrs["anchor_clock_domain"] = "recording_relative_ns"
+        text = h5py.string_dtype("utf-8")
+        string_values = {
+            "labels": [anchor.label for anchor in document.anchors],
+            "roles": [anchor.role for anchor in document.anchors],
+            "reviewer_ids": [anchor.reviewer_id or "" for anchor in document.anchors],
+        }
+        int_values = {
+            "imu_anchor_ns": [anchor.imu_time_ns for anchor in document.anchors],
+            "video_anchor_ns": [anchor.video_time_ns for anchor in document.anchors],
+            "source_video_frame": [
+                -1 if anchor.source_video_frame is None else anchor.source_video_frame
+                for anchor in document.anchors
+            ],
+            "source_imu_sample": [
+                -1 if anchor.source_imu_sample is None else anchor.source_imu_sample
+                for anchor in document.anchors
+            ],
+            "video_interval_start_ns": [
+                anchor.video_time_ns
+                if anchor.video_interval_start_ns is None
+                else anchor.video_interval_start_ns
+                for anchor in document.anchors
+            ],
+            "imu_interval_start_ns": [
+                anchor.imu_time_ns
+                if anchor.imu_interval_start_ns is None
+                else anchor.imu_interval_start_ns
+                for anchor in document.anchors
+            ],
+        }
+        for name, values in string_values.items():
+            if name in sync:
+                del sync[name]
+            sync.create_dataset(name, data=np.asarray(values, dtype=text), maxshape=(None,))
+        for name, values in int_values.items():
+            if name in sync:
+                dataset = sync[name]
+                dataset.resize((len(values),))
+                dataset[:] = np.asarray(values, dtype=np.int64)
+            else:
+                sync.create_dataset(
+                    name,
+                    data=np.asarray(values, dtype=np.int64),
+                    maxshape=(None,),
+                )
+        sync.attrs.update(assessment.as_dict())
+        sync.attrs["reviewer_id"] = document.reviewer_id or ""
+        sample_times = np.asarray(
+            self.handle["imu/samples/time_monotonic_ns"], dtype=np.int64
+        )
+        relative = sample_times - self.recording_start_monotonic_ns
+        samples = self.handle["imu/samples"]
+        samples["recording_time_ns"][:] = relative
+        aligned = relative + assessment.applied_offset_ns
+        if "aligned_video_time_ns" not in samples:
+            samples.create_dataset(
+                "aligned_video_time_ns",
+                data=aligned,
+                maxshape=(None,),
+                chunks=(SAMPLE_CHUNK_ROWS,),
+            )
+        else:
+            samples["aligned_video_time_ns"][:] = aligned
+        self.handle.flush()
+        return assessment
 
     def _write_annotations_group(self, document: AnnotationDocument) -> None:
         if "annotations" in self.handle:
@@ -504,6 +659,19 @@ class CaptureH5Writer:
         }
         for name, (values, dtype) in event_columns.items():
             events.create_dataset(name, data=np.asarray(values, dtype=dtype), maxshape=(None,))
+        exclusions = group.create_group("exclusions")
+        exclusion_columns: dict[str, tuple[Any, Any]] = {
+            "exclusion_id": ([item.exclusion_id for item in document.exclusions], text),
+            "start_ns": ([item.start_ns for item in document.exclusions], "i8"),
+            "end_ns": ([item.end_ns for item in document.exclusions], "i8"),
+            "reason": ([item.reason.value for item in document.exclusions], text),
+            "annotator_id": ([item.annotator_id for item in document.exclusions], text),
+            "notes": ([item.notes for item in document.exclusions], text),
+        }
+        for name, (values, dtype) in exclusion_columns.items():
+            exclusions.create_dataset(
+                name, data=np.asarray(values, dtype=dtype), maxshape=(None,)
+            )
 
     def finish(self, ended_at_utc: str | None = None) -> None:
         sample_time = np.asarray(self.handle["imu/samples/recording_time_ns"], dtype=np.int64)
@@ -544,7 +712,10 @@ def replace_annotations_atomic(
 ) -> None:
     with h5py.File(path, "r") as source:
         duration_ns = int(source.attrs.get("duration_ns", 0)) or None
+        sync_quality = str(source["sync"].attrs.get("quality", "missing"))
     issues = validate_annotations(document, taxonomy, duration_ns)
+    if document.finalized and sync_quality != "verified":
+        issues.append(f"定稿前必须完成同步验证，当前状态为 {sync_quality}")
     if issues:
         raise ValueError("; ".join(issues))
     temporary = path.with_suffix(".annotating.h5")
@@ -570,9 +741,9 @@ def replace_annotations_atomic(
 
 def replace_sync_atomic(
     path: Path,
-    anchors: list[SyncAnchor],
+    document: SyncDocument,
     taxonomy: dict[str, Any],
-) -> SyncModel:
+) -> ConditionalSyncAssessment:
     temporary = path.with_suffix(".syncing.h5")
     shutil.copy2(path, temporary)
     try:
@@ -582,7 +753,7 @@ def replace_sync_atomic(
             writer.recording_start_monotonic_ns = int(
                 handle.attrs["recording_start_monotonic_ns"]
             )
-            model = writer.write_sync(anchors)
+            model = writer.write_conditional_sync(document)
             handle.attrs["sync_updated_at_utc"] = datetime.now(UTC).isoformat()
             handle.flush()
         report = validate_capture_h5(temporary, taxonomy, require_sync=False)

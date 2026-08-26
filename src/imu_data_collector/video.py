@@ -127,13 +127,16 @@ def select_video_device(
             if selected is None:
                 raise RuntimeError("所选摄像头当前不可用；请重新扫描并选择")
         else:
+            compatible = [
+                item
+                for item in devices
+                if item["supports_default_profile"] and item["color_capture"]
+            ]
+            # 同时存在笔记本内置相机与 USB 相机时，默认选择外接相机。
+            # 显式 camera_id 或配置 device 始终具有更高优先级。
             selected = next(
-                (
-                    item
-                    for item in devices
-                    if item["supports_default_profile"] and item["color_capture"]
-                ),
-                None,
+                (item for item in compatible if item.get("integration") == "external"),
+                compatible[0] if compatible else None,
             )
     if selected is None:
         raise RuntimeError("没有摄像头支持配置的 1080p30 MJPEG 彩色视频模式")
@@ -372,7 +375,12 @@ class FFmpegVideoRecorder:
                 self.progress.errors.append(text)
 
 
-async def probe_video_frames(path: Path, recording_start_monotonic_ns: int) -> VideoFrameTable:
+async def probe_video_frames(
+    path: Path,
+    recording_start_monotonic_ns: int,
+    *,
+    pts_are_monotonic: bool = True,
+) -> VideoFrameTable:
     code, stdout, stderr = await _run_capture(
         "ffprobe",
         "-v",
@@ -406,7 +414,7 @@ async def probe_video_frames(path: Path, recording_start_monotonic_ns: int) -> V
         durations.append(float(frame.get("pkt_duration_time", 0.0)))
         keys.append(bool(int(frame.get("key_frame", 0))))
     pts = np.rint(np.asarray(pts_seconds, dtype=np.float64) * 1e9).astype(np.int64)
-    if len(pts) and pts[0] < 1_000_000_000_000:
+    if len(pts) and not pts_are_monotonic:
         pts = pts - pts[0] + int(recording_start_monotonic_ns)
     duration_ns = np.rint(np.asarray(durations, dtype=np.float64) * 1e9).astype(np.int64)
     if len(duration_ns):
@@ -422,3 +430,29 @@ async def probe_video_frames(path: Path, recording_start_monotonic_ns: int) -> V
         width=int(stream.get("width", 0)),
         height=int(stream.get("height", 0)),
     )
+
+
+async def normalize_video_timeline(source_path: Path, output_path: Path) -> None:
+    """无损重封装视频码流，使交付 MKV 的首帧媒体 PTS 从零开始。"""
+
+    if source_path == output_path:
+        raise ValueError("源 MKV 与规范化输出 MKV 不能是同一路径")
+    code, _stdout, stderr = await _run_capture(
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-c",
+        "copy",
+        "-y",
+        str(output_path),
+        timeout_seconds=180.0,
+    )
+    if code:
+        raise RuntimeError(f"MKV 时间轴无损重封装失败：{stderr}")
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise RuntimeError("MKV 时间轴无损重封装没有产生有效输出")

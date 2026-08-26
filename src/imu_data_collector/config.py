@@ -45,6 +45,18 @@ class UploadSettings:
 
 
 @dataclass(slots=True)
+class StorageSettings:
+    backend: str = "local"
+    root: Path = Path("~/.local/share/imu-data-collector/objects")
+
+
+@dataclass(slots=True)
+class AuthSettings:
+    mode: str = "local"
+    iap_audience: str | None = None
+
+
+@dataclass(slots=True)
 class IdentitySettings:
     allowed_unikeys: tuple[str, ...] = (
         "rkim6933",
@@ -57,6 +69,7 @@ class IdentitySettings:
         "jmia0254",
         "xliu0452",
     )
+    admins: tuple[str, ...] = ("xfan0282",)
 
 
 @dataclass(slots=True)
@@ -70,11 +83,14 @@ class Settings:
     imu: ImuSettings = field(default_factory=ImuSettings)
     video: VideoSettings = field(default_factory=VideoSettings)
     upload: UploadSettings = field(default_factory=UploadSettings)
+    storage: StorageSettings = field(default_factory=StorageSettings)
+    auth: AuthSettings = field(default_factory=AuthSettings)
     identity: IdentitySettings = field(default_factory=IdentitySettings)
 
     def resolve_paths(self, project_root: Path) -> None:
         self.data_root = self.data_root.expanduser().resolve()
         self.catalog_path = self.catalog_path.expanduser().resolve()
+        self.storage.root = self.storage.root.expanduser().resolve()
         taxonomy = self.activity_taxonomy_path.expanduser()
         if not taxonomy.is_absolute():
             taxonomy = project_root / taxonomy
@@ -86,14 +102,28 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     imu = ImuSettings(**values.pop("imu", {}))
     video = VideoSettings(**values.pop("video", {}))
     upload = UploadSettings(**values.pop("upload", {}))
+    storage_values = values.pop("storage", {})
+    if "root" in storage_values:
+        storage_values["root"] = Path(storage_values["root"])
+    storage = StorageSettings(**storage_values)
+    auth = AuthSettings(**values.pop("auth", {}))
     identity_values = values.pop("identity", {})
-    if "allowed_unikeys" in identity_values:
-        identity_values["allowed_unikeys"] = tuple(identity_values["allowed_unikeys"])
+    for tuple_key in ("allowed_unikeys", "admins"):
+        if tuple_key in identity_values:
+            identity_values[tuple_key] = tuple(identity_values[tuple_key])
     identity = IdentitySettings(**identity_values)
     for key in ("data_root", "catalog_path", "activity_taxonomy_path"):
         if key in values:
             values[key] = Path(values[key])
-    return Settings(imu=imu, video=video, upload=upload, identity=identity, **values)
+    return Settings(
+        imu=imu,
+        video=video,
+        upload=upload,
+        storage=storage,
+        auth=auth,
+        identity=identity,
+        **values,
+    )
 
 
 def load_settings(config_path: Path | None = None) -> Settings:

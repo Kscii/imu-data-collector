@@ -7,7 +7,11 @@ import asyncio
 import json
 import shutil
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
+import webbrowser
 from collections import Counter
 from pathlib import Path
 
@@ -30,6 +34,7 @@ from imu_data_collector.models import (
     CharacterizationStageRequest,
     CharacterizationStartRequest,
 )
+from imu_data_collector.sync_experiment import write_sync_experiment_report
 from imu_data_collector.validation import validate_capture_h5
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
@@ -62,13 +67,18 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="imu-collector")
     parser.add_argument("--config", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("serve", help="启动本地 WebUI 和 API")
+    subparsers.add_parser("serve", help="启动本地 WebUI 和 API，不自动打开浏览器")
+    subparsers.add_parser("start", help="启动本地服务，并在就绪后自动打开 WebUI")
     validate = subparsers.add_parser("validate", help="验证一个采集 HDF5")
     validate.add_argument("path", type=Path)
     analyze = subparsers.add_parser(
         "analyze-characterization", help="重新生成 IMU 表征 JSON 报告"
     )
     analyze.add_argument("path", type=Path)
+    analyze_sync = subparsers.add_parser(
+        "analyze-sync-experiment", help="比较同步候选方法并分析 4-byte 尾部"
+    )
+    analyze_sync.add_argument("path", type=Path)
     compare = subparsers.add_parser(
         "compare-accel-pair", help="比较两个相反静态姿态并生成加速度候选报告"
     )
@@ -129,6 +139,28 @@ def _parser() -> argparse.ArgumentParser:
     characterize.add_argument("--seconds", type=float, default=30.0)
     characterize.add_argument("--notes", default="")
     return parser
+
+
+def _open_webui_when_ready(url: str, timeout_seconds: float = 15.0) -> None:
+    """等待后端健康接口可用后打开浏览器，避免浏览器先看到连接失败。"""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _webui_is_ready(url):
+            webbrowser.open(url)
+            return
+        time.sleep(0.2)
+    print(f"后端在 {timeout_seconds:.0f} 秒内未就绪，请检查终端日志：{url}")
+
+
+def _webui_is_ready(url: str) -> bool:
+    """只把能响应本项目配置接口的服务视为已运行实例。"""
+
+    try:
+        with urllib.request.urlopen(f"{url}/api/v1/config", timeout=0.5) as response:
+            return response.status < 500
+    except (OSError, TimeoutError, urllib.error.URLError):
+        return False
 
 
 async def _probe_imu(settings, duration_seconds: float) -> dict:
@@ -332,7 +364,19 @@ async def _characterize_imu(
 def main() -> None:
     args = _parser().parse_args()
     settings = load_settings(args.config)
-    if args.command == "serve":
+    if args.command in {"serve", "start"}:
+        webui_url = f"http://{settings.server_host}:{settings.server_port}"
+        print(f"本机 WebUI：{webui_url}")
+        if args.command == "start":
+            if _webui_is_ready(webui_url):
+                print("检测到数采后端已在运行，直接打开现有 WebUI；不会启动第二个实例。")
+                webbrowser.open(webui_url)
+                return
+            threading.Thread(
+                target=_open_webui_when_ready,
+                args=(webui_url,),
+                daemon=True,
+            ).start()
         uvicorn.run(create_app(settings), host=settings.server_host, port=settings.server_port)
     elif args.command == "validate":
         with h5py.File(args.path, "r") as handle:
@@ -358,6 +402,19 @@ def main() -> None:
         print(
             json.dumps(
                 {"source_h5": str(args.path), "report_path": str(report_path)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    elif args.command == "analyze-sync-experiment":
+        json_path, markdown_path = write_sync_experiment_report(args.path)
+        print(
+            json.dumps(
+                {
+                    "source_experiment": str(args.path),
+                    "json_report": str(json_path),
+                    "markdown_report": str(markdown_path),
+                },
                 ensure_ascii=False,
                 indent=2,
             )

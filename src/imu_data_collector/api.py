@@ -19,11 +19,29 @@ from imu_data_collector.models import (
     CharacterizationStageRequest,
     CharacterizationStartRequest,
     PreviewStartRequest,
+    QuarantineRequest,
+    RecordingDeleteRequest,
     RecordingStartRequest,
+    ReviewWorkflowRequest,
+    RevisionRequest,
     SyncDocument,
+    SyncExperimentDocument,
 )
+from imu_data_collector.review import ReviewConflictError
 from imu_data_collector.validation import validate_capture_h5
 from imu_data_collector.video import discover_video_devices
+
+
+def _mjpeg_part(jpeg: bytes) -> bytes:
+    """生成浏览器兼容的单个 MJPEG 分段，并显式声明 JPEG 长度。"""
+
+    return (
+        b"--frame\r\n"
+        b"Content-Type: image/jpeg\r\n"
+        + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+        + jpeg
+        + b"\r\n"
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -49,6 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "data_root": str(active_settings.data_root),
             "minimum_free_gib": active_settings.minimum_free_gib,
             "allowed_unikeys": list(active_settings.identity.allowed_unikeys),
+            "admin_unikeys": list(active_settings.identity.admins),
             "data_tiers": ["test", "prod"],
             "default_data_tier": "test",
             "imu": {
@@ -72,6 +91,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "remote": active_settings.upload.remote,
                 "remote_root_configured": bool(active_settings.upload.remote_root),
             },
+            "storage": {
+                "backend": active_settings.storage.backend,
+                "root": str(active_settings.storage.root),
+            },
+            "auth": {"mode": active_settings.auth.mode},
         }
 
     @app.get("/api/v1/taxonomy")
@@ -175,6 +199,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def recording(recording_id: str) -> dict[str, Any]:
         return required_recording(recording_id).model_dump(mode="json")
 
+    @app.get("/api/v1/recordings/{recording_id}/status")
+    async def recording_status(recording_id: str) -> dict[str, Any]:
+        required_recording(recording_id)
+        try:
+            return coordinator.status(recording_id)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/recordings/{recording_id}/review")
+    async def review(recording_id: str) -> dict[str, Any]:
+        required_recording(recording_id)
+        try:
+            return coordinator.review(recording_id).model_dump(mode="json")
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/recordings/{recording_id}/workflow")
+    async def update_workflow(
+        recording_id: str, request: ReviewWorkflowRequest
+    ) -> dict[str, Any]:
+        required_recording(recording_id)
+        try:
+            return coordinator.update_workflow(recording_id, request).model_dump(
+                mode="json"
+            )
+        except ReviewConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
     @app.get("/api/v1/recordings/{recording_id}/timeline")
     async def timeline(
         recording_id: str,
@@ -182,6 +236,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         required_recording(recording_id)
         return coordinator.timeline(recording_id, max_points)
+
+    @app.get("/api/v1/recordings/{recording_id}/frame-times")
+    async def frame_times(recording_id: str) -> dict[str, Any]:
+        required_recording(recording_id)
+        try:
+            return coordinator.frame_times(recording_id)
+        except (OSError, KeyError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/recordings/{recording_id}/sync-window")
+    async def sync_window(
+        recording_id: str,
+        frame_index: Annotated[int, Query(ge=0)],
+        radius_seconds: Annotated[float, Query(ge=0.1, le=5.0)] = 1.5,
+        expected_video_minus_imu_ns: Annotated[
+            int | None, Query(ge=-5_000_000_000, le=5_000_000_000)
+        ] = None,
+    ) -> dict[str, Any]:
+        required_recording(recording_id)
+        try:
+            return coordinator.sync_window(
+                recording_id,
+                frame_index,
+                radius_seconds,
+                expected_video_minus_imu_ns,
+            )
+        except (OSError, KeyError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/sync-experiments/{experiment_id}")
+    async def sync_experiment(experiment_id: str) -> dict[str, Any]:
+        try:
+            return coordinator.sync_experiment(experiment_id).model_dump(mode="json")
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.put("/api/v1/sync-experiments/{experiment_id}")
+    async def save_sync_experiment(
+        experiment_id: str, document: SyncExperimentDocument
+    ) -> dict[str, Any]:
+        try:
+            saved = coordinator.save_sync_experiment(experiment_id, document)
+        except (KeyError, OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return saved.model_dump(mode="json")
 
     @app.get("/api/v1/recordings/{recording_id}/annotations")
     async def annotations(recording_id: str) -> dict[str, Any]:
@@ -195,6 +294,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         required_recording(recording_id)
         try:
             saved = await coordinator.save_annotations(recording_id, document)
+        except ReviewConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         return saved.model_dump(mode="json")
@@ -204,6 +305,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         required_recording(recording_id)
         try:
             return await coordinator.save_sync(recording_id, document)
+        except ReviewConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -220,6 +323,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"status": "verified"}
+
+    @app.get("/api/v1/recordings/{recording_id}/capture-package/estimate")
+    async def package_estimate(recording_id: str) -> dict[str, Any]:
+        required_recording(recording_id)
+        try:
+            return coordinator.package_estimate(recording_id)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/recordings/{recording_id}/capture-package")
+    async def create_package(recording_id: str) -> dict[str, str]:
+        required_recording(recording_id)
+        try:
+            path = coordinator.create_package(recording_id)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"status": "created", "path": str(path)}
+
+    @app.post("/api/v1/recordings/{recording_id}/aligned30")
+    async def create_aligned30(
+        recording_id: str, request: RevisionRequest
+    ) -> dict[str, str]:
+        required_recording(recording_id)
+        try:
+            path = coordinator.export_training(recording_id, request.expected_revision)
+        except ReviewConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"status": "exported", "path": str(path)}
+
+    @app.post("/api/v1/training-releases")
+    async def create_training_release() -> dict[str, str]:
+        try:
+            path = coordinator.create_training_release()
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"status": "created", "path": str(path)}
+
+    @app.delete("/api/v1/recordings/{recording_id}")
+    async def delete_recording(
+        recording_id: str, request: RecordingDeleteRequest
+    ) -> dict[str, str]:
+        required_recording(recording_id)
+        try:
+            deleted = coordinator.delete_recording(recording_id, request.confirmation)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"status": "deleted", "path": str(deleted)}
+
+    @app.get("/api/v1/maintenance/incomplete")
+    async def incomplete_files() -> list[dict[str, object]]:
+        return coordinator.incomplete_files()
+
+    @app.post("/api/v1/maintenance/quarantine")
+    async def quarantine_file(request: QuarantineRequest) -> dict[str, str]:
+        try:
+            path = coordinator.quarantine_file(request.relative_path)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"status": "quarantined", "path": str(path)}
+
+    @app.post("/api/v1/maintenance/rebuild-catalog")
+    async def rebuild_catalog() -> dict[str, int]:
+        return coordinator.rebuild_catalog()
 
     @app.get("/api/v1/recordings/{recording_id}/validate")
     async def validate(recording_id: str) -> dict[str, Any]:
@@ -253,15 +421,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return
                 if recorder and recorder.latest_jpeg and recorder.preview_generation != generation:
                     generation = recorder.preview_generation
-                    yield (
-                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                        + recorder.latest_jpeg
-                        + b"\r\n"
-                    )
+                    yield _mjpeg_part(recorder.latest_jpeg)
                 await asyncio.sleep(0.05)
 
         return StreamingResponse(
-            stream(), media_type="multipart/x-mixed-replace; boundary=frame"
+            stream(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.websocket("/api/v1/live")

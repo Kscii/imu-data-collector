@@ -17,6 +17,18 @@ identity:
     - "hche5673"
     - "jmia0254"
     - "xliu0452"
+  admins:
+    - "xfan0282"
+
+auth:
+  # 本机开发固定为 local；生产服务器必须改成 iap，且不允许自动回退。
+  mode: "local"
+  iap_audience: null
+
+storage:
+  # 当前只实现本地对象存储；未来 GCS 实现沿用同一个对象键接口。
+  backend: "local"
+  root: "~/.local/share/imu-data-collector/objects"
 
 imu:
   name: "CW12EU-T"

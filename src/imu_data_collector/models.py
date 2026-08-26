@@ -21,6 +21,16 @@ class RecordingState(StrEnum):
     FAILED = "failed"
 
 
+class ReviewWorkflowState(StrEnum):
+    """标注快照的当前工作流状态；不保存逐次修订历史。"""
+
+    UNASSIGNED = "unassigned"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    ACCEPTED = "accepted"
+    EXPORTED = "exported"
+
+
 class DataTier(StrEnum):
     """录制开始时确定的数据用途分级。"""
 
@@ -36,6 +46,19 @@ class BinaryLabel(StrEnum):
 class EventKind(StrEnum):
     ONSET = "onset"
     IMPACT = "impact"
+
+
+class ExclusionReason(StrEnum):
+    """已人工复核、但明确禁止进入训练的区间原因。"""
+
+    SYNC_TAP = "sync_tap"
+    SETUP = "setup"
+    SENSOR_ADJUSTMENT = "sensor_adjustment"
+    SENSOR_REMOVED = "sensor_removed"
+    QUALITY_ISSUE = "quality_issue"
+    AMBIGUOUS = "ambiguous"
+    PRIVACY = "privacy"
+    OTHER = "other"
 
 
 class RecordingStartRequest(BaseModel):
@@ -93,6 +116,25 @@ class AnnotationEvent(BaseModel):
         return self
 
 
+class ExclusionInterval(BaseModel):
+    exclusion_id: str = Field(
+        min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$"
+    )
+    start_ns: int = Field(ge=0)
+    end_ns: int = Field(gt=0)
+    reason: ExclusionReason
+    annotator_id: str
+    notes: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_bounds_and_annotator(self) -> ExclusionInterval:
+        if self.end_ns <= self.start_ns:
+            raise ValueError("exclusion must satisfy start_ns < end_ns")
+        if not UNIKEY_RE.fullmatch(self.annotator_id):
+            raise ValueError("annotator_id must be a lowercase UniKey-like identifier")
+        return self
+
+
 class AnnotationDocument(BaseModel):
     taxonomy_id: str
     taxonomy_version: str
@@ -100,16 +142,179 @@ class AnnotationDocument(BaseModel):
     finalized: bool = False
     segments: list[ActivitySegment] = Field(default_factory=list)
     events: list[AnnotationEvent] = Field(default_factory=list)
+    exclusions: list[ExclusionInterval] = Field(default_factory=list)
 
 
 class SyncAnchor(BaseModel):
     imu_time_ns: int = Field(ge=0)
     video_time_ns: int = Field(ge=0)
     label: str = Field(default="tap", max_length=64)
+    role: Literal["start_tap", "end_tap", "legacy"] = "legacy"
+    source_video_frame: int | None = Field(default=None, ge=0)
+    source_imu_sample: int | None = Field(default=None, ge=0)
+    video_interval_start_ns: int | None = Field(default=None, ge=0)
+    imu_interval_start_ns: int | None = Field(default=None, ge=0)
+    reviewer_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_sync_anchor(self) -> SyncAnchor:
+        if self.role != "legacy":
+            required = {
+                "source_video_frame": self.source_video_frame,
+                "source_imu_sample": self.source_imu_sample,
+                "video_interval_start_ns": self.video_interval_start_ns,
+                "imu_interval_start_ns": self.imu_interval_start_ns,
+                "reviewer_id": self.reviewer_id,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise ValueError(
+                    "正式同步锚点缺少来源字段：" + ", ".join(missing)
+                )
+        if self.video_interval_start_ns is not None:
+            if self.video_interval_start_ns > self.video_time_ns:
+                raise ValueError("video interval start must not exceed selected frame time")
+        if self.imu_interval_start_ns is not None:
+            if self.imu_interval_start_ns > self.imu_time_ns:
+                raise ValueError("IMU interval start must not exceed selected sample time")
+        if self.reviewer_id is not None and not UNIKEY_RE.fullmatch(self.reviewer_id):
+            raise ValueError("reviewer_id must be a lowercase UniKey-like identifier")
+        return self
 
 
 class SyncDocument(BaseModel):
     anchors: list[SyncAnchor] = Field(default_factory=list)
+    policy: Literal["conditional_fixed_offset_v1"] = "conditional_fixed_offset_v1"
+    apply_fixed_offset: bool = False
+    reviewer_id: str | None = None
+    expected_revision: int | None = Field(default=None, ge=0, exclude=True)
+
+    @model_validator(mode="after")
+    def validate_reviewer(self) -> SyncDocument:
+        if self.reviewer_id is not None and not UNIKEY_RE.fullmatch(self.reviewer_id):
+            raise ValueError("reviewer_id must be a lowercase UniKey-like identifier")
+        return self
+
+
+class SourceArtifact(BaseModel):
+    role: Literal["capture_h5", "video_mkv"]
+    filename: str
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReviewWorkflow(BaseModel):
+    state: ReviewWorkflowState = ReviewWorkflowState.UNASSIGNED
+    annotator_id: str | None = None
+    reviewer_id: str | None = None
+    review_comment: str = Field(default="", max_length=2000)
+    updated_at_utc: str | None = None
+
+    @model_validator(mode="after")
+    def validate_ids(self) -> ReviewWorkflow:
+        for field_name in ("annotator_id", "reviewer_id"):
+            value = getattr(self, field_name)
+            if value is not None and not UNIKEY_RE.fullmatch(value):
+                raise ValueError(f"{field_name} must be a lowercase UniKey-like identifier")
+        return self
+
+
+class ReviewDocument(BaseModel):
+    """原始 H5/MKV 之外唯一可变的同步、标注与审核快照。"""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    recording_id: str
+    revision: int = Field(default=0, ge=0)
+    sources: list[SourceArtifact]
+    sync: SyncDocument
+    annotations: AnnotationDocument
+    workflow: ReviewWorkflow = Field(default_factory=ReviewWorkflow)
+
+
+class ReviewWorkflowRequest(BaseModel):
+    action: Literal["assign", "submit", "accept", "reject", "reopen", "mark_exported"]
+    actor_id: str
+    expected_revision: int = Field(ge=0)
+    comment: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_actor(self) -> ReviewWorkflowRequest:
+        if not UNIKEY_RE.fullmatch(self.actor_id):
+            raise ValueError("actor_id must be a lowercase UniKey-like identifier")
+        return self
+
+
+class RecordingDeleteRequest(BaseModel):
+    confirmation: str
+
+
+class RevisionRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+
+
+class QuarantineRequest(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=1000)
+
+
+class SyncObservation(BaseModel):
+    """人工确认的同一物理轻拍在视频与 IMU 中的对应位置。"""
+
+    observation_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-zA-Z0-9._-]+$",
+    )
+    recording_id: str = Field(min_length=1, max_length=128)
+    video_frame_index: int = Field(ge=0)
+    video_time_ns: int = Field(ge=0)
+    imu_sample_index: int = Field(ge=0)
+    imu_time_ns: int = Field(ge=0)
+    label: str = Field(default="tap", min_length=1, max_length=64)
+    reviewer_id: str
+    notes: str = Field(default="", max_length=2000)
+    selection_mode: Literal[
+        "legacy_manual", "auto_recommended", "manual_candidate"
+    ] = "legacy_manual"
+    recommendation_algorithm: str | None = Field(default=None, max_length=64)
+    recommended_sample_index: int | None = Field(default=None, ge=0)
+    recommendation_confidence: Literal["high", "medium", "low"] | None = None
+    candidate_strength_rank: int | None = Field(default=None, ge=1)
+    candidate_score: float | None = Field(default=None, ge=0)
+    expected_video_minus_imu_ns: int | None = None
+
+    @model_validator(mode="after")
+    def validate_reviewer(self) -> SyncObservation:
+        if not UNIKEY_RE.fullmatch(self.reviewer_id):
+            raise ValueError("reviewer_id must be a lowercase UniKey-like identifier")
+        return self
+
+
+class SyncExperimentSource(BaseModel):
+    """同步实验引用的不可变原始录制及其校验信息。"""
+
+    recording_id: str
+    h5_path: str
+    mkv_path: str
+    h5_size_bytes: int = Field(ge=0)
+    mkv_size_bytes: int = Field(ge=0)
+    h5_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mkv_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class SyncExperimentDocument(BaseModel):
+    """独立于正式同步模型的实验观察记录。"""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    experiment_id: str = Field(
+        default="sync_validation_01",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9._-]+$",
+    )
+    revision: int = Field(default=0, ge=0)
+    updated_at_utc: str | None = None
+    observations: list[SyncObservation] = Field(default_factory=list)
+    sources: list[SyncExperimentSource] = Field(default_factory=list)
 
 
 class CharacterizationStage(StrEnum):

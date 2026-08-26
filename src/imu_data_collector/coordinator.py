@@ -12,16 +12,23 @@ from typing import Any
 import h5py
 import numpy as np
 
+from imu_data_collector.artifacts import (
+    create_capture_package,
+    create_training_release,
+    estimate_capture_package_bytes,
+    export_aligned30,
+)
 from imu_data_collector.ble import CW12EUBleSource
 from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
 from imu_data_collector.cw12eu import parse_notification
-from imu_data_collector.hdf5_store import (
-    CaptureH5Writer,
-    read_annotations,
-    replace_annotations_atomic,
-    replace_sync_atomic,
+from imu_data_collector.hdf5_store import CaptureH5Writer
+from imu_data_collector.maintenance import (
+    hard_delete_recording,
+    quarantine_incomplete,
+    rebuild_catalog,
+    scan_incomplete_files,
 )
 from imu_data_collector.models import (
     AnnotationDocument,
@@ -32,13 +39,32 @@ from imu_data_collector.models import (
     RecordingStartRequest,
     RecordingState,
     RecordingSummary,
+    ReviewDocument,
+    ReviewWorkflowRequest,
+    ReviewWorkflowState,
     SyncDocument,
+    SyncExperimentDocument,
+)
+from imu_data_collector.review import (
+    ReviewConflictError,
+    load_review,
+    mutate_review,
+    workflow_with_timestamp,
+)
+from imu_data_collector.storage import LocalFilesystemStore
+from imu_data_collector.sync import assess_conditional_fixed_offset
+from imu_data_collector.sync_experiment import (
+    load_sync_experiment,
+    read_frame_times,
+    read_sync_window,
+    save_sync_experiment,
 )
 from imu_data_collector.upload import RcloneRemoteStore
-from imu_data_collector.validation import validate_capture_h5
+from imu_data_collector.validation import validate_annotations, validate_capture_h5
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
     discover_video_devices,
+    normalize_video_timeline,
     probe_video_frames,
     select_video_device,
 )
@@ -50,6 +76,9 @@ class RecordingCoordinator:
         self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.catalog = RecordingCatalog(settings.catalog_path)
         self.remote = RcloneRemoteStore(settings.upload)
+        if settings.storage.backend != "local":
+            raise ValueError("当前版本只支持 storage.backend=local")
+        self.object_store = LocalFilesystemStore(settings.storage.root)
         self.state = RecordingState.IDLE
         self.current: RecordingSummary | None = None
         self.ble: CW12EUBleSource | None = None
@@ -263,6 +292,9 @@ class RecordingCoordinator:
             self._reset_live_imu_metrics()
             try:
                 await self.ble.start()
+                self.writer.append_connection_event(
+                    "ble_connected", time.monotonic_ns()
+                )
                 await self.video.start()
                 capture_start_ns = self.video.started_monotonic_ns or time.monotonic_ns()
                 capture_started_at = datetime.now(UTC).isoformat()
@@ -347,7 +379,13 @@ class RecordingCoordinator:
             except Exception as error:
                 issues.append(str(error))
             try:
+                self.writer.append_connection_event(
+                    "ble_stop_requested", time.monotonic_ns()
+                )
                 await self.ble.stop()
+                self.writer.append_connection_event(
+                    "ble_disconnected", time.monotonic_ns()
+                )
             except Exception as error:
                 issues.append(str(error))
             self._stop_consumer.set()
@@ -365,6 +403,9 @@ class RecordingCoordinator:
             partial_mkv = Path(self.current.mkv_path or "")
             final_h5 = partial_h5.with_name(partial_h5.name.replace(".partial.h5", ".h5"))
             final_mkv = partial_mkv.with_name(partial_mkv.name.replace(".partial.mkv", ".mkv"))
+            normalizing_mkv = partial_mkv.with_name(
+                partial_mkv.name.replace(".partial.mkv", ".normalizing.mkv")
+            )
             try:
                 rate, _residual = self.writer.reconstruct_times()
                 self.observed_rate_hz = rate
@@ -373,12 +414,26 @@ class RecordingCoordinator:
                 )
                 if not partial_mkv.is_file() or partial_mkv.stat().st_size == 0:
                     raise ValueError("FFmpeg produced no MKV data")
-                partial_mkv.replace(final_mkv)
                 frame_table = await probe_video_frames(
-                    final_mkv, self.writer.recording_start_monotonic_ns
+                    partial_mkv, self.writer.recording_start_monotonic_ns
                 )
+                await normalize_video_timeline(partial_mkv, normalizing_mkv)
+                normalized_table = await probe_video_frames(
+                    normalizing_mkv,
+                    int(frame_table.pts_monotonic_ns[0]),
+                    pts_are_monotonic=False,
+                )
+                if not np.array_equal(
+                    normalized_table.pts_monotonic_ns,
+                    frame_table.pts_monotonic_ns,
+                ):
+                    raise RuntimeError("MKV 重封装前后的帧数量或逐帧时间间隔不一致")
+                normalizing_mkv.replace(final_mkv)
                 self.writer.write_video_frames(
                     pts_monotonic_ns=frame_table.pts_monotonic_ns,
+                    media_time_ns=(
+                        frame_table.pts_monotonic_ns - frame_table.pts_monotonic_ns[0]
+                    ),
                     duration_ns=frame_table.duration_ns,
                     key_frame=frame_table.key_frame,
                     video_path=final_mkv,
@@ -391,6 +446,7 @@ class RecordingCoordinator:
                 self.writer.write_sync([])
                 self.writer.finish(ended_at_utc=capture_ended_at)
                 partial_h5.replace(final_h5)
+                partial_mkv.unlink(missing_ok=True)
             except Exception as error:
                 issues.append(str(error))
                 self.writer.abort_close()
@@ -404,10 +460,6 @@ class RecordingCoordinator:
                 issues.extend(report.issues)
             if final_h5.is_file():
                 with h5py.File(final_h5, "r") as handle:
-                    if str(handle["sync"].attrs.get("quality", "missing")) != "verified":
-                        issues.append("synchronization anchors have not been verified")
-                    if not bool(handle.attrs.get("calibration_verified", False)):
-                        issues.append("IMU scale calibration has not been verified")
                     duration_ns = int(handle.attrs.get("duration_ns", 0))
                     ended_at = str(handle.attrs.get("ended_at_utc", datetime.now(UTC).isoformat()))
             else:
@@ -427,6 +479,17 @@ class RecordingCoordinator:
                 }
             )
             self.catalog.upsert(self.current)
+            if final_h5.is_file() and final_mkv.is_file():
+                try:
+                    load_review(final_h5, final_mkv, self.taxonomy)
+                except (OSError, ValueError) as error:
+                    self.current = self.current.model_copy(
+                        update={
+                            "state": RecordingState.NEEDS_ATTENTION,
+                            "issues": [*self.current.issues, f"创建 review.json 失败：{error}"],
+                        }
+                    )
+                    self.catalog.upsert(self.current)
             self.mode = None
             self.ble = None
             self.video = None
@@ -499,6 +562,9 @@ class RecordingCoordinator:
             self._reset_live_imu_metrics()
             try:
                 await self.ble.start()
+                self.writer.append_connection_event(
+                    "ble_connected", time.monotonic_ns()
+                )
                 self._consumer = asyncio.create_task(self._consume_imu())
             except Exception as error:
                 await self._abort_start(error)
@@ -557,7 +623,13 @@ class RecordingCoordinator:
                 self._close_characterization_stage()
             assert self.ble is not None and self.writer is not None
             try:
+                self.writer.append_connection_event(
+                    "ble_stop_requested", time.monotonic_ns()
+                )
                 await self.ble.stop()
+                self.writer.append_connection_event(
+                    "ble_disconnected", time.monotonic_ns()
+                )
             except Exception as error:
                 issues.append(str(error))
             self._stop_consumer.set()
@@ -720,22 +792,74 @@ class RecordingCoordinator:
     ) -> AnnotationDocument:
         summary = self._required_summary(recording_id)
         annotators = {
-            item.annotator_id for item in (*document.segments, *document.events)
+            item.annotator_id
+            for item in (*document.segments, *document.events, *document.exclusions)
         }
         for annotator in annotators:
             self._require_allowed_unikey(annotator, "annotator_id")
-        path = Path(summary.h5_path or "")
-        enriched = self._enrich_event_indices(path, document)
-        replace_annotations_atomic(path, enriched, self.taxonomy)
-        self.catalog.enqueue_upload(recording_id, enriched.revision)
-        return enriched
+        if len(annotators) > 1:
+            raise ValueError("一个 review.json 修订只能由一名标注者保存")
+        h5_path, mkv_path = self._recording_paths(summary)
+        enriched = self._enrich_event_indices(h5_path, document)
+        annotation_issues = validate_annotations(
+            enriched, self.taxonomy, summary.duration_ns
+        )
+        if annotation_issues:
+            raise ValueError("；".join(annotation_issues))
+        current = load_review(h5_path, mkv_path, self.taxonomy)
+        if enriched.revision != current.annotations.revision + 1:
+            raise ReviewConflictError(
+                f"标注已更新：下一 revision 应为 {current.annotations.revision + 1}"
+            )
+
+        def update(review: ReviewDocument) -> ReviewDocument:
+            if review.workflow.state in {
+                ReviewWorkflowState.SUBMITTED,
+                ReviewWorkflowState.ACCEPTED,
+                ReviewWorkflowState.EXPORTED,
+            }:
+                raise ValueError("已提交或已审核的标注必须先驳回/重开才能修改")
+            annotator = next(iter(annotators), review.workflow.annotator_id)
+            workflow = review.workflow
+            if (
+                workflow.annotator_id is not None
+                and annotator is not None
+                and workflow.annotator_id != annotator
+            ):
+                raise ValueError("当前修订的 annotator_id 与已分配标注者不一致")
+            if workflow.state == ReviewWorkflowState.UNASSIGNED:
+                workflow = workflow_with_timestamp(
+                    workflow,
+                    state=ReviewWorkflowState.IN_PROGRESS,
+                    annotator_id=annotator,
+                )
+            return review.model_copy(
+                update={"annotations": enriched, "workflow": workflow}
+            )
+
+        saved = mutate_review(
+            h5_path,
+            mkv_path,
+            self.taxonomy,
+            current.revision,
+            update,
+        )
+        self.catalog.enqueue_upload(recording_id, saved.revision)
+        return saved.annotations
 
     def _enrich_event_indices(
         self, path: Path, document: AnnotationDocument
     ) -> AnnotationDocument:
         with h5py.File(path, "r") as handle:
             video_times = np.asarray(handle["video/frames/recording_time_ns"], dtype=np.int64)
-            imu_times = np.asarray(handle["imu/samples/recording_time_ns"], dtype=np.int64)
+            imu_times = np.asarray(
+                handle[
+                    "imu/samples/aligned_video_time_ns"
+                    if "imu/samples/aligned_video_time_ns" in handle
+                    else "imu/samples/recording_time_ns"
+                ],
+                dtype=np.int64,
+            )
 
         def nearest(values: np.ndarray, target: int) -> int | None:
             if not len(values):
@@ -756,41 +880,139 @@ class RecordingCoordinator:
 
     async def save_sync(self, recording_id: str, document: SyncDocument) -> dict[str, Any]:
         summary = self._required_summary(recording_id)
-        model = replace_sync_atomic(Path(summary.h5_path or ""), document.anchors, self.taxonomy)
-        return {
-            "scale": model.scale,
-            "offset_ns": model.offset_ns,
-            "residual_rms_ns": model.residual_rms_ns,
-            "quality": model.quality,
+        reviewers = {
+            reviewer
+            for reviewer in (
+                document.reviewer_id,
+                *(anchor.reviewer_id for anchor in document.anchors),
+            )
+            if reviewer
         }
+        for reviewer in reviewers:
+            self._require_allowed_unikey(reviewer, "reviewer_id")
+        h5_path, mkv_path = self._recording_paths(summary)
+        self._validate_sync_anchor_sources(h5_path, document)
+        assessment = assess_conditional_fixed_offset(document)
+        current = load_review(h5_path, mkv_path, self.taxonomy)
+        expected_revision = (
+            document.expected_revision
+            if document.expected_revision is not None
+            else current.revision
+        )
+
+        def update(review: ReviewDocument) -> ReviewDocument:
+            if review.workflow.state in {
+                ReviewWorkflowState.ACCEPTED,
+                ReviewWorkflowState.EXPORTED,
+            }:
+                raise ValueError("已审核的同步结论必须先重开才能修改")
+            return review.model_copy(update={"sync": document})
+
+        mutate_review(
+            h5_path,
+            mkv_path,
+            self.taxonomy,
+            expected_revision,
+            update,
+        )
+        return self._sync_display(h5_path, assessment.as_dict())
+
+    def _validate_sync_anchor_sources(
+        self, path: Path, document: SyncDocument
+    ) -> None:
+        with h5py.File(path, "r") as handle:
+            start_ns = int(handle.attrs["recording_start_monotonic_ns"])
+            video_times = np.asarray(
+                handle["video/frames/recording_time_ns"], dtype=np.int64
+            )
+            imu_times = (
+                np.asarray(handle["imu/samples/time_monotonic_ns"], dtype=np.int64)
+                - start_ns
+            )
+        for anchor in document.anchors:
+            if anchor.source_video_frame is not None:
+                if anchor.source_video_frame >= len(video_times):
+                    raise ValueError("同步锚点引用的视频帧不存在")
+                if int(video_times[anchor.source_video_frame]) != anchor.video_time_ns:
+                    raise ValueError("同步锚点的视频时间与来源帧不一致")
+                expected_video_start = int(
+                    video_times[max(0, anchor.source_video_frame - 1)]
+                )
+                if anchor.video_interval_start_ns != expected_video_start:
+                    raise ValueError("同步锚点的视频离散区间与来源帧不一致")
+            if anchor.source_imu_sample is not None:
+                if anchor.source_imu_sample >= len(imu_times):
+                    raise ValueError("同步锚点引用的 IMU 样本不存在")
+                if int(imu_times[anchor.source_imu_sample]) != anchor.imu_time_ns:
+                    raise ValueError("同步锚点的 IMU 时间与来源样本不一致")
+                expected_imu_start = int(
+                    imu_times[max(0, anchor.source_imu_sample - 1)]
+                )
+                if anchor.imu_interval_start_ns != expected_imu_start:
+                    raise ValueError("同步锚点的 IMU 离散区间与来源样本不一致")
 
     def sync(self, recording_id: str) -> dict[str, Any]:
         summary = self._required_summary(recording_id)
-        with h5py.File(Path(summary.h5_path or ""), "r") as handle:
-            group = handle["sync"]
-            imu = np.asarray(group["imu_anchor_ns"], dtype=np.int64)
-            video = np.asarray(group["video_anchor_ns"], dtype=np.int64)
-            labels = (
-                [str(item) for item in group["labels"].asstr()[:]]
-                if "labels" in group
-                else ["tap"] * len(imu)
-            )
-            return {
-                "anchors": [
-                    {
-                        "imu_time_ns": int(imu[index]),
-                        "video_time_ns": int(video[index]),
-                        "label": labels[index],
-                    }
-                    for index in range(len(imu))
-                ],
-                "scale": float(group.attrs.get("scale", 1.0)),
-                "offset_ns": float(group.attrs.get("offset_ns", 0.0)),
-                "residual_rms_ns": float(
-                    group.attrs.get("residual_rms_ns", float("nan"))
-                ),
-                "quality": str(group.attrs.get("quality", "missing")),
+        h5_path, mkv_path = self._recording_paths(summary)
+        document = load_review(h5_path, mkv_path, self.taxonomy).sync
+        if len(document.anchors) != 2:
+            result = {
+                "policy": document.policy,
+                "scale": 1.0,
+                "estimated_offset_ns": 0,
+                "applied_offset_ns": 0,
+                "offset_ns": 0,
+                "start_offset_ns": 0,
+                "end_offset_ns": 0,
+                "anchor_disagreement_ns": 0,
+                "residual_rms_ns": float("nan"),
+                "residual_upper_bound_ns": 0,
+                "recommendation": "none",
+                "decision": "host_only",
+                "quality": "missing",
             }
+        else:
+            result = assess_conditional_fixed_offset(document).as_dict()
+        result["anchors"] = [item.model_dump(mode="json") for item in document.anchors]
+        return self._sync_display(h5_path, result)
+
+    def _sync_display(self, path: Path, result: dict[str, Any]) -> dict[str, Any]:
+        with h5py.File(path, "r") as handle:
+            frames = (
+                np.asarray(handle["video/frames/recording_time_ns"], dtype=np.int64)
+                if "video/frames/recording_time_ns" in handle
+                else np.empty(0, dtype=np.int64)
+            )
+            frame_delta = np.diff(frames)
+            median_frame_ns = (
+                float(np.median(frame_delta[frame_delta > 0]))
+                if np.any(frame_delta > 0)
+                else 0.0
+            )
+            observed_rate = float(handle["imu"].attrs.get("observed_rate_hz", 0.0))
+        estimated = int(result.get("estimated_offset_ns", 0))
+        applied = int(result.get("applied_offset_ns", 0))
+        return {
+            **result,
+            "estimated_offset_seconds": estimated / 1e9,
+            "applied_offset_seconds": applied / 1e9,
+            "estimated_offset_video_frames": (
+                estimated / median_frame_ns if median_frame_ns > 0 else None
+            ),
+            "applied_offset_video_frames": (
+                applied / median_frame_ns if median_frame_ns > 0 else None
+            ),
+            "estimated_offset_imu_samples": (
+                estimated / 1e9 * observed_rate if observed_rate > 0 else None
+            ),
+            "applied_offset_imu_samples": (
+                applied / 1e9 * observed_rate if observed_rate > 0 else None
+            ),
+            "actual_median_fps": (
+                1e9 / median_frame_ns if median_frame_ns > 0 else None
+            ),
+            "observed_imu_rate_hz": observed_rate or None,
+        }
 
     async def upload(self, recording_id: str) -> None:
         if not self.remote.configured:
@@ -807,12 +1029,66 @@ class RecordingCoordinator:
 
     def annotations(self, recording_id: str) -> AnnotationDocument:
         summary = self._required_summary(recording_id)
-        return read_annotations(Path(summary.h5_path or ""))
+        h5_path, mkv_path = self._recording_paths(summary)
+        return load_review(h5_path, mkv_path, self.taxonomy).annotations
+
+    def frame_times(self, recording_id: str) -> dict[str, Any]:
+        summary = self._required_summary(recording_id)
+        return read_frame_times(Path(summary.h5_path or ""))
+
+    def sync_window(
+        self,
+        recording_id: str,
+        frame_index: int,
+        radius_seconds: float,
+        expected_video_minus_imu_ns: int | None = None,
+    ) -> dict[str, Any]:
+        summary = self._required_summary(recording_id)
+        return read_sync_window(
+            Path(summary.h5_path or ""),
+            frame_index,
+            radius_seconds,
+            expected_video_minus_imu_ns,
+        )
+
+    def sync_experiment(self, experiment_id: str) -> SyncExperimentDocument:
+        return load_sync_experiment(self.settings.data_root, experiment_id)
+
+    def save_sync_experiment(
+        self, experiment_id: str, document: SyncExperimentDocument
+    ) -> SyncExperimentDocument:
+        if document.experiment_id != experiment_id:
+            raise ValueError("URL 与同步实验文档的 experiment_id 不一致")
+        reviewers = {item.reviewer_id for item in document.observations}
+        for reviewer in reviewers:
+            self._require_allowed_unikey(reviewer, "reviewer_id")
+        recording_paths: dict[str, tuple[Path, Path]] = {}
+        for recording_id in {item.recording_id for item in document.observations}:
+            summary = self._required_summary(recording_id)
+            if not summary.h5_path or not summary.mkv_path:
+                raise ValueError(f"录制文件不完整：{recording_id}")
+            recording_paths[recording_id] = (
+                Path(summary.h5_path),
+                Path(summary.mkv_path),
+            )
+        return save_sync_experiment(
+            self.settings.data_root, document, recording_paths
+        )
 
     def timeline(self, recording_id: str, max_points: int = 5_000) -> dict[str, Any]:
         summary = self._required_summary(recording_id)
-        with h5py.File(Path(summary.h5_path or ""), "r") as handle:
-            times = np.asarray(handle["imu/samples/recording_time_ns"], dtype=np.int64)
+        h5_path, mkv_path = self._recording_paths(summary)
+        review = load_review(h5_path, mkv_path, self.taxonomy)
+        applied_offset_ns = 0
+        if len(review.sync.anchors) == 2:
+            applied_offset_ns = assess_conditional_fixed_offset(
+                review.sync
+            ).applied_offset_ns
+        with h5py.File(h5_path, "r") as handle:
+            times = np.asarray(
+                handle["imu/samples/recording_time_ns"],
+                dtype=np.int64,
+            ) + applied_offset_ns
             values_si = np.asarray(handle["imu/samples/values_si"], dtype=np.float32)
             raw = np.asarray(handle["imu/samples/raw_counts"], dtype=np.int16)
             calibrated = bool(handle.attrs.get("calibration_verified", False))
@@ -824,6 +1100,213 @@ class RecordingCoordinator:
             "unit": "SI" if calibrated else "raw_counts",
             "downsample_step": step,
         }
+
+    def review(self, recording_id: str) -> ReviewDocument:
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        return load_review(h5_path, mkv_path, self.taxonomy)
+
+    def update_workflow(
+        self, recording_id: str, request: ReviewWorkflowRequest
+    ) -> ReviewDocument:
+        self._require_allowed_unikey(request.actor_id, "actor_id")
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+
+        def update(review: ReviewDocument) -> ReviewDocument:
+            workflow = review.workflow
+            action = request.action
+            if action == "assign":
+                if workflow.state not in {
+                    ReviewWorkflowState.UNASSIGNED,
+                    ReviewWorkflowState.IN_PROGRESS,
+                }:
+                    raise ValueError("当前状态不能重新分配标注者")
+                workflow = workflow_with_timestamp(
+                    workflow,
+                    state=ReviewWorkflowState.IN_PROGRESS,
+                    annotator_id=request.actor_id,
+                    reviewer_id=None,
+                    review_comment="",
+                )
+            elif action == "submit":
+                if workflow.state != ReviewWorkflowState.IN_PROGRESS:
+                    raise ValueError("只有进行中的标注可以提交")
+                if workflow.annotator_id != request.actor_id:
+                    raise ValueError("只有当前标注者可以提交")
+                if not review.annotations.finalized:
+                    raise ValueError("提交前必须完成并定稿标注")
+                if len(review.sync.anchors) != 2 or assess_conditional_fixed_offset(
+                    review.sync
+                ).quality != "verified":
+                    raise ValueError("提交前必须完成同步复核")
+                workflow = workflow_with_timestamp(
+                    workflow, state=ReviewWorkflowState.SUBMITTED
+                )
+            elif action in {"accept", "reject"}:
+                if workflow.state != ReviewWorkflowState.SUBMITTED:
+                    raise ValueError("只有已提交的标注可以审核")
+                if workflow.annotator_id == request.actor_id:
+                    raise ValueError("标注者不能审核自己的标注")
+                if action == "reject" and not request.comment.strip():
+                    raise ValueError("驳回时必须填写审核意见")
+                workflow = workflow_with_timestamp(
+                    workflow,
+                    state=(
+                        ReviewWorkflowState.ACCEPTED
+                        if action == "accept"
+                        else ReviewWorkflowState.IN_PROGRESS
+                    ),
+                    reviewer_id=request.actor_id,
+                    review_comment=request.comment.strip(),
+                )
+            elif action == "reopen":
+                if request.actor_id not in self.settings.identity.admins:
+                    raise ValueError("只有管理员可以重开已审核标注")
+                if workflow.state not in {
+                    ReviewWorkflowState.ACCEPTED,
+                    ReviewWorkflowState.EXPORTED,
+                }:
+                    raise ValueError("只有已审核或已导出的标注可以重开")
+                workflow = workflow_with_timestamp(
+                    workflow,
+                    state=ReviewWorkflowState.IN_PROGRESS,
+                    reviewer_id=None,
+                    review_comment=request.comment.strip(),
+                )
+            else:
+                raise ValueError("mark_exported 只能由成功的导出任务设置")
+            return review.model_copy(update={"workflow": workflow})
+
+        return mutate_review(
+            h5_path,
+            mkv_path,
+            self.taxonomy,
+            request.expected_revision,
+            update,
+        )
+
+    def package_estimate(self, recording_id: str) -> dict[str, int | str]:
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        return {
+            "recording_id": recording_id,
+            "estimated_bytes": estimate_capture_package_bytes(h5_path, mkv_path),
+        }
+
+    def create_package(self, recording_id: str) -> Path:
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        review = load_review(h5_path, mkv_path, self.taxonomy)
+        output = h5_path.parent / f"{recording_id}.capture.tar"
+        return create_capture_package(review, h5_path, mkv_path, output)
+
+    def export_training(self, recording_id: str, expected_revision: int) -> Path:
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        review = load_review(h5_path, mkv_path, self.taxonomy)
+        if review.revision != expected_revision:
+            raise ReviewConflictError("review.json 已更新，请刷新后重试导出")
+        output = h5_path.parent / "aligned30.h5"
+        export_aligned30(
+            review,
+            h5_path,
+            mkv_path,
+            output,
+            self.settings.imu,
+            self.taxonomy,
+        )
+
+        def mark_exported(current: ReviewDocument) -> ReviewDocument:
+            return current.model_copy(
+                update={
+                    "workflow": workflow_with_timestamp(
+                        current.workflow, state=ReviewWorkflowState.EXPORTED
+                    )
+                }
+            )
+
+        mutate_review(
+            h5_path,
+            mkv_path,
+            self.taxonomy,
+            expected_revision,
+            mark_exported,
+        )
+        return output
+
+    def create_training_release(self) -> Path:
+        files: list[tuple[str, str, Path]] = []
+        for summary in self.catalog.list():
+            if not summary.h5_path or not summary.mkv_path:
+                continue
+            h5_path, mkv_path = self._recording_paths(summary)
+            review = load_review(h5_path, mkv_path, self.taxonomy)
+            aligned = h5_path.parent / "aligned30.h5"
+            if (
+                review.workflow.state == ReviewWorkflowState.EXPORTED
+                and aligned.is_file()
+            ):
+                files.append((summary.participant_id, summary.recording_id, aligned))
+        release_root = self.settings.data_root / "_releases"
+        ordinal = 1
+        while True:
+            output = release_root / f"cw12eu_training_release_{ordinal:04d}.tar"
+            if not output.exists():
+                break
+            ordinal += 1
+        return create_training_release(files, output)
+
+    def status(self, recording_id: str) -> dict[str, Any]:
+        summary = self._required_summary(recording_id)
+        h5_path, mkv_path = self._recording_paths(summary)
+        review = load_review(h5_path, mkv_path, self.taxonomy)
+        sync_quality = "missing"
+        if len(review.sync.anchors) == 2:
+            sync_quality = assess_conditional_fixed_offset(review.sync).quality
+        calibration = bool(
+            self.settings.imu.accel_counts_per_g
+            and self.settings.imu.gyro_counts_per_dps
+        )
+        return {
+            "capture": summary.state.value,
+            "sync": sync_quality,
+            "annotation": review.workflow.state.value,
+            "calibration": "verified" if calibration else "unverified",
+            "export": (
+                "exported"
+                if review.workflow.state == ReviewWorkflowState.EXPORTED
+                else "not_exported"
+            ),
+            "review_revision": review.revision,
+        }
+
+    def incomplete_files(self) -> list[dict[str, object]]:
+        return scan_incomplete_files(self.settings.data_root)
+
+    def quarantine_file(self, relative_path: str) -> Path:
+        return quarantine_incomplete(self.settings.data_root, relative_path)
+
+    def rebuild_catalog(self) -> dict[str, int]:
+        return rebuild_catalog(self.settings.data_root, self.catalog)
+
+    def delete_recording(self, recording_id: str, confirmation: str) -> Path:
+        summary = self._required_summary(recording_id)
+        if self.current and self.current.recording_id == recording_id:
+            raise ValueError("当前会话正在使用该录制")
+        deleted = hard_delete_recording(
+            self.settings.data_root, summary, confirmation
+        )
+        self.catalog.delete(recording_id)
+        return deleted
+
+    @staticmethod
+    def _recording_paths(summary: RecordingSummary) -> tuple[Path, Path]:
+        h5_path = Path(summary.h5_path or "")
+        mkv_path = Path(summary.mkv_path or "")
+        if not h5_path.is_file() or not mkv_path.is_file():
+            raise ValueError("录制的 H5/MKV 源文件不完整")
+        return h5_path, mkv_path
 
     def _required_summary(self, recording_id: str) -> RecordingSummary:
         summary = self.catalog.get(recording_id)

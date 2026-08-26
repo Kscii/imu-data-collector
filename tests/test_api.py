@@ -2,8 +2,19 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from imu_data_collector.api import create_app
+from imu_data_collector.api import _mjpeg_part, create_app
 from imu_data_collector.config import Settings
+
+
+def test_mjpeg_part_has_explicit_length_and_valid_boundaries() -> None:
+    jpeg = b"\xff\xd8test-frame\xff\xd9"
+
+    part = _mjpeg_part(jpeg)
+
+    assert part.startswith(
+        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 14\r\n\r\n"
+    )
+    assert part.endswith(jpeg + b"\r\n")
 
 
 def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:

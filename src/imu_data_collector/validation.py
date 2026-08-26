@@ -58,6 +58,53 @@ def validate_annotations(
         if duration_ns is not None and segment.end_ns > duration_ns:
             issues.append(f"segment {segment.segment_id} lies outside the recording")
 
+    ordered_exclusions = sorted(
+        document.exclusions, key=lambda item: (item.start_ns, item.end_ns)
+    )
+    if ordered_exclusions != document.exclusions:
+        issues.append("exclusions must be sorted by start time")
+    exclusion_ids = {item.exclusion_id for item in document.exclusions}
+    if len(exclusion_ids) != len(document.exclusions):
+        issues.append("exclusion_id values must be unique")
+    previous_exclusion_end = 0
+    for exclusion in ordered_exclusions:
+        if exclusion.start_ns < previous_exclusion_end:
+            issues.append(
+                f"exclusion {exclusion.exclusion_id} overlaps the previous exclusion"
+            )
+        previous_exclusion_end = max(previous_exclusion_end, exclusion.end_ns)
+        if duration_ns is not None and exclusion.end_ns > duration_ns:
+            issues.append(
+                f"exclusion {exclusion.exclusion_id} lies outside the recording"
+            )
+
+    coverage = sorted(
+        [
+            (item.start_ns, item.end_ns, f"segment {item.segment_id}")
+            for item in document.segments
+        ]
+        + [
+            (item.start_ns, item.end_ns, f"exclusion {item.exclusion_id}")
+            for item in document.exclusions
+        ],
+        key=lambda item: (item[0], item[1]),
+    )
+    coverage_end = 0
+    for start_ns, end_ns, label in coverage:
+        if start_ns < coverage_end:
+            issues.append(f"{label} overlaps another annotation interval")
+        if document.finalized and start_ns > coverage_end:
+            issues.append(
+                f"finalized annotation has an uncovered interval "
+                f"[{coverage_end}, {start_ns})"
+            )
+        coverage_end = max(coverage_end, end_ns)
+    if document.finalized and duration_ns is not None and coverage_end < duration_ns:
+        issues.append(
+            f"finalized annotation has an uncovered interval "
+            f"[{coverage_end}, {duration_ns})"
+        )
+
     events_by_segment: dict[str, dict[EventKind, list[int]]] = {}
     for event in document.events:
         segment = segment_by_id.get(event.segment_id)
@@ -133,6 +180,14 @@ def validate_capture_h5(
             "imu/samples/recording_time_ns",
             "imu/samples/values_si",
         )
+        if schema_version == CAPTURE_SCHEMA_VERSION:
+            required += (
+                "imu/packets/fitted_packet_end_time_ns",
+                "imu/packets/fit_residual_ns",
+                "imu/connection_events/event",
+                "imu/connection_events/time_monotonic_ns",
+                "imu/samples/aligned_video_time_ns",
+            )
         for name in required:
             if name not in handle:
                 issues.append(f"missing dataset {name}")
@@ -143,12 +198,27 @@ def validate_capture_h5(
         offsets = np.asarray(handle["imu/packets/payload_offsets"], dtype=np.int64)
         receive = np.asarray(handle["imu/packets/receive_time_ns"], dtype=np.int64)
         sample_counts = np.asarray(handle["imu/packets/sample_count"], dtype=np.int64)
+        fitted_packet_end = (
+            handle["imu/packets/fitted_packet_end_time_ns"]
+            if "imu/packets/fitted_packet_end_time_ns" in handle
+            else None
+        )
+        packet_fit_residual = (
+            handle["imu/packets/fit_residual_ns"]
+            if "imu/packets/fit_residual_ns" in handle
+            else None
+        )
         raw_counts = handle["imu/samples/raw_counts"]
         trailer = handle["imu/samples/trailer"]
         packet_index = handle["imu/samples/packet_index"]
         sample_in_packet = handle["imu/samples/sample_in_packet"]
         sample_times = np.asarray(handle["imu/samples/time_monotonic_ns"], dtype=np.int64)
         recording_times = np.asarray(handle["imu/samples/recording_time_ns"], dtype=np.int64)
+        aligned_times = (
+            np.asarray(handle["imu/samples/aligned_video_time_ns"], dtype=np.int64)
+            if "imu/samples/aligned_video_time_ns" in handle
+            else recording_times
+        )
         values_si = handle["imu/samples/values_si"]
 
         packet_count = len(receive)
@@ -159,6 +229,16 @@ def validate_capture_h5(
         metrics["observed_rate_hz"] = float(
             handle["imu"].attrs.get("observed_rate_hz", 0.0)
         )
+        expected_rate_hz = float(handle["imu"].attrs.get("expected_rate_hz", 0.0))
+        metrics["expected_rate_hz"] = expected_rate_hz
+        fit_rms_ns = float(
+            handle["imu"].attrs.get("packet_end_fit_residual_rms_ns", 0.0)
+        )
+        fit_max_ns = int(
+            handle["imu"].attrs.get("packet_end_fit_residual_max_abs_ns", 0)
+        )
+        metrics["packet_fit_residual_rms_ms"] = fit_rms_ns / 1e6
+        metrics["packet_fit_residual_max_abs_ms"] = fit_max_ns / 1e6
         metrics["ffmpeg_diagnostic_count"] = int(
             handle["video"].attrs.get("ffmpeg_diagnostic_count", 0)
         )
@@ -170,12 +250,37 @@ def validate_capture_h5(
             issues.append("packet payload offsets are invalid")
         if len(sample_counts) != packet_count:
             issues.append("packet sample_count length mismatch")
+        if fitted_packet_end is not None and len(fitted_packet_end) != packet_count:
+            issues.append("fitted packet timestamp length mismatch")
+        if packet_fit_residual is not None and len(packet_fit_residual) != packet_count:
+            issues.append("packet timestamp residual length mismatch")
         if packet_count == 0:
             issues.append("recording contains no IMU packets")
         if sample_count == 0:
             issues.append("recording contains no parsed IMU samples")
         if callback_drops > 0:
             issues.append(f"BLE callback dropped {callback_drops} notifications")
+        parse_error_count = int(handle.attrs.get("parse_error_count", 0))
+        metrics["parse_error_count"] = parse_error_count
+        if parse_error_count > 0:
+            issues.append(f"IMU packet parsing failed {parse_error_count} times")
+        if schema_version == CAPTURE_SCHEMA_VERSION:
+            observed_rate_hz = float(metrics["observed_rate_hz"])
+            if expected_rate_hz > 0 and not (
+                expected_rate_hz * 0.95
+                <= observed_rate_hz
+                <= expected_rate_hz * 1.05
+            ):
+                issues.append(
+                    f"IMU observed rate {observed_rate_hz:.3f} Hz is outside "
+                    f"the expected ±5% range"
+                )
+            if len(receive) > 1 and np.max(np.diff(receive)) > 1_500_000_000:
+                issues.append("IMU notification gap exceeds 1.5 seconds")
+            if fit_rms_ns > 100_000_000:
+                issues.append("IMU packet timestamp fit RMS exceeds 0.1 seconds")
+            if fit_max_ns > 200_000_000:
+                issues.append("IMU packet timestamp maximum residual exceeds 0.2 seconds")
         sample_lengths = {
             sample_count,
             len(trailer),
@@ -183,6 +288,7 @@ def validate_capture_h5(
             len(sample_in_packet),
             len(sample_times),
             len(recording_times),
+            len(aligned_times),
             len(values_si),
         }
         if len(sample_lengths) != 1:
@@ -191,6 +297,8 @@ def validate_capture_h5(
             issues.append("IMU estimated timestamps are not strictly increasing")
         if sample_count and np.any(np.diff(recording_times) <= 0):
             issues.append("IMU recording timestamps are not strictly increasing")
+        if sample_count and np.any(np.diff(aligned_times) <= 0):
+            issues.append("IMU aligned timestamps are not strictly increasing")
         if raw_counts.shape != (sample_count, 6):
             issues.append("raw_counts must have shape (N, 6)")
         if trailer.shape != (sample_count, 4):
@@ -210,6 +318,11 @@ def validate_capture_h5(
                 video_recording = np.asarray(
                     handle["video/frames/recording_time_ns"], dtype=np.int64
                 )
+                media_time = (
+                    np.asarray(handle["video/frames/media_time_ns"], dtype=np.int64)
+                    if "video/frames/media_time_ns" in handle
+                    else None
+                )
                 metrics["video_frame_count"] = len(video_pts)
                 pts_deltas = np.diff(video_pts)
                 metrics["video_nonpositive_pts_delta_count"] = int(
@@ -220,12 +333,30 @@ def validate_capture_h5(
                     if len(video_pts) > 1 and video_pts[-1] > video_pts[0]
                     else 0.0
                 )
+                metrics["video_max_frame_gap_ms"] = (
+                    float(np.max(pts_deltas) / 1e6) if len(pts_deltas) else 0.0
+                )
                 if not len(video_pts):
                     issues.append("recording contains no video frames")
                 if len(video_pts) != len(video_recording):
                     issues.append("video timestamp dataset length mismatch")
+                if schema_version == CAPTURE_SCHEMA_VERSION:
+                    if media_time is None:
+                        issues.append("current schema is missing video media_time_ns")
+                    elif len(media_time) != len(video_pts):
+                        issues.append("video media timestamp dataset length mismatch")
+                    elif len(media_time) and media_time[0] != 0:
+                        issues.append("video media timeline must start at zero")
+                    elif len(media_time) > 1 and np.any(np.diff(media_time) <= 0):
+                        issues.append("video media timestamps are not strictly increasing")
                 if len(video_pts) > 1 and np.any(pts_deltas <= 0):
                     issues.append("video PTS are not strictly increasing")
+                if (
+                    schema_version == CAPTURE_SCHEMA_VERSION
+                    and len(pts_deltas)
+                    and np.max(pts_deltas) > 200_000_000
+                ):
+                    issues.append("video frame gap exceeds 0.2 seconds")
                 mkv_path = Path(str(handle["video"].attrs.get("path", "")))
                 if not mkv_path.name:
                     issues.append("video path is missing")
@@ -252,7 +383,11 @@ def _text_list(dataset: h5py.Dataset) -> list[str]:
 
 
 def read_annotation_document(handle: h5py.File) -> AnnotationDocument:
-    from imu_data_collector.models import ActivitySegment, AnnotationEvent
+    from imu_data_collector.models import (
+        ActivitySegment,
+        AnnotationEvent,
+        ExclusionInterval,
+    )
 
     group = handle["annotations"]
     segments_group = group["segments"]
@@ -297,6 +432,24 @@ def read_annotation_document(handle: h5py.File) -> AnnotationDocument:
         )
         for index in range(len(event_segment_ids))
     ]
+    exclusions: list[ExclusionInterval] = []
+    if "exclusions" in group:
+        exclusions_group = group["exclusions"]
+        exclusion_ids = _text_list(exclusions_group["exclusion_id"])
+        reasons = _text_list(exclusions_group["reason"])
+        exclusion_annotators = _text_list(exclusions_group["annotator_id"])
+        exclusion_notes = _text_list(exclusions_group["notes"])
+        exclusions = [
+            ExclusionInterval(
+                exclusion_id=exclusion_ids[index],
+                start_ns=int(exclusions_group["start_ns"][index]),
+                end_ns=int(exclusions_group["end_ns"][index]),
+                reason=reasons[index],
+                annotator_id=exclusion_annotators[index],
+                notes=exclusion_notes[index],
+            )
+            for index in range(len(exclusion_ids))
+        ]
     return AnnotationDocument(
         taxonomy_id=str(group.attrs["taxonomy_id"]),
         taxonomy_version=str(group.attrs["taxonomy_version"]),
@@ -304,4 +457,5 @@ def read_annotation_document(handle: h5py.File) -> AnnotationDocument:
         finalized=bool(group.attrs.get("finalized", False)),
         segments=segments,
         events=events,
+        exclusions=exclusions,
     )

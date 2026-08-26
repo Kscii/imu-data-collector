@@ -123,6 +123,15 @@ class RecordingCatalog:
                 (recording_id, generation),
             )
 
+    def delete(self, recording_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM upload_jobs WHERE recording_id = ?", (recording_id,)
+            )
+            connection.execute(
+                "DELETE FROM recordings WHERE recording_id = ?", (recording_id,)
+            )
+
     @staticmethod
     def _from_row(row: sqlite3.Row) -> RecordingSummary:
         return RecordingSummary(

@@ -1,0 +1,339 @@
+from __future__ import annotations
+
+import tarfile
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+
+from imu_data_collector.artifacts import (
+    create_capture_package,
+    create_training_release,
+    export_aligned30,
+)
+from imu_data_collector.config import ImuSettings, Settings
+from imu_data_collector.coordinator import RecordingCoordinator
+from imu_data_collector.hdf5_store import sha256_file
+from imu_data_collector.models import (
+    ActivitySegment,
+    AnnotationDocument,
+    BinaryLabel,
+    RecordingState,
+    RecordingSummary,
+    ReviewDocument,
+    ReviewWorkflow,
+    ReviewWorkflowRequest,
+    ReviewWorkflowState,
+    SourceArtifact,
+    SyncAnchor,
+    SyncDocument,
+)
+from imu_data_collector.review import (
+    ReviewConflictError,
+    load_review,
+    mutate_review,
+)
+
+
+def taxonomy() -> dict:
+    return {
+        "taxonomy_id": "fall_binary_v1",
+        "version": "1.0.0",
+        "fall": [{"code": "forward_fall"}],
+        "non_fall": [{"code": "walking"}],
+    }
+
+
+def write_source_pair(tmp_path: Path, *, data_tier: str = "prod") -> tuple[Path, Path]:
+    h5_path = tmp_path / "recording-1.h5"
+    mkv_path = tmp_path / "recording-1.mkv"
+    mkv_path.write_bytes(b"synthetic-mkv")
+    with h5py.File(h5_path, "w") as handle:
+        handle.attrs.update(
+            {
+                "recording_id": "recording-1",
+                "collection_id": "pilot",
+                "participant_id": "xfan0282",
+                "body_location": "chest",
+                "data_tier": data_tier,
+                "duration_ns": 2_000_000_000,
+                "recording_start_monotonic_ns": 10_000_000_000,
+            }
+        )
+        imu = handle.create_group("imu")
+        imu.attrs["observed_rate_hz"] = 25.0
+        samples = imu.create_group("samples")
+        times = np.arange(50, dtype=np.int64) * 40_000_000
+        samples.create_dataset("recording_time_ns", data=times)
+        samples.create_dataset("time_monotonic_ns", data=10_000_000_000 + times)
+        samples.create_dataset(
+            "raw_counts",
+            data=np.column_stack(
+                [
+                    np.arange(50),
+                    np.arange(50) + 1,
+                    np.full(50, 4090),
+                    np.arange(50) + 3,
+                    np.arange(50) + 4,
+                    np.arange(50) + 5,
+                ]
+            ).astype(np.int16),
+        )
+        frames = handle.create_group("video").create_group("frames")
+        frames.create_dataset(
+            "recording_time_ns", data=np.arange(60, dtype=np.int64) * 33_333_333
+        )
+    return h5_path, mkv_path
+
+
+def artifact(path: Path, role: str) -> SourceArtifact:
+    return SourceArtifact(
+        role=role,
+        filename=path.name,
+        size_bytes=path.stat().st_size,
+        sha256=sha256_file(path),
+    )
+
+
+def accepted_review(h5_path: Path, mkv_path: Path) -> ReviewDocument:
+    return ReviewDocument(
+        recording_id="recording-1",
+        sources=[artifact(h5_path, "capture_h5"), artifact(mkv_path, "video_mkv")],
+        sync=SyncDocument(
+            anchors=[
+                SyncAnchor(
+                    imu_time_ns=200_000_000,
+                    video_time_ns=200_000_000,
+                    label="start",
+                    role="start_tap",
+                    source_video_frame=6,
+                    source_imu_sample=5,
+                    video_interval_start_ns=166_666_665,
+                    imu_interval_start_ns=160_000_000,
+                    reviewer_id="xfan0282",
+                ),
+                SyncAnchor(
+                    imu_time_ns=1_600_000_000,
+                    video_time_ns=1_600_000_000,
+                    label="end",
+                    role="end_tap",
+                    source_video_frame=48,
+                    source_imu_sample=40,
+                    video_interval_start_ns=1_566_666_651,
+                    imu_interval_start_ns=1_560_000_000,
+                    reviewer_id="xfan0282",
+                ),
+            ]
+        ),
+        annotations=AnnotationDocument(
+            taxonomy_id="fall_binary_v1",
+            taxonomy_version="1.0.0",
+            finalized=True,
+            segments=[
+                ActivitySegment(
+                    segment_id="seg_001",
+                    start_ns=0,
+                    end_ns=2_000_000_000,
+                    binary_label=BinaryLabel.NON_FALL,
+                    activity_code="walking",
+                    annotator_id="xfan0282",
+                )
+            ],
+        ),
+        workflow=ReviewWorkflow(
+            state=ReviewWorkflowState.ACCEPTED,
+            annotator_id="xfan0282",
+            reviewer_id="rkim6933",
+        ),
+    )
+
+
+def test_review_sidecar_is_external_and_optimistically_locked(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    original_h5_hash = sha256_file(h5_path)
+
+    initial = load_review(h5_path, mkv_path, taxonomy())
+    updated = mutate_review(
+        h5_path,
+        mkv_path,
+        taxonomy(),
+        initial.revision,
+        lambda current: current.model_copy(
+            update={
+                "workflow": current.workflow.model_copy(
+                    update={
+                        "state": ReviewWorkflowState.IN_PROGRESS,
+                        "annotator_id": "xfan0282",
+                    }
+                )
+            }
+        ),
+    )
+
+    assert updated.revision == 1
+    assert (tmp_path / "review.json").is_file()
+    assert sha256_file(h5_path) == original_h5_hash
+    with pytest.raises(ReviewConflictError):
+        mutate_review(
+            h5_path,
+            mkv_path,
+            taxonomy(),
+            initial.revision,
+            lambda current: current,
+        )
+
+
+def test_capture_package_excludes_mutable_review_sidecar(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    review = accepted_review(h5_path, mkv_path)
+    output = create_capture_package(
+        review, h5_path, mkv_path, tmp_path / "recording-1.capture.tar"
+    )
+
+    with tarfile.open(output, "r:") as archive:
+        assert archive.getnames() == ["manifest.json", "capture.h5", "video.mkv"]
+
+
+def test_aligned30_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    output = export_aligned30(
+        accepted_review(h5_path, mkv_path),
+        h5_path,
+        mkv_path,
+        tmp_path / "aligned30.h5",
+        ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
+        taxonomy(),
+    )
+
+    with h5py.File(output, "r") as handle:
+        assert set(handle.keys()) == {"samples", "sequences", "annotations"}
+        assert handle.attrs["imu_schema_version"] == "3.0.0"
+        assert handle["samples"].shape == (59, 6)
+        assert handle["samples"].dtype == np.dtype("float32")
+        assert handle["sequences"][0]["supervision_kind"].decode() == "temporal"
+        annotation = handle["annotations"][0]
+        assert annotation["kind"].decode() == "activity"
+        assert (annotation["start_sample"], annotation["stop_sample"]) == (0, 59)
+
+
+def test_aligned30_export_is_blocked_without_verified_calibration(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    with pytest.raises(ValueError, match="校准"):
+        export_aligned30(
+            accepted_review(h5_path, mkv_path),
+            h5_path,
+            mkv_path,
+            tmp_path / "aligned30.h5",
+            ImuSettings(),
+            taxonomy(),
+        )
+
+
+def test_training_release_contains_manifest_and_per_recording_h5(tmp_path: Path) -> None:
+    aligned = tmp_path / "aligned30.h5"
+    aligned.write_bytes(b"aligned")
+
+    output = create_training_release(
+        [("xfan0282", "recording-1", aligned)],
+        tmp_path / "cw12eu_training_release_0001.tar",
+    )
+
+    with tarfile.open(output, "r:") as archive:
+        assert archive.getnames() == [
+            "manifest.json",
+            "recordings/xfan0282/recording-1/aligned30.h5",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_requires_distinct_reviewer_and_blocks_uncalibrated_export(
+    tmp_path: Path,
+) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    coordinator = RecordingCoordinator(
+        Settings(
+            data_root=tmp_path,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+    coordinator.catalog.upsert(
+        RecordingSummary(
+            recording_id="recording-1",
+            collection_id="pilot",
+            participant_id="xfan0282",
+            data_tier="prod",
+            state=RecordingState.READY,
+            started_at_utc="2026-08-26T00:00:00+00:00",
+            duration_ns=2_000_000_000,
+            h5_path=str(h5_path),
+            mkv_path=str(mkv_path),
+        )
+    )
+    initial = coordinator.review("recording-1")
+    assigned = coordinator.update_workflow(
+        "recording-1",
+        ReviewWorkflowRequest(
+            action="assign", actor_id="xfan0282", expected_revision=initial.revision
+        ),
+    )
+    annotations = accepted_review(h5_path, mkv_path).annotations.model_copy(
+        update={"revision": 2}
+    )
+    await coordinator.save_annotations("recording-1", annotations)
+    review_after_annotation = coordinator.review("recording-1")
+    await coordinator.save_sync(
+        "recording-1",
+        SyncDocument(
+            anchors=[
+                SyncAnchor(
+                    imu_time_ns=200_000_000,
+                    video_time_ns=199_999_998,
+                    role="start_tap",
+                    source_video_frame=6,
+                    source_imu_sample=5,
+                    video_interval_start_ns=166_666_665,
+                    imu_interval_start_ns=160_000_000,
+                    reviewer_id="xfan0282",
+                ),
+                SyncAnchor(
+                    imu_time_ns=1_600_000_000,
+                    video_time_ns=1_599_999_984,
+                    role="end_tap",
+                    source_video_frame=48,
+                    source_imu_sample=40,
+                    video_interval_start_ns=1_566_666_651,
+                    imu_interval_start_ns=1_560_000_000,
+                    reviewer_id="xfan0282",
+                ),
+            ],
+            expected_revision=review_after_annotation.revision,
+        ),
+    )
+    ready = coordinator.review("recording-1")
+    submitted = coordinator.update_workflow(
+        "recording-1",
+        ReviewWorkflowRequest(
+            action="submit", actor_id="xfan0282", expected_revision=ready.revision
+        ),
+    )
+    with pytest.raises(ValueError, match="不能审核自己"):
+        coordinator.update_workflow(
+            "recording-1",
+            ReviewWorkflowRequest(
+                action="accept",
+                actor_id="xfan0282",
+                expected_revision=submitted.revision,
+            ),
+        )
+    accepted = coordinator.update_workflow(
+        "recording-1",
+        ReviewWorkflowRequest(
+            action="accept", actor_id="rkim6933", expected_revision=submitted.revision
+        ),
+    )
+    assert accepted.workflow.state == ReviewWorkflowState.ACCEPTED
+    with pytest.raises(ValueError, match="校准"):
+        coordinator.export_training("recording-1", accepted.revision)
+    assert assigned.workflow.annotator_id == "xfan0282"
