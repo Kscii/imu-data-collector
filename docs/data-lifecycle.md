@@ -48,10 +48,11 @@ manifest/TAR，最后把墓碑标为 `revoked`。中途失败可用同一确认�
 中断上传并清除；时间不足、时间戳未知或已有 manifest 的组全部跳过。先运行
 `imu-annotation cleanup-orphans --dry-run` 可只查看候选。
 
-标注页可以随时下载当前 `review.json` 快照。只有 `prod`、同步、标注、审核和物理校准全部
-通过后，页面才允许生成并下载 `aligned30.h5`；`test` 只能下载 review，永远不能生成训练
-H5。标注端不会直接写 SOFT3888 工作树或 `data/raw/`，而是先生成不可变训练发布 TAR，再由
-SOFT3888 的 `imu-data import-team --release ...` 显式校验和导入到
+标注页可以随时下载不可变原始 `capture.h5` 和当前 `review.json` 快照。`test` 可使用这两个
+制品完成联调与结构展示，但永远不能生成训练 H5、进入训练发布或同步到 SOFT3888 `raw`。
+只有 `prod`、同步、标注、审核和物理校准全部通过后，页面才允许生成并下载
+`aligned30.h5`。标注端不会直接写 SOFT3888 工作树或 `data/raw/`，而是先生成不可变训练发布
+TAR，再由 SOFT3888 的 `imu-data import-team --release ...` 显式校验和导入到
 `data/processed/imu_30hz/cw12eu.h5`。
 
 ## 30 Hz 时间网格

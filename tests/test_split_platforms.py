@@ -183,6 +183,7 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
     assert "/api/v1/recordings/start" not in paths
     assert "/api/v1/recordings/{recording_id}/publish" not in paths
     assert "/api/v1/recordings/{recording_id}" in paths
+    assert "/api/v1/recordings/{recording_id}/capture-h5/download" in paths
 
     with TestClient(app) as client:
         refreshed = client.post("/api/v1/index/refresh")
@@ -210,6 +211,20 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         assert review_download.status_code == 200
         assert review_download.json()["recording_id"] == recording_id
         assert "attachment" in review_download.headers["content-disposition"]
+
+        capture_download = client.get(
+            f"/api/v1/recordings/{recording_id}/capture-h5/download"
+        )
+        assert capture_download.status_code == 200
+        assert capture_download.content == b"hdf5-fixture"
+        assert capture_download.headers["content-type"] == "application/x-hdf5"
+        assert capture_download.headers["content-length"] == str(
+            len(b"hdf5-fixture")
+        )
+        assert capture_download.headers["content-disposition"] == (
+            f'attachment; filename="{recording_id}.capture.h5"'
+        )
+        assert capture_download.headers["cache-control"] == "private, no-store"
 
         missing_export = client.get(
             f"/api/v1/recordings/{recording_id}/aligned30/download"

@@ -1369,16 +1369,17 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             </div>
           </div>}
           {review && <div className="panel workflow-panel">
-            <div className="panel-title">第 5 步 · 下载标注快照与训练制品</div>
-            <p className="stage-help">review.json 是当前可审计的标注与同步快照；原始 H5/MKV 始终保持不变。只有通过门禁的 prod 录制才能生成统一 30 Hz 的 aligned30.h5。</p>
+            <div className="panel-title">第 5 步 · 下载原始数据、标注快照与训练制品</div>
+            <p className="stage-help">capture.h5 是带来源哈希的不可变原始采集数据；review.json 是当前可审计的标注与同步快照。只有通过门禁的 prod 录制才能生成统一 30 Hz 的 aligned30.h5。</p>
             <div className="status-grid"><span>数据级别 {recordings.find((item) => item.recording_id === selected)?.data_tier ?? "—"}</span><span>校准 {status?.calibration ?? "—"}</span><span>导出 {status?.export ?? "—"}</span></div>
             <div className="save-row">
+              <a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>下载原始 capture.h5</a>
               <a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>下载 review.json</a>
               {selectedRecording?.data_tier === "prod" && status?.export === "exported"
                 ? <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>下载 aligned30.h5</a>
                 : <button className="primary" disabled={recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" || review.workflow.state !== "accepted" || status?.calibration !== "verified"} onClick={exportAligned30}>生成 aligned30.h5</button>}
             </div>
-            {recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" && <p className="stage-help warning-text">当前是 test 数据：可以下载 review.json，但永久禁止生成训练 H5。</p>}
+            {recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" && <p className="stage-help warning-text">当前是 test 数据：可以下载原始 capture.h5 和 review.json，用于联调与结构展示；永久禁止生成训练 H5、进入训练发布或同步到 SOFT3888 raw。</p>}
             <div className="danger-zone">
               <strong>永久删除整条录制</strong>
               <p className="stage-help">仅允许删除尚未进入有效训练发布 TAR 的录制。平台会立即隐藏并删除原始 H5、MKV、预览视频、标注、导出、缓存和同步实验引用；GCS 仍按存储桶策略提供 7 天软删除恢复窗口。</p>

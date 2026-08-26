@@ -58,9 +58,10 @@ gs://soft3888-label/
 ```
 
 存储桶启用 uniform bucket-level access、public access prevention 和 7 天 soft delete。原始媒体
-不进 Git/Git LFS。`test` 可以上传和标注，但只能下载 `review.json`，不能生成训练 H5，也不会
-进入 release。训练发布位于 `releases/`，相同内容用指纹去重。撤销后有效 TAR 和 manifest
-进入软删除，轻量墓碑继续保留。
+不进 Git/Git LFS。`test` 可以上传、标注并下载不可变原始 `capture.h5` 和当前 `review.json`，
+用于联调与结构展示；不能生成训练 `aligned30.h5`，也不会进入 release 或 SOFT3888 `raw`。
+训练发布位于 `releases/`，相同内容用指纹去重。撤销后有效 TAR 和 manifest 进入软删除，轻量
+墓碑继续保留。
 
 每日 systemd timer 运行孤儿清理：只删除 `captures/` 中超过 7 天仍无 manifest 的中断上传。
 完整录制不自动清理。
