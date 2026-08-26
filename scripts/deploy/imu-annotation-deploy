@@ -14,6 +14,7 @@ release_dir="${release_root}/${release_id}"
 incoming="${release_root}/.incoming-${release_id}"
 current_link=/opt/imu-annotation/current
 previous=""
+python_candidates=(/opt/imu-annotation/python/*/bin/python3.12)
 
 [[ ${bundle} =~ ^/tmp/imu-annotation-[0-9a-f]{40}\.tar\.gz$ ]] || {
   echo "部署包路径不符合白名单" >&2
@@ -29,6 +30,10 @@ previous=""
 }
 [[ -f ${bundle} ]] || {
   echo "部署包不存在" >&2
+  exit 1
+}
+[[ ${#python_candidates[@]} -eq 1 && -x ${python_candidates[0]} ]] || {
+  echo "受管 Python 路径不唯一或不可执行" >&2
   exit 1
 }
 
@@ -57,7 +62,7 @@ if [[ ! -d ${release_dir} ]]; then
   chown -R kscii:kscii "${incoming}" /var/lib/imu-annotation
   runuser -u kscii -- /usr/local/bin/uv sync \
     --frozen --no-dev --project "${incoming}" \
-    --python /opt/imu-annotation/python/bin/python
+    --python "${python_candidates[0]}"
   chmod -R a-w "${incoming}"
   mv "${incoming}" "${release_dir}"
 fi
