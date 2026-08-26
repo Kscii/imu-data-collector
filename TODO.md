@@ -61,10 +61,13 @@
 - [~] 独立标注应用已支持 fall/non_fall/显式排除、由 fall 区间起点派生 onset、逐区间 impact、覆盖空洞提示、同步轻拍
   排除、GCS `review.json`、revision+generation 乐观锁及可配置单人/异人审核；等待云端真实
   完整标注验收。
-- [~] 标注页已增加不可变原始 `capture.h5` 和当前 `review.json` 下载；`test` 可用于联调与
-  结构展示，但不能生成训练 H5、进入 release 或同步到 SOFT3888 `raw`。仅为通过全部门禁的
-  prod 录制提供 `aligned30.h5` 生成与下载；页面默认跳到约 0.2 秒避开相机启动白平衡过渡，
-  但保留第 0 帧和真实逐帧时间戳。自动化测试已通过，等待云端浏览器验收。
+- [x] 标注页已增加不可变原始 `capture.h5` 和当前 `review.json` 下载；2026-08-26 已在云端
+  通过 IAP 真实下载一条 test 录制，H5 大小 305,167 字节且浏览器下载 SHA-256 与 GCS manifest
+  完全一致。`test` 可用于联调与结构展示，但不能生成训练 H5、进入 release 或同步到
+  SOFT3888 `raw`。
+- [~] 仅为通过全部门禁的 prod 录制提供 `aligned30.h5` 生成与下载；页面默认跳到约 0.2 秒
+  避开相机启动白平衡过渡，但保留第 0 帧和真实逐帧时间戳。自动化测试已通过，等待真实物理
+  校准完成后进行云端 prod 导出验收。
 - [x] 标注端已向九名白名单成员开放未发布录制的永久删除：精确二次确认、训练发布侧车清单
   拦截、`deleting` 状态、generation 并发保护和跨制品清理已有自动化测试；2026-08-26 已由
   用户在云端永久删除一条一次性 test 录制并确认列表自动切换。`test` 即使残留导出对象也
@@ -98,9 +101,10 @@
   WebSocket 均成功；仍等待用户确认页面视觉显示。
 - [ ] 平台稳定后再评估可选 systemd 用户服务；默认不常驻，以免无提示占用摄像头、BLE、
   IMU 电量和隐私敏感画面。
-- [~] 独立标注应用已部署到 `soft3888-label` VM；GCS、systemd、API 与生产前端已完成旧版
-  冒烟。新的 HTTPS 负载均衡、IAP 双白名单和 GitHub Actions 部署正在本轮进行，完成后再把
-  此项标为已验收。
+- [x] 独立标注应用已部署到 `soft3888-label` VM：HTTPS 托管证书、负载均衡、IAP 身份映射、
+  OS Login、WIF/OIDC GitHub Actions、传统 SCP/IAP 上传、原子部署、systemd/API 和生产前端
+  均已验收。2026-08-26 生产版本 `4f5df9347181cbdf6529d7a2d48ea14de6f8f806` 通过自动部署、
+  公网检查和用户真实浏览器登录，页面正确显示 `xfan0282` 并可播放视频。
 - [x] 增加 GitHub Actions：PR 执行后端测试、Ruff、前端双构建和 temporal v3 合同；生产部署只允许
   手动触发、环境审批和 OIDC/WIF 短期身份，禁止保存长期 GCP JSON key，也不在 push 后自动
   发布。
