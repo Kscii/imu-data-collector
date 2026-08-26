@@ -59,6 +59,11 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .recording-list button { display: grid; gap: 4px; text-align: left; }
 .recording-list button span { color: #8193ac; font-size: 10px; overflow-wrap: anywhere; }
 .recording-list button.selected { border-color: #3b82f6; background: #17305b; }
+.recording-list-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.recording-list-actions button { display: block; text-align: center; padding: 8px; font-size: 11px; }
+.selected-recording-id { display: block; color: #bfdbfe; background: #0b1525; border: 1px solid #263957; border-radius: 7px; padding: 8px; font-size: 10px; overflow-wrap: anywhere; user-select: all; }
+.index-message { color: #86efac; font-size: 10px; line-height: 1.45; }
+.recording-list > button span { user-select: text; }
 .annotation-workspace { display: grid; gap: 16px; }
 .annotation-controls { display: grid; gap: 12px; }
 .time-readout { font-size: 22px; font-variant-numeric: tabular-nums; }

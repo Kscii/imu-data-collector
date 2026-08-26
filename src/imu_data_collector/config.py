@@ -66,6 +66,7 @@ class AnnotationSettings:
     server_port: int = 8766
     catalog_path: Path = Path("~/.local/share/imu-annotation/catalog.sqlite3")
     review_policy: str = "single_user"
+    catalog_refresh_interval_s: float = 10.0
 
 
 @dataclass(slots=True)

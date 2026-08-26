@@ -29,6 +29,8 @@ annotation:
   server_port: 8766
   catalog_path: "/var/lib/imu-annotation/catalog.sqlite3"
   review_policy: "single_user"
+  # 后台每 10 秒发现一次新的完整 manifest；管理员仍可从页面立即强制刷新。
+  catalog_refresh_interval_s: 10
 
 storage:
   backend: "gcs"
