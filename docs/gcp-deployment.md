@@ -103,7 +103,8 @@ tunnel、OS Admin Login 和目标 VM 部署所需能力，不授予 GCS 参与�
 
 一次性 bootstrap 把仓库中的 `scripts/deploy/imu-annotation-deploy` 和
 `imu-annotation-rollback` 安装到 `/usr/local/sbin/`。部署入口验证文件名、commit、SHA-256 和
-TAR 路径，使用锁文件建立只读虚拟环境，再原子切换 symlink、重启并检查回环健康接口。新版本
+TAR 路径，自动确认 `/opt/imu-annotation/python/*/bin/python3.12` 中唯一的受管解释器，使用
+锁文件建立只读虚拟环境，再原子切换 symlink、重启并检查回环健康接口。新版本
 失败时自动尝试回到上一版本。回滚 workflow 只能切到服务器已保留的 release 目录。
 
 服务运行身份 `kscii` 通过 VM 专用服务账号访问 GCS，不保存服务账号 JSON key。应用绑定
