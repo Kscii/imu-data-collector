@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from imu_data_collector.annotation_service import AnnotationService
@@ -116,6 +117,21 @@ def create_annotation_app(
         required(recording_id)
         return service.review(recording_id).model_dump(mode="json")
 
+    @app.get("/api/v1/recordings/{recording_id}/review/download")
+    def review_download(recording_id: str) -> Response:
+        required(recording_id)
+        payload = service.review(recording_id).model_dump(mode="json")
+        return Response(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{recording_id}.review.json"'
+                ),
+                "Cache-Control": "private, no-store",
+            },
+        )
+
     @app.get("/api/v1/recordings/{recording_id}/timeline")
     def timeline(
         recording_id: str,
@@ -210,6 +226,33 @@ def create_annotation_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
+    def aligned30_download(recording_id: str) -> StreamingResponse:
+        required(recording_id)
+        key = f"exports/{recording_id}/aligned30.h5"
+        info = object_store.stat(key)
+        if info is None:
+            raise HTTPException(status_code=404, detail="尚未生成 aligned30.h5")
+
+        def stream():
+            cursor = 0
+            while cursor < info.size_bytes:
+                end = min(info.size_bytes - 1, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(key, cursor, end)
+                cursor = end + 1
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/x-hdf5",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{recording_id}.aligned30.h5"'
+                ),
+                "Content-Length": str(info.size_bytes),
+                "Cache-Control": "private, no-store",
+            },
+        )
 
     @app.post("/api/v1/training-releases")
     def release() -> dict[str, str]:

@@ -134,6 +134,13 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @app.post("/api/v1/preflight/camera")
+    async def preview_camera(request: PreviewStartRequest) -> dict[str, Any]:
+        try:
+            return await coordinator.switch_preview_camera(request)
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     @app.post("/api/v1/characterizations/start")
     async def characterization_start(
         request: CharacterizationStartRequest,

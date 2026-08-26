@@ -135,6 +135,31 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         review = client.get(f"/api/v1/recordings/{recording_id}/review").json()
         assert review["workflow"]["review_policy"] == "single_user"
 
+        review_download = client.get(
+            f"/api/v1/recordings/{recording_id}/review/download"
+        )
+        assert review_download.status_code == 200
+        assert review_download.json()["recording_id"] == recording_id
+        assert "attachment" in review_download.headers["content-disposition"]
+
+        missing_export = client.get(
+            f"/api/v1/recordings/{recording_id}/aligned30/download"
+        )
+        assert missing_export.status_code == 404
+
+        aligned = tmp_path / "aligned30.h5"
+        aligned.write_bytes(b"aligned-hdf5-fixture")
+        store.put_file(
+            aligned,
+            f"exports/{recording_id}/aligned30.h5",
+            content_type="application/x-hdf5",
+        )
+        aligned_download = client.get(
+            f"/api/v1/recordings/{recording_id}/aligned30/download"
+        )
+        assert aligned_download.content == b"aligned-hdf5-fixture"
+        assert "attachment" in aligned_download.headers["content-disposition"]
+
         forbidden = client.post(
             f"/api/v1/recordings/{recording_id}/aligned30",
             json={"expected_revision": 0},

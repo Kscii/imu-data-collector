@@ -103,6 +103,7 @@ class RecordingCoordinator:
         self._first_packet_ns: int | None = None
         self._monitoring_requested = False
         self._preview_camera_id: str | None = None
+        self._video_stream_id = 0
         self.preview_error: str | None = None
 
     def _require_allowed_unikey(self, value: str, field_name: str) -> None:
@@ -133,6 +134,26 @@ class RecordingCoordinator:
         self.preview_parse_errors = 0
         self._first_packet_ns = None
 
+    def _new_video_recorder(
+        self, device: str, output_path: Path | None
+    ) -> FFmpegVideoRecorder:
+        """创建新的视频进程，并让前端能识别同一会话内的视频流切换。"""
+
+        self._video_stream_id += 1
+        return FFmpegVideoRecorder(self.settings.video, device, output_path)
+
+    async def _stop_consumer_locked(self) -> None:
+        self._stop_consumer.set()
+        if not self._consumer:
+            return
+        try:
+            await asyncio.wait_for(self._consumer, timeout=3.0)
+        except TimeoutError:
+            self._consumer.cancel()
+            await asyncio.gather(self._consumer, return_exceptions=True)
+        finally:
+            self._consumer = None
+
     async def _start_preview_locked(self, camera_id: str | None) -> None:
         if self.mode == "devices_preview" and self.ble and self.ble.connected:
             return
@@ -148,9 +169,7 @@ class RecordingCoordinator:
         self._preview_camera_id = str(camera["camera_id"])
         self.preview_error = None
         self.ble = CW12EUBleSource(self.settings.imu)
-        self.video = FFmpegVideoRecorder(
-            self.settings.video, str(camera["device"]), None
-        )
+        self.video = self._new_video_recorder(str(camera["device"]), None)
         self._stop_consumer.clear()
         self._reset_live_imu_metrics()
         try:
@@ -169,6 +188,37 @@ class RecordingCoordinator:
             await self._start_preview_locked(request.camera_id)
             return self.snapshot()
 
+    async def switch_preview_camera(
+        self, request: PreviewStartRequest
+    ) -> dict[str, Any]:
+        """仅重启摄像头预览；保留当前 BLE 连接和 IMU 曲线。"""
+
+        async with self._lock:
+            if self.mode != "devices_preview" or not self.ble or not self.ble.connected:
+                raise RuntimeError("请先连接预览设备，再切换摄像头")
+            camera = await self._resolve_camera(request.camera_id)
+            camera_id = str(camera["camera_id"])
+            if camera_id == self._preview_camera_id and self.video:
+                return self.snapshot()
+            previous_id = self._preview_camera_id
+            previous_device = self.video.device if self.video else None
+            if self.video:
+                await self.video.stop()
+            try:
+                replacement = self._new_video_recorder(str(camera["device"]), None)
+                await replacement.start()
+            except Exception:
+                if previous_device:
+                    rollback = self._new_video_recorder(previous_device, None)
+                    await rollback.start()
+                    self.video = rollback
+                    self._preview_camera_id = previous_id
+                raise
+            self.video = replacement
+            self._preview_camera_id = camera_id
+            self.preview_error = None
+            return self.snapshot()
+
     async def _stop_preview_locked(self, *, preserve_request: bool) -> None:
         if self.mode != "devices_preview":
             return
@@ -182,15 +232,7 @@ class RecordingCoordinator:
                 await self.ble.stop()
             except Exception:
                 pass
-        self._stop_consumer.set()
-        if self._consumer:
-            try:
-                await asyncio.wait_for(self._consumer, timeout=3.0)
-            except TimeoutError:
-                self._consumer.cancel()
-                await asyncio.gather(self._consumer, return_exceptions=True)
-            finally:
-                self._consumer = None
+        await self._stop_consumer_locked()
         self.ble = None
         self.video = None
         self.mode = None
@@ -236,8 +278,6 @@ class RecordingCoordinator:
 
     async def start(self, request: RecordingStartRequest) -> RecordingSummary:
         async with self._lock:
-            if self.mode == "devices_preview":
-                await self._stop_preview_locked(preserve_request=True)
             if self.state not in {
                 RecordingState.IDLE,
                 RecordingState.READY,
@@ -248,6 +288,14 @@ class RecordingCoordinator:
             self._require_allowed_unikey(request.participant_id, "participant_id")
             self._check_disk()
             camera = await self._resolve_camera(request.camera_id)
+            retained_ble = None
+            if self.mode == "devices_preview":
+                if self.video:
+                    await self.video.stop()
+                await self._stop_consumer_locked()
+                retained_ble = self.ble if self.ble and self.ble.connected else None
+                self.video = None
+                self.mode = None
             self._monitoring_requested = True
             self._preview_camera_id = str(camera["camera_id"])
             self.preview_error = None
@@ -288,17 +336,23 @@ class RecordingCoordinator:
                     "usb_interface": str(camera["interface"]),
                 }
             )
-            self.ble = CW12EUBleSource(self.settings.imu)
-            self.video = FFmpegVideoRecorder(
-                self.settings.video, str(camera["device"]), mkv_partial
+            self.ble = retained_ble or CW12EUBleSource(self.settings.imu)
+            self.video = self._new_video_recorder(
+                str(camera["device"]), mkv_partial
             )
             self._stop_consumer.clear()
             self._reset_live_imu_metrics()
             try:
-                await self.ble.start()
-                self.writer.append_connection_event(
-                    "ble_connected", time.monotonic_ns()
-                )
+                if retained_ble:
+                    self.ble.dropped_callback_packets = 0
+                    self.writer.append_connection_event(
+                        "ble_reused_from_preview", time.monotonic_ns()
+                    )
+                else:
+                    await self.ble.start()
+                    self.writer.append_connection_event(
+                        "ble_connected", time.monotonic_ns()
+                    )
                 await self.video.start()
                 capture_start_ns = self.video.started_monotonic_ns or time.monotonic_ns()
                 capture_started_at = datetime.now(UTC).isoformat()
@@ -773,6 +827,7 @@ class RecordingCoordinator:
                 "bitrate": video.bitrate if video else "0",
                 "speed": video.speed if video else "0x",
                 "preview_only": self.mode == "devices_preview",
+                "stream_id": self._video_stream_id,
             },
             "free_disk_gib": free_gib,
             "characterization": self.characterization_snapshot()
@@ -1026,7 +1081,11 @@ class RecordingCoordinator:
         summary = self._required_summary(recording_id)
         if summary.state != RecordingState.READY:
             raise ValueError("只有通过采集验证的 ready 录制可以发布")
-        if self.current and self.current.recording_id == recording_id:
+        if (
+            self.mode == "capture"
+            and self.current
+            and self.current.recording_id == recording_id
+        ):
             raise ValueError("当前会话仍在使用该录制")
         updating = summary.model_copy(update={"upload_state": "packaging"})
         self.catalog.upsert(updating)

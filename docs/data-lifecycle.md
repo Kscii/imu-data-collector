@@ -33,6 +33,12 @@ unassigned -> in_progress -> submitted -> accepted -> exported
 文件名不编码可变状态。状态来自 catalog 和 `review.json`。已经进入训练发布的录制不能逐条
 硬删除；未发布且未被当前会话占用的本地录制，只有输入完整 recording ID 才能永久删除。
 
+标注页可以随时下载当前 `review.json` 快照。只有 `prod`、同步、标注、审核和物理校准全部
+通过后，页面才允许生成并下载 `aligned30.h5`；`test` 只能下载 review，永远不能生成训练
+H5。标注端不会直接写 SOFT3888 工作树或 `data/raw/`，而是先生成不可变训练发布 TAR，再由
+SOFT3888 的 `imu-data import-team --release ...` 显式校验和导入到
+`data/processed/imu_30hz/cw12eu.h5`。
+
 ## 30 Hz 时间网格
 
 IMU 使用外置同步决定映射到视频时间，取 IMU 与视频公共有效区间作为起点。第 `k` 行的概念

@@ -234,6 +234,7 @@ const characterizationStages = [
 
 const LIVE_WINDOW_SECONDS = 120;
 const SYNC_EXPERIMENT_ID = "sync_validation_01";
+const INITIAL_VIDEO_PREVIEW_OFFSET_NS = 200_000_000;
 const exclusionLabels: Record<Exclusion["reason"], string> = {
   sync_tap: "同步轻拍",
   setup: "录制设置",
@@ -400,10 +401,10 @@ export default function App() {
     }
     refreshCameras();
     refreshRecordings();
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${protocol}://${location.host}/api/v1/live`);
-    socket.onmessage = (message) => {
-      const payload = JSON.parse(message.data);
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    const acceptLive = (payload: any) => {
       setLive(payload);
       if (payload.imu?.connected && payload.imu?.raw) {
         const data = liveRef.current;
@@ -418,7 +419,22 @@ export default function App() {
         redraw((value) => value + 1);
       }
     };
-    return () => socket.close();
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    const connect = () => {
+      if (disposed) return;
+      socket = new WebSocket(`${protocol}://${location.host}/api/v1/live`);
+      socket.onmessage = (message) => acceptLive(JSON.parse(message.data));
+      socket.onclose = () => {
+        if (!disposed) reconnectTimer = window.setTimeout(connect, 1000);
+      };
+    };
+    api<any>("/api/v1/health").then(acceptLive).catch(() => undefined);
+    connect();
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
   }, []);
 
   const start = async () => {
@@ -455,11 +471,30 @@ export default function App() {
     setCaptureError("");
     try {
       const active = live.session_type === "devices_preview";
-      await api(`/api/v1/preflight/${active ? "stop" : "start"}`, {
+      const snapshot = await api<any>(`/api/v1/preflight/${active ? "stop" : "start"}`, {
         method: "POST",
         body: active ? undefined : JSON.stringify({ camera_id: cameraId || null })
       });
+      setLive(snapshot);
       if (!active) liveRef.current = { t: [], values: [] };
+    } catch (e) {
+      setCaptureError((e as Error).message);
+    }
+  };
+
+  const changeCamera = async (nextCameraId: string) => {
+    setCaptureError("");
+    if (live.session_type !== "devices_preview") {
+      setCameraId(nextCameraId);
+      return;
+    }
+    try {
+      const snapshot = await api<any>("/api/v1/preflight/camera", {
+        method: "POST",
+        body: JSON.stringify({ camera_id: nextCameraId })
+      });
+      setCameraId(nextCameraId);
+      setLive(snapshot);
     } catch (e) {
       setCaptureError((e as Error).message);
     }
@@ -498,7 +533,7 @@ export default function App() {
           allowedUnikeys={config?.allowed_unikeys ?? []}
           cameras={cameras}
           cameraId={cameraId}
-          setCameraId={setCameraId}
+          changeCamera={changeCamera}
           refreshCameras={refreshCameras}
           toggleImuPreview={toggleImuPreview}
         />
@@ -521,7 +556,7 @@ export default function App() {
 function CapturePage(props: any) {
   const {
     live, participant, setParticipant, collection, setCollection, start, stop, chart,
-    dataTier, setDataTier, allowedUnikeys, cameras, cameraId, setCameraId, refreshCameras,
+    dataTier, setDataTier, allowedUnikeys, cameras, cameraId, changeCamera, refreshCameras,
     toggleImuPreview
   } = props;
   const active = live.state === "recording" && live.session_type === "capture";
@@ -534,7 +569,7 @@ function CapturePage(props: any) {
         <label>数据批次 ID<input value={collection} onChange={(e) => setCollection(e.target.value)} disabled={active || busy} /></label>
         <label>参与者 UniKey<select value={participant} onChange={(e) => setParticipant(e.target.value)} disabled={active || busy}>{allowedUnikeys.map((item: string) => <option value={item} key={item}>{item}</option>)}</select></label>
         <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={active || busy}><option value="test">test · 永久禁止训练</option><option value="prod">prod · 仍需通过全部质量门禁</option></select></label>
-        <label>摄像头<select value={cameraId} onChange={(e) => setCameraId(e.target.value)} disabled={active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
+        <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
         <button disabled={active || busy} onClick={refreshCameras}>重新扫描摄像头</button>
         <button disabled={active || busy || anotherSession || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{devicesPreview ? "释放预览设备" : "连接预览设备"}</button>
         {!active ? <button className="primary" disabled={busy || anotherSession || !cameraId} onClick={start}>开始录制</button> : <button className="danger" onClick={stop}>结束录制</button>}
@@ -553,7 +588,7 @@ function CapturePage(props: any) {
       <section className="capture-grid">
         <div className="panel camera-panel">
           <div className="panel-title">实时画面 · 仅本机{devicesPreview ? " · 预览不落盘" : ""}</div>
-          {active || devicesPreview ? <img key={live.session_type} src={`/api/v1/preview.mjpeg?mode=${live.session_type}`} alt="摄像头实时预览" /> : <div className="placeholder">连接预览设备后显示实时画面</div>}
+          {active || devicesPreview ? <img key={`${live.session_type}-${live.video?.stream_id ?? 0}`} src={`/api/v1/preview.mjpeg?mode=${live.session_type}&stream=${live.video?.stream_id ?? 0}`} alt="摄像头实时预览" /> : <div className="placeholder">连接预览设备后显示实时画面</div>}
         </div>
         <div className="panel chart-panel">
           <div className="panel-title">IMU 六轴实时曲线 · 最近 120 秒 · 当前为原始计数{devicesPreview ? " · 预览不落盘" : ""}</div>
@@ -648,6 +683,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
   const [selectedImuTime, setSelectedImuTime] = useState<number | null>(null);
   const [syncRole, setSyncRole] = useState<"start_tap" | "end_tap">("start_tap");
   const [review, setReview] = useState<ReviewDocument | null>(null);
+  const [status, setStatus] = useState<RecordingStatus | null>(null);
   const [error, setError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
 
@@ -666,14 +702,16 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
       api<SyncState>(`/api/v1/recordings/${selected}/sync`, { signal: controller.signal }),
       api<FrameTimes>(`/api/v1/recordings/${selected}/frame-times`, { signal: controller.signal }),
       api<SyncExperimentDocument>(`/api/v1/sync-experiments/${SYNC_EXPERIMENT_ID}`, { signal: controller.signal }),
-      api<ReviewDocument>(`/api/v1/recordings/${selected}/review`, { signal: controller.signal })
-    ]).then(([annotations, data, syncState, frames, experimentDocument, reviewDocument]) => {
+      api<ReviewDocument>(`/api/v1/recordings/${selected}/review`, { signal: controller.signal }),
+      api<RecordingStatus>(`/api/v1/recordings/${selected}/status`, { signal: controller.signal })
+    ]).then(([annotations, data, syncState, frames, experimentDocument, reviewDocument, recordingStatus]) => {
       setDoc(annotations);
       setTimeline(data);
       setSync(syncState);
       setFrameTimes(frames);
       setExperiment(experimentDocument);
       setReview(reviewDocument);
+      setStatus(recordingStatus);
       setMarks({});
       setCurrentFrame(0);
       setExperimentWindow(null);
@@ -691,10 +729,13 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
 
   useEffect(() => {
     if (!frameTimes?.frame_count || !video.current) return;
-    const firstMediaTime = frameTimes.media_time_ns[0] / 1e9;
-    video.current.currentTime = firstMediaTime;
-    setCurrentFrame(0);
-    setCurrentTime(frameTimes.time_ns[0] / 1e9);
+    const previewFrame = nearestIndex(
+      frameTimes.media_time_ns,
+      frameTimes.media_time_ns[0] + INITIAL_VIDEO_PREVIEW_OFFSET_NS
+    );
+    video.current.currentTime = frameTimes.media_time_ns[previewFrame] / 1e9;
+    setCurrentFrame(previewFrame);
+    setCurrentTime(frameTimes.time_ns[previewFrame] / 1e9);
   }, [frameTimes]);
 
   useEffect(() => {
@@ -892,6 +933,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
       });
       setDoc(saved);
       setReview(await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`));
+      setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
     } catch (e) {
       setError((e as Error).message);
     }
@@ -917,6 +959,22 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
         })
       });
       setReview(saved);
+      setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const exportAligned30 = async () => {
+    if (!selected || !review) return;
+    setError("");
+    try {
+      await api(`/api/v1/recordings/${selected}/aligned30`, {
+        method: "POST",
+        body: JSON.stringify({ expected_revision: review.revision })
+      });
+      setReview(await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`));
+      setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
     } catch (e) {
       setError((e as Error).message);
     }
@@ -1060,6 +1118,7 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
               <button onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>下一帧</button>
               <button className="primary" onClick={loadExperimentWindow} disabled={!frameTimes || experimentBusy}>此帧是{syncRole === "start_tap" ? "开始" : "结束"}轻拍首次接触</button>
             </div>
+            <p className="stage-help">页面默认从约 0.2 秒处开始预览，以避开摄像头刚启动时的自动白平衡过渡；原始第 0 帧仍完整保留，可用“上一帧”逐帧返回。同步和标注均使用真实逐帧时间戳。</p>
             <p className="stage-help">先暂停到手首次接触 IMU 的画面，再逐帧确认。键盘 ←/→ 或 ,/. 可逐帧移动；帧号从 0 开始。</p>
           </div>
 
@@ -1182,6 +1241,18 @@ function AnnotationPage({ recordings, taxonomy, allowedUnikeys }: { recordings: 
               {review.workflow.review_policy === "two_person" && <button disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("reject")}>驳回</button>}
               <button disabled={!['accepted', 'exported'].includes(review.workflow.state)} onClick={() => changeWorkflow("reopen")}>管理员重开</button>
             </div>
+          </div>}
+          {review && <div className="panel workflow-panel">
+            <div className="panel-title">第 5 步 · 下载标注快照与训练制品</div>
+            <p className="stage-help">review.json 是当前可审计的标注与同步快照；原始 H5/MKV 始终保持不变。只有通过门禁的 prod 录制才能生成统一 30 Hz 的 aligned30.h5。</p>
+            <div className="status-grid"><span>数据级别 {recordings.find((item) => item.recording_id === selected)?.data_tier ?? "—"}</span><span>校准 {status?.calibration ?? "—"}</span><span>导出 {status?.export ?? "—"}</span></div>
+            <div className="save-row">
+              <a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>下载 review.json</a>
+              {status?.export === "exported"
+                ? <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>下载 aligned30.h5</a>
+                : <button className="primary" disabled={recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" || review.workflow.state !== "accepted" || status?.calibration !== "verified"} onClick={exportAligned30}>生成 aligned30.h5</button>}
+            </div>
+            {recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" && <p className="stage-help warning-text">当前是 test 数据：可以下载 review.json，但永久禁止生成训练 H5。</p>}
           </div>}
         </>}
       </section>
