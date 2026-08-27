@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import time
 from datetime import UTC, datetime
@@ -51,6 +52,8 @@ from imu_data_collector.video import (
     probe_video_frames,
     select_video_device,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RecordingCoordinator:
@@ -1112,6 +1115,8 @@ class RecordingCoordinator:
             self.current = self.current.model_copy(update={"state": self.state})
             self.catalog.upsert(self.current)
             issues: list[str] = []
+            validation_issues: list[str] = []
+            quality_warnings: list[str] = []
             assert self.video and self.ble and self.writer
             capture_video = self.video
             capture_ble = self.ble
@@ -1219,8 +1224,9 @@ class RecordingCoordinator:
                     if final_h5.is_file()
                     else None
                 )
-                if report and report.issues:
-                    issues.extend(report.issues)
+                if report:
+                    validation_issues.extend(report.issues)
+                    quality_warnings.extend(report.warnings)
                 if final_h5.is_file():
                     with h5py.File(final_h5, "r") as handle:
                         duration_ns = int(handle.attrs.get("duration_ns", 0))
@@ -1232,7 +1238,11 @@ class RecordingCoordinator:
                 # 停留在 finalizing。具体错误会随目录记录保留下来。
                 issues.append(f"H5 收尾验证失败：{self._error_message(error, '未知错误')}")
             issues = list(dict.fromkeys(issues))
-            final_state = RecordingState.READY if not issues else RecordingState.NEEDS_ATTENTION
+            final_state = (
+                RecordingState.READY
+                if not issues and not validation_issues
+                else RecordingState.NEEDS_ATTENTION
+            )
             self.state = final_state
             self.current = self.current.model_copy(
                 update={
@@ -1242,6 +1252,8 @@ class RecordingCoordinator:
                     "h5_path": str(final_h5) if final_h5.is_file() else str(partial_h5),
                     "mkv_path": str(final_mkv) if final_mkv.is_file() else str(partial_mkv),
                     "issues": issues,
+                    "validation_issues": list(dict.fromkeys(validation_issues)),
+                    "quality_warnings": list(dict.fromkeys(quality_warnings)),
                 }
             )
             self.catalog.upsert(self.current)
@@ -1415,6 +1427,8 @@ class RecordingCoordinator:
             self.state = RecordingState.FINALIZING
             self.device_state = DeviceSessionState.RELEASING
             issues: list[str] = []
+            validation_issues: list[str] = []
+            quality_warnings: list[str] = []
             if self.current_stage is not None:
                 self._close_characterization_stage()
             assert self.ble is not None and self.writer is not None
@@ -1458,7 +1472,8 @@ class RecordingCoordinator:
                 report = validate_capture_h5(
                     final_h5, self.taxonomy, require_video=False, require_sync=False
                 )
-                issues.extend(report.issues)
+                validation_issues.extend(report.issues)
+                quality_warnings.extend(report.warnings)
                 report_path = write_characterization_report(final_h5)
             except Exception as error:
                 issues.append(str(error))
@@ -1466,7 +1481,9 @@ class RecordingCoordinator:
                 self.writer.abort_close()
             issues = list(dict.fromkeys(issues))
             final_state = (
-                RecordingState.READY if not issues else RecordingState.NEEDS_ATTENTION
+                RecordingState.READY
+                if not issues and not validation_issues
+                else RecordingState.NEEDS_ATTENTION
             )
             self.state = final_state
             self.current = self.current.model_copy(
@@ -1476,6 +1493,8 @@ class RecordingCoordinator:
                     "duration_ns": duration_ns,
                     "h5_path": str(final_h5) if final_h5.is_file() else str(partial_h5),
                     "issues": issues,
+                    "validation_issues": list(dict.fromkeys(validation_issues)),
+                    "quality_warnings": list(dict.fromkeys(quality_warnings)),
                 }
             )
             result = {
@@ -1766,6 +1785,51 @@ class RecordingCoordinator:
 
     def rebuild_catalog(self) -> dict[str, int]:
         return rebuild_catalog(self.settings.data_root, self.catalog)
+
+    def revalidate_unuploaded_recordings(self) -> dict[str, int]:
+        """启动时重评未上传的待检查录制，不改动任何源制品。"""
+
+        result = {
+            "scanned": 0,
+            "updated": 0,
+            "ready": 0,
+            "still_blocked": 0,
+            "skipped": 0,
+        }
+        for summary in self.catalog.list():
+            if summary.state != RecordingState.NEEDS_ATTENTION:
+                continue
+            if summary.upload_state in {"uploaded", "published"}:
+                result["skipped"] += 1
+                continue
+            result["scanned"] += 1
+            h5_path = Path(summary.h5_path or "")
+            mkv_path = Path(summary.mkv_path or "")
+            if not h5_path.is_file() or not mkv_path.is_file():
+                result["skipped"] += 1
+                continue
+            report = validate_capture_h5(h5_path, self.taxonomy)
+            state = (
+                RecordingState.READY
+                if not summary.issues and not report.issues
+                else RecordingState.NEEDS_ATTENTION
+            )
+            updated = summary.model_copy(
+                update={
+                    "state": state,
+                    "validation_issues": list(report.issues),
+                    "quality_warnings": list(report.warnings),
+                }
+            )
+            if updated != summary:
+                self.catalog.upsert(updated)
+                result["updated"] += 1
+            if state == RecordingState.READY:
+                result["ready"] += 1
+            else:
+                result["still_blocked"] += 1
+        logger.info("启动自动重评未上传录制：%s", result)
+        return result
 
     def delete_recording(self, recording_id: str, confirmation: str) -> Path:
         summary = self._required_summary(recording_id)

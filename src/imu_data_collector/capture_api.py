@@ -57,6 +57,9 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        _app.state.startup_revalidation = await asyncio.to_thread(
+            coordinator.revalidate_unuploaded_recordings
+        )
         yield
         await coordinator.shutdown()
 
@@ -320,7 +323,8 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         report = validate_capture_h5(Path(summary.h5_path or ""), coordinator.taxonomy)
         return {
             "ready": report.ready,
-            "issues": report.issues,
+            "blocking_issues": report.issues,
+            "quality_warnings": report.warnings,
             "metrics": report.metrics,
         }
 

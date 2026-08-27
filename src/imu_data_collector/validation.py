@@ -22,7 +22,12 @@ from imu_data_collector.models import AnnotationDocument, BinaryLabel, EventKind
 class ValidationReport:
     ready: bool
     issues: tuple[str, ...]
+    warnings: tuple[str, ...]
     metrics: dict[str, int | float | str]
+
+
+PACKET_FIT_RESIDUAL_WARNING_NS = 200_000_000
+PACKET_FIT_RESIDUAL_BLOCK_NS = 500_000_000
 
 
 def validate_annotations(
@@ -149,11 +154,17 @@ def validate_capture_h5(
     require_calibration: bool = False,
 ) -> ValidationReport:
     issues: list[str] = []
+    warnings: list[str] = []
     metrics: dict[str, int | float | str] = {}
     try:
         handle = h5py.File(path, "r")
     except (OSError, ValueError) as error:
-        return ValidationReport(False, (f"cannot open HDF5: {error}",), metrics)
+        return ValidationReport(
+            False,
+            (f"cannot open HDF5: {error}",),
+            (),
+            metrics,
+        )
 
     with handle:
         if handle.attrs.get("capture_schema_name") != CAPTURE_SCHEMA_NAME:
@@ -210,7 +221,7 @@ def validate_capture_h5(
             if name not in handle:
                 issues.append(f"missing dataset {name}")
         if issues:
-            return ValidationReport(False, tuple(issues), metrics)
+            return ValidationReport(False, tuple(issues), tuple(warnings), metrics)
 
         payload_values = handle["imu/packets/payload_values"]
         offsets = np.asarray(handle["imu/packets/payload_offsets"], dtype=np.int64)
@@ -345,8 +356,15 @@ def validate_capture_h5(
                 issues.append("IMU notification gap exceeds 1.5 seconds")
             if fit_rms_ns > 100_000_000:
                 issues.append("IMU packet timestamp fit RMS exceeds 0.1 seconds")
-            if fit_max_ns > 200_000_000:
-                issues.append("IMU packet timestamp maximum residual exceeds 0.2 seconds")
+            if fit_max_ns > PACKET_FIT_RESIDUAL_BLOCK_NS:
+                issues.append(
+                    "IMU packet timestamp maximum residual exceeds 0.5 seconds"
+                )
+            elif fit_max_ns > PACKET_FIT_RESIDUAL_WARNING_NS:
+                warnings.append(
+                    "IMU packet timestamp maximum residual is "
+                    f"{fit_max_ns / 1e6:.3f} ms; warning threshold is 200 ms"
+                )
         sample_lengths = {
             sample_count,
             len(trailer),
@@ -476,7 +494,7 @@ def validate_capture_h5(
             document = read_annotation_document(handle)
             issues.extend(validate_annotations(document, taxonomy, duration_ns))
 
-    return ValidationReport(not issues, tuple(issues), metrics)
+    return ValidationReport(not issues, tuple(issues), tuple(warnings), metrics)
 
 
 def _text_list(dataset: h5py.Dataset) -> list[str]:

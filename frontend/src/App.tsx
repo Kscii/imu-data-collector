@@ -68,6 +68,8 @@ type Recording = {
   started_at_utc: string;
   duration_ns?: number;
   issues: string[];
+  validation_issues?: string[];
+  quality_warnings?: string[];
   upload_state: string;
   index_state?: "not_requested" | "pending" | "indexed" | "rejected";
   index_message?: string;
@@ -487,9 +489,19 @@ function tierLabel(tier: "test" | "prod") {
 }
 
 function issueLabel(issue: string) {
+  const residualWarning = issue.match(
+    /^IMU packet timestamp maximum residual is ([0-9.]+) ms; warning threshold is 200 ms$/
+  );
+  if (residualWarning) {
+    return tr(
+      `IMU 包时间戳最大残差为 ${residualWarning[1]} ms，超过 200 ms 警告阈值`,
+      `IMU packet timestamp maximum residual is ${residualWarning[1]} ms, above the 200 ms warning threshold`,
+    );
+  }
   const labels: Record<string, string> = {
     "synchronization anchors have not been verified": "同步锚点尚未验证",
-    "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证"
+    "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证",
+    "IMU packet timestamp maximum residual exceeds 0.5 seconds": "IMU 包时间戳最大残差超过 0.5 秒",
   };
   return labels[issue] ?? userVisibleMessage(issue);
 }
@@ -905,7 +917,8 @@ function CapturePage(props: any) {
           <Plot time={chart.t} values={chart.values} />
         </div>
       </section>
-      {live.recording?.issues?.length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{live.recording.issues.map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {(live.recording?.quality_warnings ?? []).length > 0 && <div className="warning-banner"><strong>上一次录制质量警告（允许发布）</strong>{live.recording.quality_warnings.map((warning: string) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
       {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div></div>}
       {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
       {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0} / 3 次自动重连。</div>}
@@ -1885,7 +1898,8 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
           <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : ["uploaded", "published"].includes(recording.upload_state) ? "重新校验发布" : "估算并发布"}</button>
           <button className="danger" disabled={Boolean(busy)} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>
-        {recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
+        {[...recording.issues, ...(recording.validation_issues ?? [])].length > 0 && <ul>{[...recording.issues, ...(recording.validation_issues ?? [])].map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
+        {(recording.quality_warnings ?? []).length > 0 && <ul className="warning-text">{recording.quality_warnings?.map((warning) => <li key={warning}>质量警告（允许发布）：{issueLabel(warning)}</li>)}</ul>}
       </article>)}
     </section>
     <section className="panel library">

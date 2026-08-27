@@ -121,6 +121,8 @@ const translations: Record<string, string> = {
   "摄像头实时预览": "Live camera preview",
   "IMU 六轴实时曲线 · 最近 120 秒 · 当前为原始计数": "Live six-axis IMU chart · last 120 s · raw counts",
   "上一次录制待办（不影响当前设备预览）": "Previous recording issues (current preview is unaffected)",
+  "上一次录制质量警告（允许发布）": "Previous recording quality warnings (publishing is allowed)",
+  "质量警告（允许发布）": "Quality warning (publishing is allowed)",
   "摄像头固定曝光未完全生效": "Fixed camera exposure was not fully applied",
   "预览设备已断开，正在进行第": "Preview devices disconnected; reconnect attempt",
   "次自动重连": "of 3",

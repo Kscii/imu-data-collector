@@ -414,7 +414,11 @@ class RecordingSummary(BaseModel):
     duration_ns: int | None = None
     h5_path: str | None = None
     mkv_path: str | None = None
+    # issues 只保存录制/收尾阶段的运行故障；验证器结论单独保存，
+    # 否则调整质量策略时无法安全重评而不误删真实故障。
     issues: list[str] = Field(default_factory=list)
+    validation_issues: list[str] = Field(default_factory=list)
+    quality_warnings: list[str] = Field(default_factory=list)
     upload_state: str = "not_requested"
     index_state: Literal["not_requested", "pending", "indexed", "rejected"] = (
         "not_requested"

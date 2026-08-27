@@ -45,6 +45,52 @@ def test_existing_catalog_rows_without_tier_are_migrated_as_safe_test(
     assert summary.manifest_generation is None
 
 
+def test_legacy_packet_residual_issue_is_migrated_to_validation_issue(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    residual_issue = "IMU packet timestamp maximum residual exceeds 0.2 seconds"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE recordings (
+                recording_id TEXT PRIMARY KEY,
+                collection_id TEXT NOT NULL,
+                participant_id TEXT NOT NULL,
+                data_tier TEXT NOT NULL,
+                state TEXT NOT NULL,
+                started_at_utc TEXT NOT NULL,
+                ended_at_utc TEXT,
+                duration_ns INTEGER,
+                h5_path TEXT,
+                mkv_path TEXT,
+                issues_json TEXT NOT NULL DEFAULT '[]',
+                upload_state TEXT NOT NULL DEFAULT 'not_requested',
+                index_state TEXT NOT NULL DEFAULT 'not_requested',
+                index_message TEXT NOT NULL DEFAULT '',
+                manifest_generation INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO recordings (
+                recording_id, collection_id, participant_id, data_tier, state,
+                started_at_utc, issues_json
+            ) VALUES (?, 'pilot', 'xfan0282', 'prod', 'needs_attention',
+                      '2026-08-27T00:00:00Z', ?)
+            """,
+            ("legacy-residual", f'["{residual_issue}", "摄像头收尾失败"]'),
+        )
+
+    summary = RecordingCatalog(path).get("legacy-residual")
+
+    assert summary is not None
+    assert summary.issues == ["摄像头收尾失败"]
+    assert summary.validation_issues == [residual_issue]
+    assert summary.quality_warnings == []
+
+
 def test_new_catalog_rows_preserve_explicit_data_tier(tmp_path: Path) -> None:
     catalog = RecordingCatalog(tmp_path / "catalog.sqlite3")
     catalog.upsert(

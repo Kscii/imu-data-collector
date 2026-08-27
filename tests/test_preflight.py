@@ -20,6 +20,7 @@ from imu_data_collector.models import (
     RecordingState,
     RecordingSummary,
 )
+from imu_data_collector.validation import ValidationReport
 from imu_data_collector.video import VideoFrameTable
 
 
@@ -75,6 +76,104 @@ def _coordinator(tmp_path: Path) -> RecordingCoordinator:
             minimum_free_gib=0,
         )
     )
+
+
+def test_startup_revalidation_allows_warning_and_preserves_operational_issue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    warning = (
+        "IMU packet timestamp maximum residual is 219.253 ms; "
+        "warning threshold is 200 ms"
+    )
+    for recording_id, operational_issues in (
+        ("warning-only", []),
+        ("operational-failure", ["摄像头收尾失败"]),
+    ):
+        directory = tmp_path / "data" / "pilot" / recording_id
+        directory.mkdir(parents=True)
+        h5_path = directory / f"{recording_id}.h5"
+        mkv_path = directory / f"{recording_id}.mkv"
+        h5_path.write_bytes(b"fixture")
+        mkv_path.write_bytes(b"fixture")
+        coordinator.catalog.upsert(
+            RecordingSummary(
+                recording_id=recording_id,
+                collection_id="pilot",
+                participant_id="xfan0282",
+                data_tier="prod",
+                state=RecordingState.NEEDS_ATTENTION,
+                started_at_utc="2026-08-27T00:00:00Z",
+                h5_path=str(h5_path),
+                mkv_path=str(mkv_path),
+                issues=operational_issues,
+                validation_issues=[
+                    "IMU packet timestamp maximum residual exceeds 0.2 seconds"
+                ],
+            )
+        )
+
+    monkeypatch.setattr(
+        "imu_data_collector.coordinator.validate_capture_h5",
+        lambda *_args, **_kwargs: ValidationReport(True, (), (warning,), {}),
+    )
+
+    result = coordinator.revalidate_unuploaded_recordings()
+
+    allowed = coordinator.catalog.get("warning-only")
+    blocked = coordinator.catalog.get("operational-failure")
+    assert result == {
+        "scanned": 2,
+        "updated": 2,
+        "ready": 1,
+        "still_blocked": 1,
+        "skipped": 0,
+    }
+    assert allowed is not None
+    assert allowed.state == RecordingState.READY
+    assert allowed.validation_issues == []
+    assert allowed.quality_warnings == [warning]
+    assert blocked is not None
+    assert blocked.state == RecordingState.NEEDS_ATTENTION
+    assert blocked.issues == ["摄像头收尾失败"]
+    assert blocked.quality_warnings == [warning]
+
+
+def test_startup_revalidation_does_not_touch_uploaded_recording(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    summary = RecordingSummary(
+        recording_id="uploaded-recording",
+        collection_id="pilot",
+        participant_id="xfan0282",
+        data_tier="prod",
+        state=RecordingState.NEEDS_ATTENTION,
+        started_at_utc="2026-08-27T00:00:00Z",
+        upload_state="uploaded",
+        validation_issues=["旧验证结论"],
+    )
+    coordinator.catalog.upsert(summary)
+    called = False
+
+    def validate(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ValidationReport(True, (), (), {})
+
+    monkeypatch.setattr(
+        "imu_data_collector.coordinator.validate_capture_h5",
+        validate,
+    )
+
+    result = coordinator.revalidate_unuploaded_recordings()
+
+    assert result["scanned"] == 0
+    assert result["skipped"] == 1
+    assert not called
+    assert coordinator.catalog.get("uploaded-recording") == summary
 
 
 @pytest.mark.asyncio
