@@ -400,9 +400,20 @@ def recover_interrupted_characterization(
         if str(source.attrs.get("recording_kind", "")) != "imu_characterization":
             raise ValueError("只允许恢复 recording_kind=imu_characterization 的文件")
         recording_start = int(source.attrs["recording_start_monotonic_ns"])
-        invalid_packets = int(
-            np.count_nonzero(~np.asarray(source["imu/packets/parse_valid"], dtype=np.bool_))
-        )
+        if "imu/packets/packet_kind" in source:
+            packet_kinds = np.asarray(source["imu/packets/packet_kind"], dtype=np.uint8)
+            invalid_packets = int(np.count_nonzero(packet_kinds == 255))
+            auxiliary_packets = int(np.count_nonzero(packet_kinds == 2))
+            imu_packets = int(np.count_nonzero(packet_kinds == 1))
+        else:
+            parse_valid = np.asarray(
+                source["imu/packets/parse_valid"], dtype=np.bool_
+            )
+            invalid_packets = int(np.count_nonzero(~parse_valid))
+            auxiliary_packets = 0
+            imu_packets = int(np.count_nonzero(parse_valid))
+        packet_count = len(source["imu/packets/receive_time_ns"])
+        sample_count = len(source["imu/samples/raw_counts"])
     final_path = path.with_name(path.name.replace(".partial.h5", ".h5"))
     recovering = path.with_name(path.name.replace(".partial.h5", ".recovering.h5"))
     if final_path.exists() or recovering.exists():
@@ -416,6 +427,11 @@ def recover_interrupted_characterization(
             writer.imu_settings = imu_settings
             writer.recording_start_monotonic_ns = recording_start
             writer.parse_errors = ["中断恢复时发现无效通知"] * invalid_packets
+            writer.packet_count = packet_count
+            writer.imu_packet_count = imu_packets
+            writer.auxiliary_notification_count = auxiliary_packets
+            writer.unknown_notification_count = invalid_packets
+            writer.sample_count = sample_count
             rate, residual = writer.reconstruct_times()
             handle["imu"].attrs.update(
                 {

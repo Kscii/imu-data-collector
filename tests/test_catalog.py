@@ -40,6 +40,9 @@ def test_existing_catalog_rows_are_migrated_as_legacy_unclassified(
 
     assert summary is not None
     assert summary.data_tier == "legacy_unclassified"
+    assert summary.index_state == "not_requested"
+    assert summary.index_message == ""
+    assert summary.manifest_generation is None
 
 
 def test_new_catalog_rows_preserve_explicit_data_tier(tmp_path: Path) -> None:

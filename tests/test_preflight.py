@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 
@@ -10,7 +11,16 @@ from imu_data_collector.ble import NotificationPacket
 from imu_data_collector.config import Settings
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.cw12eu import pack_test_frame
-from imu_data_collector.models import PreviewStartRequest, RecordingStartRequest
+from imu_data_collector.hdf5_store import CaptureH5Writer
+from imu_data_collector.models import (
+    DataTier,
+    DeviceSessionState,
+    PreviewStartRequest,
+    RecordingStartRequest,
+    RecordingState,
+    RecordingSummary,
+)
+from imu_data_collector.video import VideoFrameTable
 
 
 class _FakeVideo:
@@ -20,6 +30,13 @@ class _FakeVideo:
         self.starts = 0
         self.stops = 0
         self.progress = SimpleNamespace(frame=0, fps=0.0, bitrate="0", speed="0x")
+        self.source_fps = 30.0
+        self.preview_fps = 10.0
+        self.source_frame_count = 30
+        self.control_state = SimpleNamespace(ready=True, errors=[])
+        self.frame = 0
+        self.bitrate = "0"
+        self.speed = "0x"
 
     async def start(self) -> None:
         self.starts += 1
@@ -36,12 +53,224 @@ class _FakeBle:
         self.last_packet_ns = None
         self.dropped_callback_packets = 7
         self.starts = 0
+        self.stops = 0
+        self.disconnect_reason = None
 
     async def start(self) -> None:
         self.starts += 1
 
     async def stop(self) -> None:
+        self.stops += 1
         self.connected = False
+
+
+def _coordinator(tmp_path: Path) -> RecordingCoordinator:
+    data_root = tmp_path / "data"
+    data_root.mkdir(exist_ok=True)
+    return RecordingCoordinator(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+            minimum_free_gib=0,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_release_preview_is_idempotent_and_cleans_stale_session(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    ble = _FakeBle()
+    ble.connected = False
+    video = _FakeVideo("/dev/video-stale")
+    coordinator.mode = "devices_preview"
+    coordinator.ble = ble  # type: ignore[assignment]
+    coordinator.video = video  # type: ignore[assignment]
+    coordinator._monitoring_requested = True
+
+    first = await coordinator.stop_preview()
+    second = await coordinator.stop_preview()
+
+    assert first["session_type"] is None
+    assert second["session_type"] is None
+    assert second["device"]["state"] == "idle"
+    assert coordinator.ble is None
+    assert coordinator.video is None
+    assert video.stops == 1
+
+
+@pytest.mark.asyncio
+async def test_release_can_cancel_preview_while_connection_is_pending(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    connecting = asyncio.Event()
+    continue_connection = asyncio.Event()
+    ble = _FakeBle()
+    video = _FakeVideo("/dev/video-new")
+
+    async def open_ble():
+        connecting.set()
+        await continue_connection.wait()
+        return ble
+
+    async def open_video(_camera_id: str | None):
+        return {"camera_id": "fixture", "device": video.device}, video
+
+    coordinator._open_preview_ble = open_ble  # type: ignore[method-assign]
+    coordinator._open_preview_video = open_video  # type: ignore[method-assign]
+    start_task = asyncio.create_task(
+        coordinator.start_preview(PreviewStartRequest(camera_id="fixture"))
+    )
+    await asyncio.wait_for(connecting.wait(), timeout=1.0)
+
+    with pytest.raises(RuntimeError, match="已有设备连接操作"):
+        await coordinator.start_preview(PreviewStartRequest(camera_id="fixture"))
+
+    released = await asyncio.wait_for(coordinator.stop_preview(), timeout=1.0)
+    continue_connection.set()
+
+    with pytest.raises(RuntimeError, match="释放操作取消"):
+        await start_task
+    assert released["device"]["state"] == "idle"
+    assert coordinator.mode is None
+    assert not ble.connected
+    assert video.stops == 1
+
+
+@pytest.mark.asyncio
+async def test_preview_release_cannot_stop_formal_recording(tmp_path: Path) -> None:
+    coordinator = _coordinator(tmp_path)
+    coordinator.mode = "capture"
+    coordinator.state = RecordingState.RECORDING
+
+    with pytest.raises(RuntimeError, match="正式录制"):
+        await coordinator.stop_preview()
+
+    assert coordinator.mode == "capture"
+    assert coordinator.state.value == "recording"
+
+
+@pytest.mark.asyncio
+async def test_failed_ble_arming_does_not_create_user_capture_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = _coordinator(tmp_path)
+
+    class FailingBle(_FakeBle):
+        async def start(self) -> None:
+            raise TimeoutError
+
+    async def resolve(_camera_id: str | None = None) -> dict[str, str]:
+        return {
+            "camera_id": "fixture",
+            "device": "/dev/video-fixture",
+            "product": "fixture",
+            "interface": "00",
+        }
+
+    coordinator._resolve_camera = resolve  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "imu_data_collector.coordinator.CW12EUBleSource", lambda _settings: FailingBle()
+    )
+
+    with pytest.raises(TimeoutError):
+        await coordinator.start(
+            RecordingStartRequest(
+                collection_id="arming_failure",
+                participant_id="xfan0282",
+                camera_id="fixture",
+            )
+        )
+
+    assert coordinator.mode is None
+    assert coordinator.current is None
+    assert coordinator.device_state.value == "error"
+    assert list(coordinator.settings.data_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_prod_preflight_rejects_low_camera_source_fps(tmp_path: Path) -> None:
+    coordinator = _coordinator(tmp_path)
+    video = _FakeVideo("/dev/video-fixture")
+    video.source_fps = 28.5
+
+    with pytest.raises(RuntimeError, match="输入帧率不足"):
+        await coordinator._require_prod_camera_preflight(video, DataTier.PROD)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_test_tier_does_not_apply_prod_camera_gate(tmp_path: Path) -> None:
+    coordinator = _coordinator(tmp_path)
+    video = _FakeVideo("/dev/video-fixture")
+    video.source_fps = 1.0
+    video.control_state.ready = False
+
+    await coordinator._require_prod_camera_preflight(video, DataTier.TEST)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_preview_watchdog_reconnects_once_after_unexpected_disconnect(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    old_ble = _FakeBle()
+    old_ble.connected = False
+    old_ble.disconnect_reason = "bluez_disconnected"
+    old_video = _FakeVideo("/dev/video-old")
+    new_ble = _FakeBle()
+    coordinator.mode = "devices_preview"
+    coordinator.ble = old_ble  # type: ignore[assignment]
+    coordinator.video = old_video  # type: ignore[assignment]
+    coordinator._monitoring_requested = True
+    coordinator._preview_camera_id = "fixture"
+    operation_id = coordinator._next_device_operation(DeviceSessionState.CONNECTED)
+
+    async def open_ble():
+        return new_ble
+
+    coordinator._open_preview_ble = open_ble  # type: ignore[method-assign]
+    coordinator._start_preview_watchdog(operation_id)
+
+    deadline = asyncio.get_running_loop().time() + 2.5
+    while coordinator.ble is not new_ble and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+
+    assert coordinator.ble is new_ble
+    assert coordinator.video is old_video
+    assert old_video.stops == 0
+    assert coordinator.device_state.value == "connected"
+    await coordinator.stop_preview()
+
+
+@pytest.mark.asyncio
+async def test_initial_ble_failure_keeps_camera_preview_and_schedules_retry(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    video = _FakeVideo("/dev/video-new")
+
+    async def open_ble():
+        raise RuntimeError("fixture BLE unavailable")
+
+    async def open_video(_camera_id: str | None):
+        return {"camera_id": "fixture", "device": video.device}, video
+
+    coordinator._open_preview_ble = open_ble  # type: ignore[method-assign]
+    coordinator._open_preview_video = open_video  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="fixture BLE unavailable"):
+        await coordinator.start_preview(PreviewStartRequest(camera_id="fixture"))
+
+    assert coordinator.mode == "devices_preview"
+    assert coordinator.ble is None
+    assert coordinator.video is video
+    assert coordinator.device_state == DeviceSessionState.ERROR
+    assert coordinator.device_error is not None
+    assert coordinator.device_error["component"] == "ble"
+    await coordinator.stop_preview()
 
 
 @pytest.mark.asyncio
@@ -179,10 +408,119 @@ async def test_start_recording_reuses_preview_ble(tmp_path: Path) -> None:
         assert coordinator.writer is not None
         events = coordinator.writer.handle["imu/connection_events/event"][:].astype(str)
         assert "ble_reused_from_preview" in events
+
+        result = await coordinator.stop()
+
+        assert result.state == RecordingState.NEEDS_ATTENTION
+        assert coordinator.mode == "devices_preview"
+        assert coordinator.ble is ble
+        assert ble.connected
+        assert ble.stops == 0
+        assert capture_video.stops == 1
+        assert capture_video.starts == 2
+        with h5py.File(Path(result.h5_path or ""), "r") as handle:
+            persisted_events = handle["imu/connection_events/event"][:].astype(str)
+        assert "ble_retained_after_capture" in persisted_events
     finally:
-        coordinator._stop_consumer.set()
-        if coordinator._consumer:
-            coordinator._consumer.cancel()
-            await asyncio.gather(coordinator._consumer, return_exceptions=True)
+        if coordinator.mode == "devices_preview":
+            await coordinator.stop_preview()
+        else:
+            coordinator._stop_consumer.set()
+            if coordinator._consumer:
+                coordinator._consumer.cancel()
+                await asyncio.gather(coordinator._consumer, return_exceptions=True)
         if coordinator.writer:
             coordinator.writer.abort_close()
+
+
+@pytest.mark.asyncio
+async def test_stop_validation_failure_reaches_terminal_state_before_preview_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    recording_id = "recording-validation-lock"
+    directory = coordinator.settings.data_root / "validation_lock" / recording_id
+    directory.mkdir(parents=True)
+    partial_h5 = directory / f"{recording_id}.partial.h5"
+    partial_mkv = directory / f"{recording_id}.partial.mkv"
+    partial_mkv.write_bytes(b"fixture mkv")
+    request = RecordingStartRequest(
+        collection_id="validation_lock",
+        participant_id="xfan0282",
+    )
+    writer = CaptureH5Writer(
+        partial_h5,
+        request,
+        recording_id,
+        1_000_000_000,
+        coordinator.settings.imu,
+        coordinator.taxonomy,
+    )
+    payload = pack_test_frame((1, 2, 3, 4, 5, 6), b"\x00\x00\x00\x01")
+    writer.append_notification(payload, 1_100_000_000)
+    writer.append_notification(payload, 1_140_000_000)
+
+    capture_video = _FakeVideo("/dev/video-capture")
+    capture_video.control_state = SimpleNamespace(
+        ready=True,
+        errors=[],
+        requested={},
+        effective={},
+    )
+    capture_video.progress.errors = []
+    preview_video = _FakeVideo("/dev/video-preview")
+    ble = _FakeBle()
+    summary = RecordingSummary(
+        recording_id=recording_id,
+        collection_id=request.collection_id,
+        participant_id=request.participant_id,
+        data_tier=request.data_tier,
+        state=RecordingState.RECORDING,
+        started_at_utc="2026-08-27T00:00:00+00:00",
+        h5_path=str(partial_h5),
+        mkv_path=str(partial_mkv),
+    )
+    coordinator.current = summary
+    coordinator.catalog.upsert(summary)
+    coordinator.state = RecordingState.RECORDING
+    coordinator.mode = "capture"
+    coordinator.writer = writer
+    coordinator.video = capture_video  # type: ignore[assignment]
+    coordinator.ble = ble  # type: ignore[assignment]
+
+    async def probe(*_args, **_kwargs) -> VideoFrameTable:
+        return VideoFrameTable(
+            pts_monotonic_ns=np.asarray([1_050_000_000, 1_083_333_333]),
+            duration_ns=np.asarray([33_333_333, 33_333_333]),
+            key_frame=np.asarray([True, False]),
+            codec="h264",
+            width=1920,
+            height=1080,
+        )
+
+    async def normalize(source: Path, target: Path) -> None:
+        target.write_bytes(source.read_bytes())
+
+    def fail_validation(*_args, **_kwargs):
+        raise BlockingIOError(11, "fixture H5 lock")
+
+    async def restore_preview(_camera_id: str | None):
+        persisted = coordinator.catalog.get(recording_id)
+        assert coordinator.writer is None
+        assert persisted is not None
+        assert persisted.state == RecordingState.NEEDS_ATTENTION
+        return {"camera_id": "fixture"}, preview_video
+
+    monkeypatch.setattr("imu_data_collector.coordinator.probe_video_frames", probe)
+    monkeypatch.setattr("imu_data_collector.coordinator.normalize_video_timeline", normalize)
+    monkeypatch.setattr("imu_data_collector.coordinator.validate_capture_h5", fail_validation)
+    coordinator._open_preview_video = restore_preview  # type: ignore[method-assign]
+
+    result = await coordinator.stop()
+
+    assert result.state == RecordingState.NEEDS_ATTENTION
+    assert any("H5 收尾验证失败" in issue for issue in result.issues), result.issues
+    assert coordinator.state == RecordingState.NEEDS_ATTENTION
+    assert coordinator.writer is None
+    assert coordinator.video is preview_video
+    assert Path(result.h5_path or "").name == f"{recording_id}.h5"

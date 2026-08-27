@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -19,14 +22,15 @@ from imu_data_collector.auth import (
     AuthorizationError,
     TokenVerifier,
 )
+from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.models import (
-    AnnotationDocument,
     AnnotationRecordingDeleteRequest,
     AnnotationReviewWorkflowRequest,
+    AnnotationSaveRequest,
     RevisionRequest,
-    SyncDocument,
     SyncExperimentDocument,
+    SyncSaveRequest,
     TrainingReleaseRevokeRequest,
 )
 from imu_data_collector.review import ReviewConflictError
@@ -35,6 +39,8 @@ from imu_data_collector.storage import (
     ObjectStore,
     create_object_store,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_annotation_app(
@@ -51,7 +57,40 @@ def create_annotation_app(
     )
     service = AnnotationService(active, object_store)
     authenticator = Authenticator(active, token_verifier)
-    app = FastAPI(title="IMU 标注平台", version="0.2.0")
+    refresh_stop = threading.Event()
+
+    def refresh_catalog_loop() -> None:
+        interval = active.annotation.catalog_refresh_interval_s
+        while not refresh_stop.is_set():
+            try:
+                result = service.refresh()
+                if result["imported"] or result["skipped"]:
+                    logger.info("后台刷新录制索引：%s", result)
+            except Exception:
+                logger.exception("后台刷新录制索引失败，继续使用已有 catalog")
+            refresh_stop.wait(interval)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        interval = active.annotation.catalog_refresh_interval_s
+        refresh_thread: threading.Thread | None = None
+        service.publish_capabilities()
+        if interval > 0:
+            refresh_stop.clear()
+            refresh_thread = threading.Thread(
+                target=refresh_catalog_loop,
+                name="annotation-catalog-refresh",
+                daemon=True,
+            )
+            refresh_thread.start()
+        try:
+            yield
+        finally:
+            refresh_stop.set()
+            if refresh_thread is not None:
+                refresh_thread.join(timeout=2.0)
+
+    app = FastAPI(title="IMU 标注平台", version="0.2.0", lifespan=lifespan)
     app.state.annotation_service = service
     app.state.authenticator = authenticator
 
@@ -66,7 +105,10 @@ def create_annotation_app(
                 return JSONResponse(status_code=401, content={"detail": str(error)})
             except AuthorizationError as error:
                 return JSONResponse(status_code=403, content={"detail": str(error)})
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
     def current_actor(request: Request) -> Actor:
         actor = getattr(request.state, "actor", None)
@@ -93,6 +135,7 @@ def create_annotation_app(
         return {
             "ok": True,
             "application": "annotation",
+            "build_id": ANNOTATION_API_BUILD_ID,
         }
 
     @app.get("/api/v1/config")
@@ -106,6 +149,7 @@ def create_annotation_app(
             "auth_mode": active.auth.mode,
             "current_unikey": actor.unikey,
             "review_policy": service.review_policy.value,
+            "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "storage": {
                 "backend": active.storage.backend,
                 "bucket": active.storage.bucket,
@@ -121,13 +165,17 @@ def create_annotation_app(
         return service.taxonomy
 
     @app.post("/api/v1/index/refresh")
-    def refresh(request: Request) -> dict[str, int]:
+    def refresh(request: Request) -> dict[str, Any]:
         admin_actor(request)
         return service.refresh()
 
     @app.get("/api/v1/recordings")
     def recordings() -> list[dict[str, Any]]:
         return [service.recording_summary(item) for item in service.list_recordings()]
+
+    @app.get("/api/v1/calibration-evidence")
+    def calibration_evidence() -> dict[str, Any]:
+        return service.calibration_evidence_summary()
 
     @app.get("/api/v1/recordings/{recording_id}")
     def recording(recording_id: str) -> dict[str, Any]:
@@ -244,15 +292,16 @@ def create_annotation_app(
     @app.put("/api/v1/recordings/{recording_id}/annotations")
     def save_annotations(
         recording_id: str,
-        document: AnnotationDocument,
+        body: AnnotationSaveRequest,
         request: Request,
     ) -> dict[str, Any]:
         required(recording_id)
         try:
             return service.save_annotations(
                 recording_id,
-                document,
+                body.document,
                 current_actor(request).unikey,
+                body.expected_revision,
             ).model_dump(
                 mode="json"
             )
@@ -269,15 +318,16 @@ def create_annotation_app(
     @app.put("/api/v1/recordings/{recording_id}/sync")
     def save_sync(
         recording_id: str,
-        document: SyncDocument,
+        body: SyncSaveRequest,
         request: Request,
     ) -> dict[str, Any]:
         required(recording_id)
         try:
             return service.save_sync(
                 recording_id,
-                document,
+                body.document,
                 current_actor(request).unikey,
+                body.expected_revision,
             )
         except ReviewConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -307,14 +357,15 @@ def create_annotation_app(
     @app.post("/api/v1/recordings/{recording_id}/aligned30")
     def aligned30(
         recording_id: str, request: RevisionRequest
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         required(recording_id)
         try:
+            exported = service.export_training(
+                recording_id, request.expected_revision
+            )
             return {
                 "status": "exported",
-                "object_key": service.export_training(
-                    recording_id, request.expected_revision
-                ),
+                **exported.model_dump(mode="json"),
             }
         except ReviewConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -329,10 +380,13 @@ def create_annotation_app(
                 status_code=403,
                 detail="test 数据永久禁止下载训练 H5",
             )
-        key = f"exports/{recording_id}/aligned30.h5"
-        info = object_store.stat(key)
-        if info is None:
-            raise HTTPException(status_code=404, detail="尚未生成 aligned30.h5")
+        try:
+            reference, info = service.active_export(recording_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        key = reference.object_key
 
         def stream():
             cursor = 0
@@ -516,7 +570,12 @@ def create_annotation_app(
         async def spa(path: str) -> FileResponse:
             candidate = frontend / path
             target = candidate if path and candidate.is_file() else frontend / "index.html"
-            return FileResponse(target)
+            cache_control = (
+                "public, max-age=31536000, immutable"
+                if target.parent == assets
+                else "no-store, no-cache, must-revalidate, max-age=0"
+            )
+            return FileResponse(target, headers={"Cache-Control": cache_control})
     else:
 
         @app.get("/", include_in_schema=False)

@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from imu_data_collector.api import _mjpeg_part, create_app
+from imu_data_collector.capture_api import create_capture_app
 from imu_data_collector.config import Settings
 
 
@@ -35,6 +36,7 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
 
         config = client.get("/api/v1/config")
         assert config.status_code == 200
+        assert len(config.json()["build_id"]) == 16
         assert config.json()["data_root"] == str(data_root)
         assert config.json()["data_tiers"] == ["test", "prod"]
         assert config.json()["default_data_tier"] == "test"
@@ -128,3 +130,51 @@ def test_start_contract_rejects_unknown_data_tier_before_hardware_access(
         )
 
     assert response.status_code == 422
+
+
+def test_capture_api_turns_empty_timeout_into_structured_nonempty_error(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    app = create_capture_app(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+
+    async def fail_preview(_request):
+        raise TimeoutError
+
+    app.state.coordinator.start_preview = fail_preview
+    with TestClient(app) as client:
+        response = client.post("/api/v1/preflight/start", json={"camera_id": None})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "preview_start_failed"
+    assert detail["component"] == "ble_video"
+    assert "TimeoutError" in detail["message"]
+    assert detail["hint"]
+
+
+def test_preview_endpoint_rejects_inactive_channel_instead_of_returning_empty_200(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    app = create_capture_app(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/preview.mjpeg?stream=1")
+
+    assert response.status_code == 409
+    assert "预览通道" in response.json()["detail"]

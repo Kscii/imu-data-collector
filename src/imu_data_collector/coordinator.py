@@ -22,7 +22,11 @@ from imu_data_collector.ble import CW12EUBleSource
 from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
-from imu_data_collector.cw12eu import parse_notification
+from imu_data_collector.cw12eu import (
+    NotificationKind,
+    classify_notification,
+    parse_notification,
+)
 from imu_data_collector.hdf5_store import CaptureH5Writer
 from imu_data_collector.maintenance import (
     hard_delete_recording,
@@ -36,7 +40,10 @@ from imu_data_collector.models import (
     BinaryLabel,
     CharacterizationStageRequest,
     CharacterizationStartRequest,
+    DataTier,
+    DeviceSessionState,
     EventKind,
+    IndexReceipt,
     PreviewStartRequest,
     RecordingStartRequest,
     RecordingState,
@@ -66,6 +73,7 @@ from imu_data_collector.upload import RcloneRemoteStore
 from imu_data_collector.validation import validate_annotations, validate_capture_h5
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
+    PreviewFrameHub,
     discover_video_devices,
     normalize_video_timeline,
     probe_video_frames,
@@ -105,8 +113,21 @@ class RecordingCoordinator:
         self._first_packet_ns: int | None = None
         self._monitoring_requested = False
         self._preview_camera_id: str | None = None
-        self._video_stream_id = 0
+        self.preview_stream = PreviewFrameHub()
         self.preview_error: str | None = None
+        self.device_state = DeviceSessionState.IDLE
+        self.device_error: dict[str, Any] | None = None
+        self._device_operation_id = 0
+        self._device_operation_started_ns: int | None = None
+        self._preview_watchdog: asyncio.Task[Any] | None = None
+        self._preview_reconnect_attempt = 0
+        self._imu_reconnect_attempt = 0
+        self._video_reconnect_attempt = 0
+        self._imu_state = "idle"
+        self._video_state = "idle"
+        self._video_transition: str | None = None
+        self._recording_accepts_imu = False
+        self._preview_open_in_flight = False
 
     def _require_allowed_unikey(self, value: str, field_name: str) -> None:
         if value not in self.settings.identity.allowed_unikeys:
@@ -136,13 +157,111 @@ class RecordingCoordinator:
         self.preview_parse_errors = 0
         self._first_packet_ns = None
 
+    @staticmethod
+    def _error_message(error: BaseException, fallback: str) -> str:
+        """TimeoutError 等异常可能没有文本，用户界面不能因此显示空白。"""
+
+        message = str(error).strip()
+        return message or f"{fallback}（{type(error).__name__}）"
+
+    def _next_device_operation(self, state: DeviceSessionState) -> int:
+        self._device_operation_id += 1
+        self._device_operation_started_ns = time.monotonic_ns()
+        self.device_state = state
+        return self._device_operation_id
+
+    def _set_device_error(
+        self,
+        *,
+        code: str,
+        component: str,
+        error: BaseException,
+        hint: str,
+        retryable: bool,
+        fallback: str = "设备操作失败",
+    ) -> None:
+        message = self._error_message(error, fallback)
+        self.device_error = {
+            "code": code,
+            "component": component,
+            "message": message,
+            "hint": hint,
+            "retryable": retryable,
+            "time_monotonic_ns": time.monotonic_ns(),
+        }
+        self.preview_error = message
+
+    @staticmethod
+    async def _bounded_cleanup(
+        video: FFmpegVideoRecorder | None,
+        ble: CW12EUBleSource | None,
+        consumer: asyncio.Task[Any] | None,
+    ) -> list[str]:
+        """尽最大努力释放设备；任何单个驱动都不能无限阻塞状态机。"""
+
+        issues: list[str] = []
+        if consumer and consumer is not asyncio.current_task():
+            consumer.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(consumer, return_exceptions=True), timeout=2.0
+                )
+            except TimeoutError:
+                issues.append("IMU 消费任务在 2 秒内没有退出")
+        if video:
+            try:
+                await asyncio.wait_for(video.stop(), timeout=6.0)
+            except Exception as error:
+                message = str(error).strip() or type(error).__name__
+                issues.append(f"摄像头释放失败：{message}")
+        if ble:
+            try:
+                await asyncio.wait_for(ble.stop(), timeout=5.0)
+            except Exception as error:
+                message = str(error).strip() or type(error).__name__
+                issues.append(f"BLE 释放失败：{message}")
+        return issues
+
+    @staticmethod
+    def _video_is_healthy(video: FFmpegVideoRecorder | None) -> bool:
+        if video is None:
+            return False
+        process = getattr(video, "process", None)
+        # 测试替身没有 process；真实 FFmpeg 对象必须仍在运行。
+        return process is None or process.returncode is None
+
     def _new_video_recorder(
         self, device: str, output_path: Path | None
     ) -> FFmpegVideoRecorder:
-        """创建新的视频进程，并让前端能识别同一会话内的视频流切换。"""
+        """创建视频进程；浏览器预览通道独立于具体 FFmpeg 进程。"""
 
-        self._video_stream_id += 1
-        return FFmpegVideoRecorder(self.settings.video, device, output_path)
+        return FFmpegVideoRecorder(
+            self.settings.video,
+            device,
+            output_path,
+            preview_hub=self.preview_stream,
+        )
+
+    async def _require_prod_camera_preflight(
+        self, video: FFmpegVideoRecorder, data_tier: DataTier
+    ) -> None:
+        """正式数据必须在落盘前证明固定控制生效且真实输入接近 30 FPS。"""
+
+        if data_tier != DataTier.PROD:
+            return
+        deadline = time.monotonic() + 3.0
+        while video.source_frame_count < 15 and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        if not video.control_state.ready:
+            details = "；".join(video.control_state.errors) or "控制值未完整读回"
+            raise RuntimeError(f"正式录制摄像头固定曝光预检失败：{details}")
+        if video.source_fps < self.settings.video.prod_min_source_fps:
+            raise RuntimeError(
+                "正式录制摄像头输入帧率不足："
+                f"{video.source_fps:.2f} FPS < "
+                f"{self.settings.video.prod_min_source_fps:.2f} FPS；"
+                "请检查照明和摄像头后重试"
+            )
 
     async def _stop_consumer_locked(self) -> None:
         self._stop_consumer.set()
@@ -156,39 +275,367 @@ class RecordingCoordinator:
         finally:
             self._consumer = None
 
-    async def _start_preview_locked(self, camera_id: str | None) -> None:
-        if self.mode == "devices_preview" and self.ble and self.ble.connected:
-            return
-        if self.mode is not None or self.state in {
-            RecordingState.ARMING,
-            RecordingState.RECORDING,
-            RecordingState.FINALIZING,
-        }:
-            raise RuntimeError("当前有其他设备会话，不能开始设备预览")
-        camera = await self._resolve_camera(camera_id)
-        self.mode = "devices_preview"
-        self._monitoring_requested = True
-        self._preview_camera_id = str(camera["camera_id"])
-        self.preview_error = None
-        self.ble = CW12EUBleSource(self.settings.imu)
-        self.video = self._new_video_recorder(str(camera["device"]), None)
-        self._stop_consumer.clear()
-        self._reset_live_imu_metrics()
+    async def _open_preview_ble(self) -> CW12EUBleSource:
+        """只连接 IMU；摄像头故障不应迫使 BLE 重新连接。"""
+
+        ble = CW12EUBleSource(self.settings.imu)
         try:
-            await self.ble.start()
-            self._consumer = asyncio.create_task(self._consume_imu_preview())
-            await self.video.start()
-        except Exception as error:
-            self.preview_error = str(error)
-            await self._stop_preview_locked(preserve_request=False)
+            await asyncio.wait_for(ble.start(), timeout=20.0)
+        except BaseException:
+            await self._bounded_cleanup(None, ble, None)
             raise
+        return ble
+
+    async def _open_preview_video(
+        self, camera_id: str | None
+    ) -> tuple[dict[str, Any], FFmpegVideoRecorder]:
+        """只启动摄像头；BLE 会话在视频切换时保持不变。"""
+
+        camera = await self._resolve_camera(camera_id)
+        video = self._new_video_recorder(str(camera["device"]), None)
+        try:
+            await asyncio.wait_for(video.start(), timeout=5.0)
+        except BaseException:
+            await self._bounded_cleanup(video, None, None)
+            raise
+        return camera, video
+
+    def _start_preview_watchdog(self, operation_id: int) -> None:
+        previous = self._preview_watchdog
+        if previous and previous is not asyncio.current_task():
+            previous.cancel()
+        self._preview_watchdog = asyncio.create_task(
+            self._preview_watchdog_loop(operation_id)
+        )
+
+    async def _preview_watchdog_loop(self, operation_id: int) -> None:
+        """分别监控 IMU 与摄像头，任一故障都不得拆掉另一组件。"""
+
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                async with self._lock:
+                    if (
+                        operation_id != self._device_operation_id
+                        or self.mode != "devices_preview"
+                        or not self._monitoring_requested
+                    ):
+                        return
+                    ble_healthy = bool(self.ble and self.ble.connected)
+                    video_healthy = self._video_is_healthy(self.video)
+                    if ble_healthy and video_healthy:
+                        continue
+                reconnects: list[asyncio.Task[bool]] = []
+                if not ble_healthy:
+                    reconnects.append(
+                        asyncio.create_task(self._reconnect_preview_ble(operation_id))
+                    )
+                if not video_healthy:
+                    reconnects.append(
+                        asyncio.create_task(self._reconnect_preview_video(operation_id))
+                    )
+                if reconnects and not all(await asyncio.gather(*reconnects)):
+                    return
+        except asyncio.CancelledError:
+            return
+
+    async def _preview_operation_is_current(self, operation_id: int) -> bool:
+        async with self._lock:
+            return bool(
+                operation_id == self._device_operation_id
+                and self.mode == "devices_preview"
+                and self._monitoring_requested
+            )
+
+    async def _reconnect_preview_ble(self, operation_id: int) -> bool:
+        async with self._lock:
+            if not (
+                operation_id == self._device_operation_id
+                and self.mode == "devices_preview"
+                and self._monitoring_requested
+            ):
+                return False
+            old_ble, old_consumer = self.ble, self._consumer
+            self.ble = None
+            self._consumer = None
+            self._imu_state = "reconnecting"
+            self.device_state = DeviceSessionState.RECONNECTING
+        await self._bounded_cleanup(None, old_ble, old_consumer)
+        last_error: BaseException = RuntimeError("IMU 预览连接已断开")
+        for attempt, delay in enumerate((1.0, 2.0, 4.0), start=1):
+            self._imu_reconnect_attempt = attempt
+            self._preview_reconnect_attempt = attempt
+            await asyncio.sleep(delay)
+            if not await self._preview_operation_is_current(operation_id):
+                return False
+            try:
+                replacement = await self._open_preview_ble()
+            except Exception as error:
+                last_error = error
+                continue
+            async with self._lock:
+                if not (
+                    operation_id == self._device_operation_id
+                    and self.mode == "devices_preview"
+                    and self._monitoring_requested
+                ):
+                    accepted = False
+                else:
+                    accepted = True
+                    self.ble = replacement
+                    self._stop_consumer.clear()
+                    self._consumer = asyncio.create_task(self._consume_imu())
+                    self._imu_state = "connected"
+                    self._imu_reconnect_attempt = 0
+                    self._preview_reconnect_attempt = 0
+                    if self._video_is_healthy(self.video):
+                        self.device_state = DeviceSessionState.CONNECTED
+                        self.device_error = None
+                        self.preview_error = None
+            if accepted:
+                return True
+            await self._bounded_cleanup(None, replacement, None)
+            return False
+        async with self._lock:
+            if operation_id == self._device_operation_id:
+                self._imu_state = "error"
+                self.device_state = DeviceSessionState.ERROR
+                self._set_device_error(
+                    code="imu_reconnect_exhausted",
+                    component="ble",
+                    error=last_error,
+                    hint="摄像头会继续预览；确认 IMU 电量与占用状态后重新连接设备",
+                    retryable=True,
+                    fallback="IMU 自动重连三次均失败",
+                )
+        return False
+
+    async def _reconnect_preview_video(self, operation_id: int) -> bool:
+        async with self._lock:
+            if not (
+                operation_id == self._device_operation_id
+                and self.mode == "devices_preview"
+                and self._monitoring_requested
+            ):
+                return False
+            old_video = self.video
+            self.video = None
+            camera_id = self._preview_camera_id
+            self._video_state = "reconnecting"
+            self._video_transition = "camera_reconnect"
+            self.device_state = DeviceSessionState.RECONNECTING
+        await self._bounded_cleanup(old_video, None, None)
+        last_error: BaseException = RuntimeError("摄像头预览进程已退出")
+        for attempt, delay in enumerate((1.0, 2.0, 4.0), start=1):
+            self._video_reconnect_attempt = attempt
+            self._preview_reconnect_attempt = attempt
+            await asyncio.sleep(delay)
+            if not await self._preview_operation_is_current(operation_id):
+                return False
+            try:
+                camera, replacement = await self._open_preview_video(camera_id)
+            except Exception as error:
+                last_error = error
+                continue
+            async with self._lock:
+                if not (
+                    operation_id == self._device_operation_id
+                    and self.mode == "devices_preview"
+                    and self._monitoring_requested
+                ):
+                    accepted = False
+                else:
+                    accepted = True
+                    self.video = replacement
+                    self._preview_camera_id = str(camera["camera_id"])
+                    self._video_state = "live"
+                    self._video_transition = None
+                    self._video_reconnect_attempt = 0
+                    self._preview_reconnect_attempt = 0
+                    if self.ble and self.ble.connected:
+                        self.device_state = DeviceSessionState.CONNECTED
+                        self.device_error = None
+                        self.preview_error = None
+            if accepted:
+                return True
+            await self._bounded_cleanup(replacement, None, None)
+            return False
+        async with self._lock:
+            if operation_id == self._device_operation_id:
+                self._video_state = "error"
+                self._video_transition = None
+                self.device_state = DeviceSessionState.ERROR
+                self._set_device_error(
+                    code="camera_reconnect_exhausted",
+                    component="video",
+                    error=last_error,
+                    hint="IMU 会继续接收；检查摄像头后重新连接设备",
+                    retryable=True,
+                    fallback="摄像头自动重启三次均失败",
+                )
+        return False
 
     async def start_preview(self, request: PreviewStartRequest) -> dict[str, Any]:
         """连接 IMU 与摄像头，只在内存中提供实时预览，不创建采集文件。"""
 
         async with self._lock:
-            await self._start_preview_locked(request.camera_id)
-            return self.snapshot()
+            if self._preview_open_in_flight:
+                raise RuntimeError("已有设备连接操作正在进行，请等待其完成或清理")
+            if self.device_state in {
+                DeviceSessionState.CONNECTING,
+                DeviceSessionState.RECONNECTING,
+                DeviceSessionState.RELEASING,
+            }:
+                raise RuntimeError("设备正在连接、重连或释放，请等待当前操作完成")
+            if (
+                self.mode == "devices_preview"
+                and self.ble
+                and self.ble.connected
+                and self._video_is_healthy(self.video)
+            ):
+                return self.snapshot()
+            if self.mode not in {None, "devices_preview"} or self.state in {
+                RecordingState.ARMING,
+                RecordingState.RECORDING,
+                RecordingState.FINALIZING,
+            }:
+                raise RuntimeError("当前有其他设备会话，不能开始设备预览")
+            operation_id = self._next_device_operation(DeviceSessionState.CONNECTING)
+            if not self._monitoring_requested:
+                self.preview_stream.activate()
+            self.mode = "devices_preview"
+            self._monitoring_requested = True
+            self.device_error = None
+            self.preview_error = None
+            keep_video = self.video if self._video_is_healthy(self.video) else None
+            keep_ble = self.ble if self.ble and self.ble.connected else None
+            keep_consumer = self._consumer if keep_ble else None
+            stale_video = None if keep_video else self.video
+            stale_ble = None if keep_ble else self.ble
+            stale_consumer = None if keep_consumer else self._consumer
+            stale_watchdog = self._preview_watchdog
+            self.video = keep_video
+            self.ble = keep_ble
+            self._consumer = keep_consumer
+            self._preview_watchdog = None
+            self._imu_state = "connected" if keep_ble else "connecting"
+            self._video_state = "live" if keep_video else "starting"
+            self._video_transition = None if keep_video else "initial_preview"
+            self._preview_open_in_flight = True
+        if stale_watchdog:
+            stale_watchdog.cancel()
+        await self._bounded_cleanup(stale_video, stale_ble, stale_consumer)
+
+        opening: list[tuple[str, asyncio.Task[Any]]] = []
+        if keep_ble is None:
+            opening.append(("ble", asyncio.create_task(self._open_preview_ble())))
+        if keep_video is None:
+            opening.append(
+                (
+                    "video",
+                    asyncio.create_task(self._open_preview_video(request.camera_id)),
+                )
+            )
+        try:
+            results = await asyncio.gather(
+                *(task for _component, task in opening),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            for _component, task in opening:
+                task.cancel()
+            cancelled_results = await asyncio.gather(
+                *(task for _component, task in opening),
+                return_exceptions=True,
+            )
+            cancelled_ble = next(
+                (
+                    result
+                    for (component, _task), result in zip(
+                        opening, cancelled_results, strict=True
+                    )
+                    if component == "ble" and not isinstance(result, BaseException)
+                ),
+                None,
+            )
+            cancelled_video_result = next(
+                (
+                    result
+                    for (component, _task), result in zip(
+                        opening, cancelled_results, strict=True
+                    )
+                    if component == "video" and not isinstance(result, BaseException)
+                ),
+                None,
+            )
+            cancelled_video = (
+                cancelled_video_result[1] if cancelled_video_result is not None else None
+            )
+            await self._bounded_cleanup(cancelled_video, cancelled_ble, None)
+            async with self._lock:
+                self._preview_open_in_flight = False
+            raise
+
+        new_ble: CW12EUBleSource | None = None
+        new_video: FFmpegVideoRecorder | None = None
+        camera: dict[str, Any] | None = None
+        opening_errors: list[tuple[str, BaseException]] = []
+        for (component, _task), result in zip(opening, results, strict=True):
+            if isinstance(result, BaseException):
+                opening_errors.append((component, result))
+            elif component == "ble":
+                new_ble = result
+            else:
+                camera, new_video = result
+
+        async with self._lock:
+            self._preview_open_in_flight = False
+            cancelled = bool(
+                operation_id != self._device_operation_id
+                or self.mode != "devices_preview"
+            )
+            if not cancelled:
+                if new_ble is not None:
+                    self.ble = new_ble
+                if new_video is not None and camera is not None:
+                    self.video = new_video
+                    self._preview_camera_id = str(camera["camera_id"])
+                if self.ble and (self._consumer is None or self._consumer.done()):
+                    self._stop_consumer.clear()
+                    self._consumer = asyncio.create_task(self._consume_imu())
+                self._imu_state = (
+                    "connected" if self.ble and self.ble.connected else "error"
+                )
+                self._video_state = (
+                    "live" if self._video_is_healthy(self.video) else "error"
+                )
+                self._video_transition = None
+                if opening_errors:
+                    failed_component, error = opening_errors[0]
+                    self.device_state = DeviceSessionState.ERROR
+                    self._set_device_error(
+                        code="preview_start_failed",
+                        component=failed_component,
+                        error=error,
+                        hint="健康组件会保持运行；失败组件将自动重试三次",
+                        retryable=True,
+                        fallback="连接预览设备超时",
+                    )
+                else:
+                    self.device_state = DeviceSessionState.CONNECTED
+                    self.device_error = None
+                    self.preview_error = None
+                self._start_preview_watchdog(operation_id)
+                snapshot = self.snapshot()
+        if cancelled:
+            await self._bounded_cleanup(new_video, new_ble, None)
+            raise RuntimeError("设备连接已被释放操作取消")
+        if opening_errors:
+            _component, error = opening_errors[0]
+            raise RuntimeError(
+                self._error_message(error, "连接预览设备超时")
+            ) from error
+        return snapshot
 
     async def switch_preview_camera(
         self, request: PreviewStartRequest
@@ -196,90 +643,175 @@ class RecordingCoordinator:
         """仅重启摄像头预览；保留当前 BLE 连接和 IMU 曲线。"""
 
         async with self._lock:
+            if self._preview_open_in_flight:
+                raise RuntimeError("已有设备连接操作正在进行，请等待其完成或清理")
+            if self.device_state in {
+                DeviceSessionState.CONNECTING,
+                DeviceSessionState.RECONNECTING,
+                DeviceSessionState.RELEASING,
+            }:
+                raise RuntimeError("设备正在连接、重连或释放，请等待当前操作完成")
             if self.mode != "devices_preview" or not self.ble or not self.ble.connected:
                 raise RuntimeError("请先连接预览设备，再切换摄像头")
-            camera = await self._resolve_camera(request.camera_id)
-            camera_id = str(camera["camera_id"])
-            if camera_id == self._preview_camera_id and self.video:
-                return self.snapshot()
+            operation_id = self._next_device_operation(DeviceSessionState.CONNECTING)
+            watchdog = self._preview_watchdog
+            self._preview_watchdog = None
+            previous_video = self.video
             previous_id = self._preview_camera_id
-            previous_device = self.video.device if self.video else None
-            if self.video:
-                await self.video.stop()
-            try:
-                replacement = self._new_video_recorder(str(camera["device"]), None)
-                await replacement.start()
-            except Exception:
-                if previous_device:
+            previous_device = previous_video.device if previous_video else None
+            self.video = None
+            self._video_state = "switching"
+            self._video_transition = "camera_switch"
+        if watchdog:
+            watchdog.cancel()
+        await self._bounded_cleanup(previous_video, None, None)
+        replacement: FFmpegVideoRecorder | None = None
+        try:
+            camera, replacement = await self._open_preview_video(request.camera_id)
+            camera_id = str(camera["camera_id"])
+        except Exception as error:
+            rollback: FFmpegVideoRecorder | None = None
+            if previous_device:
+                try:
                     rollback = self._new_video_recorder(previous_device, None)
-                    await rollback.start()
+                    await asyncio.wait_for(rollback.start(), timeout=5.0)
+                except Exception:
+                    rollback = None
+            async with self._lock:
+                if operation_id == self._device_operation_id:
                     self.video = rollback
                     self._preview_camera_id = previous_id
-                raise
-            self.video = replacement
-            self._preview_camera_id = camera_id
-            self.preview_error = None
-            return self.snapshot()
+                    self._video_state = "live" if rollback else "error"
+                    self._video_transition = None
+                    self.device_state = (
+                        DeviceSessionState.CONNECTED
+                        if rollback and self.ble and self.ble.connected
+                        else DeviceSessionState.ERROR
+                    )
+                    self._set_device_error(
+                        code="camera_switch_failed",
+                        component="video",
+                        error=error,
+                        hint="摄像头切换失败；已尝试恢复原摄像头",
+                        retryable=True,
+                        fallback="摄像头切换失败",
+                    )
+                    if self.device_state == DeviceSessionState.CONNECTED:
+                        self._start_preview_watchdog(operation_id)
+            raise RuntimeError(self._error_message(error, "摄像头切换失败")) from error
+        async with self._lock:
+            cancelled = operation_id != self._device_operation_id
+            if not cancelled:
+                self.video = replacement
+                self._preview_camera_id = camera_id
+                self._video_state = "live"
+                self._video_transition = None
+                self.device_state = DeviceSessionState.CONNECTED
+                self.device_error = None
+                self.preview_error = None
+                self._start_preview_watchdog(operation_id)
+                snapshot = self.snapshot()
+        if cancelled:
+            await self._bounded_cleanup(replacement, None, None)
+            raise RuntimeError("摄像头切换已被释放操作取消")
+        return snapshot
 
-    async def _stop_preview_locked(self, *, preserve_request: bool) -> None:
-        if self.mode != "devices_preview":
-            return
-        if self.video:
-            try:
-                await self.video.stop()
-            except Exception:
-                pass
-        if self.ble:
-            try:
-                await self.ble.stop()
-            except Exception:
-                pass
-        await self._stop_consumer_locked()
-        self.ble = None
+    def _detach_preview_locked(
+        self, *, preserve_request: bool
+    ) -> tuple[
+        FFmpegVideoRecorder | None,
+        CW12EUBleSource | None,
+        asyncio.Task[Any] | None,
+        asyncio.Task[Any] | None,
+    ]:
+        resources = self.video, self.ble, self._consumer, self._preview_watchdog
         self.video = None
+        self.ble = None
+        self._consumer = None
+        self._preview_watchdog = None
         self.mode = None
         if not preserve_request:
             self._monitoring_requested = False
             self._preview_camera_id = None
+            self.preview_stream.deactivate()
+            self._imu_state = "idle"
+            self._video_state = "idle"
+            self._video_transition = None
+            self._recording_accepts_imu = False
+        return resources
 
     async def stop_preview(self) -> dict[str, Any]:
+        """幂等释放预览；即使会话已残缺也会把逻辑状态恢复为空闲。"""
+
         async with self._lock:
-            if self.mode != "devices_preview":
-                raise RuntimeError("当前没有正在运行的设备预览")
-            await self._stop_preview_locked(preserve_request=False)
-            return self.snapshot()
+            if self.mode not in {None, "devices_preview"}:
+                raise RuntimeError("正式录制或 IMU 表征正在进行，不能通过预览释放接口停止")
+            operation_id = self._next_device_operation(DeviceSessionState.RELEASING)
+            video, ble, consumer, watchdog = self._detach_preview_locked(
+                preserve_request=False
+            )
+        if watchdog and watchdog is not asyncio.current_task():
+            watchdog.cancel()
+        issues = await self._bounded_cleanup(video, ble, consumer)
+        async with self._lock:
+            if operation_id == self._device_operation_id:
+                self.device_state = DeviceSessionState.IDLE
+                self.device_error = None
+                self.preview_error = None
+                self._preview_reconnect_attempt = 0
+                self._imu_reconnect_attempt = 0
+                self._video_reconnect_attempt = 0
+            snapshot = self.snapshot()
+        if issues:
+            snapshot["release_warnings"] = issues
+        return snapshot
 
     async def shutdown(self) -> None:
-        """服务退出时释放仅用于预览的设备句柄。"""
+        """服务退出时释放设备；正式会话保留 partial 并明确标记失败。"""
 
         async with self._lock:
-            if self.mode == "devices_preview":
-                await self._stop_preview_locked(preserve_request=False)
+            mode = self.mode
+            current = self.current
+        if mode in {None, "devices_preview"}:
+            await self.stop_preview()
+            return
+        if current and self.state in {RecordingState.ARMING, RecordingState.RECORDING}:
+            await self._fail_running_session_on_disconnect(
+                current.recording_id, mode, reason="service_shutdown"
+            )
+            return
+        async with self._lock:
+            video, ble, consumer = self.video, self.ble, self._consumer
+            self.video = None
+            self.ble = None
+            self._consumer = None
+            if self.writer:
+                self.writer.abort_close()
+            self.writer = None
+            self.mode = None
+            self.device_state = DeviceSessionState.IDLE
+            self.preview_stream.deactivate()
+            self._imu_state = "idle"
+            self._video_state = "idle"
+            self._video_transition = None
+            self._recording_accepts_imu = False
+        await self._bounded_cleanup(video, ble, consumer)
 
     async def _consume_imu_preview(self) -> None:
-        assert self.ble is not None
-        while not self._stop_consumer.is_set() or not self.ble.queue.empty():
-            try:
-                packet = await asyncio.wait_for(self.ble.queue.get(), timeout=0.25)
-            except TimeoutError:
-                continue
-            self.packet_count += 1
-            if self._first_packet_ns is None:
-                self._first_packet_ns = packet.receive_time_ns
-            try:
-                parsed = parse_notification(
-                    packet.payload, self.settings.imu.frame_size_bytes
-                )
-            except ValueError:
-                self.preview_parse_errors += 1
-                continue
-            self.latest_packet_samples = parsed.sample_count
-            self.sample_count += parsed.sample_count
-            if parsed.sample_count:
-                self.latest_raw = parsed.raw_counts[-1].copy()
+        """旧测试入口；实际预览与录制共用同一个常驻通知泵。"""
+
+        await self._consume_imu()
 
     async def start(self, request: RecordingStartRequest) -> RecordingSummary:
         async with self._lock:
+            if self._preview_open_in_flight:
+                raise RuntimeError("预览设备仍在连接或清理，暂不能开始录制")
+            if self.device_state in {
+                DeviceSessionState.CONNECTING,
+                DeviceSessionState.RECONNECTING,
+                DeviceSessionState.RELEASING,
+            }:
+                raise RuntimeError("设备正在连接、重连或释放，暂不能开始录制")
             if self.state not in {
                 RecordingState.IDLE,
                 RecordingState.READY,
@@ -291,17 +823,64 @@ class RecordingCoordinator:
             self._check_disk()
             camera = await self._resolve_camera(request.camera_id)
             retained_ble = None
+            camera_was_previewed = False
             if self.mode == "devices_preview":
-                if self.video:
-                    await self.video.stop()
-                await self._stop_consumer_locked()
+                self._next_device_operation(DeviceSessionState.CONNECTING)
+                watchdog = self._preview_watchdog
+                self._preview_watchdog = None
+                if watchdog:
+                    watchdog.cancel()
+                preview_video = self.video
+                camera_was_previewed = self._video_is_healthy(preview_video)
+                if preview_video:
+                    await self._require_prod_camera_preflight(
+                        preview_video, request.data_tier
+                    )
                 retained_ble = self.ble if self.ble and self.ble.connected else None
                 self.video = None
                 self.mode = None
+                self._video_state = "switching"
+                self._video_transition = "arming_recording"
+                await self._bounded_cleanup(preview_video, None, None)
+            else:
+                self._next_device_operation(DeviceSessionState.CONNECTING)
+                if not self._monitoring_requested:
+                    self.preview_stream.activate()
             self._monitoring_requested = True
             self._preview_camera_id = str(camera["camera_id"])
             self.preview_error = None
             self.mode = "capture"
+            self.device_state = DeviceSessionState.CONNECTING
+            self.state = RecordingState.ARMING
+            self.current = None
+            self.writer = None
+            self.ble = retained_ble or CW12EUBleSource(self.settings.imu)
+            self._stop_consumer.clear()
+            self._recording_accepts_imu = False
+            try:
+                if not retained_ble:
+                    await asyncio.wait_for(self.ble.start(), timeout=20.0)
+                    self._imu_state = "connected"
+                if self._consumer is None or self._consumer.done():
+                    self._consumer = asyncio.create_task(self._consume_imu())
+                if not camera_was_previewed:
+                    camera_probe = self._new_video_recorder(
+                        str(camera["device"]), None
+                    )
+                    self.video = camera_probe
+                    await asyncio.wait_for(camera_probe.start(), timeout=5.0)
+                    await self._require_prod_camera_preflight(
+                        camera_probe, request.data_tier
+                    )
+                    probe_cleanup_issues = await self._bounded_cleanup(
+                        camera_probe, None, None
+                    )
+                    if probe_cleanup_issues:
+                        raise RuntimeError("；".join(probe_cleanup_issues))
+                    self.video = None
+            except Exception as error:
+                await self._abort_start(error)
+                raise
             now = datetime.now(UTC)
             recording_id = f"{now.strftime('%Y%m%dT%H%M%S.%fZ')}_{request.participant_id}"
             directory = self.settings.data_root / request.collection_id / recording_id
@@ -320,7 +899,6 @@ class RecordingCoordinator:
                 mkv_path=str(mkv_partial),
             )
             self.current = summary
-            self.state = RecordingState.ARMING
             self.catalog.upsert(summary)
             self.writer = CaptureH5Writer(
                 h5_partial,
@@ -338,12 +916,11 @@ class RecordingCoordinator:
                     "usb_interface": str(camera["interface"]),
                 }
             )
-            self.ble = retained_ble or CW12EUBleSource(self.settings.imu)
             self.video = self._new_video_recorder(
                 str(camera["device"]), mkv_partial
             )
-            self._stop_consumer.clear()
-            self._reset_live_imu_metrics()
+            self._video_state = "switching"
+            self._video_transition = "arming_recording"
             try:
                 if retained_ble:
                     self.ble.dropped_callback_packets = 0
@@ -351,21 +928,30 @@ class RecordingCoordinator:
                         "ble_reused_from_preview", time.monotonic_ns()
                     )
                 else:
-                    await self.ble.start()
                     self.writer.append_connection_event(
                         "ble_connected", time.monotonic_ns()
                     )
                 await self.video.start()
+                if (
+                    self.current.data_tier == DataTier.PROD
+                    and not self.video.control_state.ready
+                ):
+                    details = "；".join(self.video.control_state.errors)
+                    raise RuntimeError(f"正式录制摄像头控制未生效：{details}")
                 capture_start_ns = self.video.started_monotonic_ns or time.monotonic_ns()
                 capture_started_at = datetime.now(UTC).isoformat()
                 self.writer.set_recording_start(
                     capture_start_ns, capture_started_at
                 )
-                self._consumer = asyncio.create_task(self._consume_imu())
+                self._recording_accepts_imu = True
+                self._video_state = "live"
+                self._video_transition = None
             except Exception as error:
                 await self._abort_start(error)
                 raise
             self.state = RecordingState.RECORDING
+            self.device_state = DeviceSessionState.CONNECTED
+            self.device_error = None
             self.current = summary.model_copy(
                 update={"state": self.state, "started_at_utc": capture_started_at}
             )
@@ -373,52 +959,172 @@ class RecordingCoordinator:
             return self.current
 
     async def _abort_start(self, error: Exception) -> None:
-        if self.video:
-            try:
-                await self.video.stop()
-            except Exception:
-                pass
-        if self.ble:
-            try:
-                await self.ble.stop()
-            except Exception:
-                pass
-        if self._consumer:
+        video = self.video
+        preserve_ble = bool(
+            self._monitoring_requested
+            and self.ble
+            and self.ble.connected
+            and self._consumer
+            and not self._consumer.done()
+        )
+        ble = None if preserve_ble else self.ble
+        consumer = None if preserve_ble else self._consumer
+        self.video = None
+        self._recording_accepts_imu = False
+        if not preserve_ble:
+            self.ble = None
+            self._consumer = None
             self._stop_consumer.set()
-            self._consumer.cancel()
-            await asyncio.gather(self._consumer, return_exceptions=True)
+        await self._bounded_cleanup(video, ble, consumer)
         if self.writer:
             self.writer.abort_close()
+        self.writer = None
         self.state = RecordingState.FAILED
+        message = self._error_message(error, "设备准备超时")
         if self.current:
             self.current = self.current.model_copy(
-                update={"state": self.state, "issues": [str(error)]}
+                update={"state": self.state, "issues": [message]}
             )
             if self.mode == "capture":
                 self.catalog.upsert(self.current)
-        self.mode = None
+        self.mode = "devices_preview" if preserve_ble else None
+        if not preserve_ble:
+            self._monitoring_requested = False
+            self.preview_stream.deactivate()
+            self._imu_state = "idle"
+        self._video_state = "error"
+        self._video_transition = None
+        self.device_state = DeviceSessionState.ERROR
+        self._set_device_error(
+            code="session_start_failed",
+            component="ble_video",
+            error=error,
+            hint="确认 IMU 和摄像头可用后重新开始；失败的 partial 文件不能用于训练",
+            retryable=True,
+            fallback="正式会话设备准备超时",
+        )
 
     async def _consume_imu(self) -> None:
-        assert self.ble is not None and self.writer is not None
-        while not self._stop_consumer.is_set() or not self.ble.queue.empty():
+        ble = self.ble
+        assert ble is not None
+        while not self._stop_consumer.is_set() or not ble.queue.empty():
             try:
-                packet = await asyncio.wait_for(self.ble.queue.get(), timeout=0.25)
+                packet = await asyncio.wait_for(ble.queue.get(), timeout=0.25)
             except TimeoutError:
+                if (
+                    not self._stop_consumer.is_set()
+                    and not ble.connected
+                    and getattr(ble, "disconnect_reason", None) != "local_stop"
+                    and self.current
+                    and self.mode in {"capture", "characterization"}
+                    and self.state in {RecordingState.ARMING, RecordingState.RECORDING}
+                ):
+                    asyncio.create_task(
+                        self._fail_running_session_on_disconnect(
+                            self.current.recording_id, self.mode
+                        )
+                    )
+                    return
                 continue
-            if packet.receive_time_ns < self.writer.recording_start_monotonic_ns:
-                continue
-            parsed_count = self.writer.append_notification(
-                packet.payload, packet.receive_time_ns
-            )
             self.packet_count += 1
             if self._first_packet_ns is None:
                 self._first_packet_ns = packet.receive_time_ns
-            self.sample_count += parsed_count
-            self.latest_packet_samples = parsed_count
-            if parsed_count:
-                self.latest_raw = np.asarray(
-                    self.writer.handle["imu/samples/raw_counts"][-1], dtype=np.int16
+            writer = self.writer
+            if (
+                self._recording_accepts_imu
+                and writer is not None
+                and packet.receive_time_ns >= writer.recording_start_monotonic_ns
+            ):
+                writer.append_notification(packet.payload, packet.receive_time_ns)
+            packet_kind = classify_notification(
+                packet.payload, self.settings.imu.frame_size_bytes
+            )
+            if packet_kind == NotificationKind.AUXILIARY_STATUS:
+                continue
+            if packet_kind == NotificationKind.UNKNOWN_INVALID:
+                self.preview_parse_errors += 1
+                continue
+            try:
+                parsed = parse_notification(
+                    packet.payload, self.settings.imu.frame_size_bytes
                 )
+            except ValueError:
+                self.preview_parse_errors += 1
+                continue
+            self.latest_packet_samples = parsed.sample_count
+            self.sample_count += parsed.sample_count
+            if parsed.sample_count:
+                self.latest_raw = parsed.raw_counts[-1].copy()
+
+    async def _fail_running_session_on_disconnect(
+        self,
+        recording_id: str,
+        expected_mode: str | None,
+        *,
+        reason: str = "ble_disconnect",
+    ) -> None:
+        """正式会话意外断开时停止媒体并保留 partial，绝不静默继续录制。"""
+
+        async with self._lock:
+            if (
+                self.state not in {RecordingState.ARMING, RecordingState.RECORDING}
+                or not self.current
+                or self.current.recording_id != recording_id
+                or self.mode != expected_mode
+            ):
+                return
+            service_shutdown = reason == "service_shutdown"
+            message = (
+                "后端服务在正式会话中停止；已保留 partial 文件"
+                if service_shutdown
+                else "BLE 在正式会话中意外断开；已停止并保留 partial 文件"
+            )
+            video, ble, writer = self.video, self.ble, self.writer
+            self.video = None
+            self.ble = None
+            self.writer = None
+            self._consumer = None
+            self._stop_consumer.set()
+            self.state = RecordingState.FAILED
+            self.current = self.current.model_copy(
+                update={
+                    "state": self.state,
+                    "ended_at_utc": datetime.now(UTC).isoformat(),
+                    "issues": list(dict.fromkeys([*self.current.issues, message])),
+                }
+            )
+            if expected_mode == "capture":
+                self.catalog.upsert(self.current)
+            if writer:
+                try:
+                    writer.append_connection_event(reason, time.monotonic_ns())
+                except Exception:
+                    pass
+                writer.abort_close()
+            self.mode = None
+            self._monitoring_requested = False
+            self.device_state = DeviceSessionState.ERROR
+            self._set_device_error(
+                code=(
+                    "service_shutdown_during_session"
+                    if service_shutdown
+                    else "ble_disconnected_during_session"
+                ),
+                component="service" if service_shutdown else "ble",
+                error=RuntimeError(message),
+                hint=(
+                    "重启服务后重新采集；该 partial 禁止训练"
+                    if service_shutdown
+                    else "检查固定与电量，重新连接预览并重新采集；该 partial 禁止训练"
+                ),
+                retryable=True,
+                fallback=(
+                    "正式会话期间服务停止"
+                    if service_shutdown
+                    else "正式会话 BLE 意外断开"
+                ),
+            )
+        await self._bounded_cleanup(video, ble, None)
 
     async def stop(self) -> RecordingSummary:
         async with self._lock:
@@ -429,35 +1135,29 @@ class RecordingCoordinator:
             ):
                 raise RuntimeError("no active recording")
             self.state = RecordingState.FINALIZING
+            self.device_state = DeviceSessionState.RELEASING
             capture_ended_at = datetime.now(UTC).isoformat()
             self.current = self.current.model_copy(update={"state": self.state})
             self.catalog.upsert(self.current)
             issues: list[str] = []
             assert self.video and self.ble and self.writer
+            capture_video = self.video
+            capture_ble = self.ble
+            capture_writer = self.writer
+            self._recording_accepts_imu = False
+            self.video = None
+            self._video_state = "switching"
+            self._video_transition = "finalizing_recording"
             try:
-                await self.video.stop()
+                await capture_video.stop()
             except Exception as error:
                 issues.append(str(error))
             try:
-                self.writer.append_connection_event(
-                    "ble_stop_requested", time.monotonic_ns()
-                )
-                await self.ble.stop()
-                self.writer.append_connection_event(
-                    "ble_disconnected", time.monotonic_ns()
+                capture_writer.append_connection_event(
+                    "ble_retained_after_capture", time.monotonic_ns()
                 )
             except Exception as error:
                 issues.append(str(error))
-            self._stop_consumer.set()
-            if self._consumer:
-                try:
-                    await asyncio.wait_for(self._consumer, timeout=3.0)
-                except TimeoutError:
-                    issues.append("IMU 写入任务未在 3 秒内停止，已强制取消")
-                    self._consumer.cancel()
-                    await asyncio.gather(self._consumer, return_exceptions=True)
-                finally:
-                    self._consumer = None
 
             partial_h5 = Path(self.current.h5_path or "")
             partial_mkv = Path(self.current.mkv_path or "")
@@ -467,15 +1167,15 @@ class RecordingCoordinator:
                 partial_mkv.name.replace(".partial.mkv", ".normalizing.mkv")
             )
             try:
-                rate, _residual = self.writer.reconstruct_times()
+                rate, _residual = capture_writer.reconstruct_times()
                 self.observed_rate_hz = rate
-                self.writer.handle["imu"].attrs["callback_drops"] = (
-                    self.ble.dropped_callback_packets
+                capture_writer.handle["imu"].attrs["callback_drops"] = (
+                    capture_ble.dropped_callback_packets
                 )
                 if not partial_mkv.is_file() or partial_mkv.stat().st_size == 0:
                     raise ValueError("FFmpeg produced no MKV data")
                 frame_table = await probe_video_frames(
-                    partial_mkv, self.writer.recording_start_monotonic_ns
+                    partial_mkv, capture_writer.recording_start_monotonic_ns
                 )
                 await normalize_video_timeline(partial_mkv, normalizing_mkv)
                 normalized_table = await probe_video_frames(
@@ -489,7 +1189,7 @@ class RecordingCoordinator:
                 ):
                     raise RuntimeError("MKV 重封装前后的帧数量或逐帧时间间隔不一致")
                 normalizing_mkv.replace(final_mkv)
-                self.writer.write_video_frames(
+                capture_writer.write_video_frames(
                     pts_monotonic_ns=frame_table.pts_monotonic_ns,
                     media_time_ns=(
                         frame_table.pts_monotonic_ns - frame_table.pts_monotonic_ns[0]
@@ -501,30 +1201,64 @@ class RecordingCoordinator:
                     width=frame_table.width,
                     height=frame_table.height,
                     requested_fps=self.settings.video.requested_fps,
-                    ffmpeg_diagnostics=self.video.progress.errors,
+                    ffmpeg_diagnostics=capture_video.progress.errors,
+                    camera_controls_requested=capture_video.control_state.requested,
+                    camera_controls_effective=capture_video.control_state.effective,
+                    camera_control_errors=capture_video.control_state.errors,
                 )
-                self.writer.write_sync([])
-                self.writer.finish(ended_at_utc=capture_ended_at)
+                span_fps = (
+                    (len(frame_table.pts_monotonic_ns) - 1)
+                    * 1e9
+                    / (
+                        frame_table.pts_monotonic_ns[-1]
+                        - frame_table.pts_monotonic_ns[0]
+                    )
+                    if len(frame_table.pts_monotonic_ns) > 1
+                    and frame_table.pts_monotonic_ns[-1]
+                    > frame_table.pts_monotonic_ns[0]
+                    else 0.0
+                )
+                if (
+                    self.current.data_tier == DataTier.PROD
+                    and span_fps < self.settings.video.prod_min_span_fps
+                ):
+                    issues.append(
+                        "正式录制视频全程帧率不足："
+                        f"{span_fps:.2f} FPS < "
+                        f"{self.settings.video.prod_min_span_fps:.2f} FPS"
+                    )
+                capture_writer.write_sync([])
+                capture_writer.finish(ended_at_utc=capture_ended_at)
                 partial_h5.replace(final_h5)
                 partial_mkv.unlink(missing_ok=True)
             except Exception as error:
                 issues.append(str(error))
-                self.writer.abort_close()
+                capture_writer.abort_close()
+            finally:
+                # 后续验证和预览恢复都不应再持有采集 writer。即使文件收尾失败，
+                # abort_close() 也会在这里之前尽最大努力释放 H5 写锁。
+                self.writer = None
 
-            report = (
-                validate_capture_h5(final_h5, self.taxonomy)
-                if final_h5.is_file()
-                else None
-            )
-            if report and report.issues:
-                issues.extend(report.issues)
-            if final_h5.is_file():
-                with h5py.File(final_h5, "r") as handle:
-                    duration_ns = int(handle.attrs.get("duration_ns", 0))
-                    ended_at = str(handle.attrs.get("ended_at_utc", datetime.now(UTC).isoformat()))
-            else:
-                duration_ns = None
-                ended_at = datetime.now(UTC).isoformat()
+            duration_ns: int | None = None
+            ended_at = capture_ended_at
+            try:
+                report = (
+                    validate_capture_h5(final_h5, self.taxonomy)
+                    if final_h5.is_file()
+                    else None
+                )
+                if report and report.issues:
+                    issues.extend(report.issues)
+                if final_h5.is_file():
+                    with h5py.File(final_h5, "r") as handle:
+                        duration_ns = int(handle.attrs.get("duration_ns", 0))
+                        ended_at = str(
+                            handle.attrs.get("ended_at_utc", capture_ended_at)
+                        )
+            except Exception as error:
+                # 文件已经原子改名后，验证失败属于“需要处理”，不能让会话永久
+                # 停留在 finalizing。具体错误会随目录记录保留下来。
+                issues.append(f"H5 收尾验证失败：{self._error_message(error, '未知错误')}")
             issues = list(dict.fromkeys(issues))
             final_state = RecordingState.READY if not issues else RecordingState.NEEDS_ATTENTION
             self.state = final_state
@@ -539,23 +1273,60 @@ class RecordingCoordinator:
                 }
             )
             self.catalog.upsert(self.current)
-            self.mode = None
-            self.ble = None
-            self.video = None
-            self.writer = None
+            self.mode = "devices_preview"
+
+            # 必须在 H5 已关闭、最终路径和目录终态均已写回之后，才能创建新的
+            # FFmpeg 预览进程，避免子进程继承采集文件描述符及其写锁。
+            preview_restore_error: Exception | None = None
+            self._video_transition = "restoring_preview"
+            try:
+                camera, preview_video = await self._open_preview_video(
+                    self._preview_camera_id
+                )
+                self.video = preview_video
+                self._preview_camera_id = str(camera["camera_id"])
+                self._video_state = "live"
+                self._video_transition = None
+            except Exception as error:
+                preview_restore_error = error
+                self._video_state = "error"
+                self._video_transition = None
+            self._imu_state = "connected" if capture_ble.connected else "error"
+            self.device_state = (
+                DeviceSessionState.CONNECTED
+                if capture_ble.connected and self._video_is_healthy(self.video)
+                else DeviceSessionState.RECONNECTING
+            )
+            if preview_restore_error is not None:
+                self._set_device_error(
+                    code="camera_restore_failed",
+                    component="video",
+                    error=preview_restore_error,
+                    hint="录制文件不受影响；摄像头将独立重试三次",
+                    retryable=True,
+                    fallback="录制后摄像头预览恢复失败",
+                )
             if self._monitoring_requested:
-                try:
-                    await self._start_preview_locked(self._preview_camera_id)
-                except Exception as error:
-                    self.preview_error = f"录制已完成，但自动恢复设备预览失败：{error}"
+                self._start_preview_watchdog(self._device_operation_id)
             return self.current
+
+    async def _restore_preview_after_session(self, camera_id: str | None) -> None:
+        """录制或表征结束后恢复常驻预览；失败信息由 start_preview 统一记录。"""
+
+        try:
+            await self.start_preview(PreviewStartRequest(camera_id=camera_id))
+        except Exception:
+            return
 
     async def start_characterization(
         self, request: CharacterizationStartRequest
     ) -> dict[str, Any]:
+        if self.mode == "devices_preview":
+            previous_camera_id = self._preview_camera_id
+            await self.stop_preview()
+            self._monitoring_requested = True
+            self._preview_camera_id = previous_camera_id
         async with self._lock:
-            if self.mode == "devices_preview":
-                await self._stop_preview_locked(preserve_request=True)
             if self.state not in {
                 RecordingState.IDLE,
                 RecordingState.READY,
@@ -592,6 +1363,7 @@ class RecordingCoordinator:
             )
             self.mode = "characterization"
             self.state = RecordingState.ARMING
+            self._next_device_operation(DeviceSessionState.CONNECTING)
             self.writer = CaptureH5Writer(
                 partial_h5,
                 capture_request,
@@ -619,6 +1391,8 @@ class RecordingCoordinator:
                 await self._abort_start(error)
                 raise
             self.state = RecordingState.RECORDING
+            self.device_state = DeviceSessionState.CONNECTED
+            self.device_error = None
             self.current = self.current.model_copy(update={"state": self.state})
             return self.characterization_snapshot()
 
@@ -667,15 +1441,17 @@ class RecordingCoordinator:
             ):
                 raise RuntimeError("当前没有正在进行的 IMU 表征")
             self.state = RecordingState.FINALIZING
+            self.device_state = DeviceSessionState.RELEASING
             issues: list[str] = []
             if self.current_stage is not None:
                 self._close_characterization_stage()
             assert self.ble is not None and self.writer is not None
+            stopped_ble = self.ble
             try:
                 self.writer.append_connection_event(
                     "ble_stop_requested", time.monotonic_ns()
                 )
-                await self.ble.stop()
+                await asyncio.wait_for(self.ble.stop(), timeout=5.0)
                 self.writer.append_connection_event(
                     "ble_disconnected", time.monotonic_ns()
                 )
@@ -700,7 +1476,7 @@ class RecordingCoordinator:
                 rate, _residual = self.writer.reconstruct_times()
                 self.observed_rate_hz = rate
                 self.writer.handle["imu"].attrs["callback_drops"] = (
-                    self.ble.dropped_callback_packets
+                    stopped_ble.dropped_callback_packets
                 )
                 self.writer.write_sync([])
                 self.writer.finish()
@@ -737,6 +1513,13 @@ class RecordingCoordinator:
             }
             self.last_characterization = result
             self.mode = None
+            self.ble = None
+            self.writer = None
+            self.device_state = DeviceSessionState.IDLE
+            if self._monitoring_requested:
+                asyncio.create_task(
+                    self._restore_preview_after_session(self._preview_camera_id)
+                )
             return result
 
     def characterization_snapshot(self) -> dict[str, Any]:
@@ -783,7 +1566,16 @@ class RecordingCoordinator:
         return output
 
     def snapshot(self) -> dict[str, Any]:
-        video = self.video.progress if self.video else None
+        video = self.video
+        preview_stream = self.preview_stream.snapshot()
+        video_progress = video.progress if video else None
+        source_fps = (
+            float(getattr(video, "source_fps", getattr(video_progress, "fps", 0.0)))
+            if video
+            else 0.0
+        )
+        preview_fps = float(getattr(video, "preview_fps", 0.0)) if video else 0.0
+        control_state = getattr(video, "control_state", None) if video else None
         ble = self.ble
         now_ns = time.monotonic_ns()
         packet_span_seconds = (
@@ -797,9 +1589,28 @@ class RecordingCoordinator:
             "session_type": self.mode,
             "monitoring_requested": self._monitoring_requested,
             "preview_error": self.preview_error,
+            "device": {
+                "state": self.device_state.value,
+                "operation_id": self._device_operation_id,
+                "operation_age_ms": (
+                    (now_ns - self._device_operation_started_ns) / 1e6
+                    if self._device_operation_started_ns is not None
+                    else None
+                ),
+                "reconnect_attempt": max(
+                    self._preview_reconnect_attempt,
+                    self._imu_reconnect_attempt,
+                    self._video_reconnect_attempt,
+                ),
+                "reconnect_max_attempts": 3,
+                "error": self.device_error,
+            },
             "recording": self.current.model_dump(mode="json") if self.current else None,
             "imu": {
                 "connected": bool(ble and ble.connected),
+                "session_state": self._imu_state,
+                "notifying": bool(ble and getattr(ble, "notifying", ble.connected)),
+                "reconnect_attempt": self._imu_reconnect_attempt,
                 "raw": self.latest_raw.astype(int).tolist(),
                 "packet_count": self.packet_count,
                 "sample_count": self.sample_count,
@@ -824,12 +1635,30 @@ class RecordingCoordinator:
                 "observed_rate_hz": self.observed_rate_hz,
             },
             "video": {
-                "frame": video.frame if video else 0,
-                "fps": video.fps if video else 0.0,
-                "bitrate": video.bitrate if video else "0",
-                "speed": video.speed if video else "0x",
+                "frame": (
+                    int(getattr(video, "frame", getattr(video_progress, "frame", 0)))
+                    if video
+                    else 0
+                ),
+                "fps": source_fps,
+                "source_fps": source_fps,
+                "preview_fps": preview_fps,
+                "requested_fps": self.settings.video.requested_fps,
+                "preview_fps_limit": self.settings.video.preview_fps,
+                "camera_controls_ready": bool(
+                    getattr(control_state, "ready", False)
+                ),
+                "camera_control_errors": list(
+                    getattr(control_state, "errors", [])
+                ),
+                "bitrate": str(getattr(video, "bitrate", "0")) if video else "0",
+                "speed": str(getattr(video, "speed", "0x")) if video else "0x",
                 "preview_only": self.mode == "devices_preview",
-                "stream_id": self._video_stream_id,
+                "stream_id": preview_stream.session_id,
+                "preview_ready": bool(preview_stream.active and preview_stream.jpeg),
+                "session_state": self._video_state,
+                "transition": self._video_transition,
+                "reconnect_attempt": self._video_reconnect_attempt,
             },
             "free_disk_gib": free_gib,
             "characterization": self.characterization_snapshot()
@@ -1110,18 +1939,87 @@ class RecordingCoordinator:
         try:
             updating = updating.model_copy(update={"upload_state": "uploading"})
             self.catalog.upsert(updating)
-            manifest = await publish_recording(updating, self.settings, self.object_store)
+            manifest, manifest_generation = await publish_recording(
+                updating, self.settings, self.object_store
+            )
             updating = updating.model_copy(update={"upload_state": "verifying"})
             self.catalog.upsert(updating)
             manifest_key = f"captures/{recording_id}/manifest.json"
             if self.object_store.stat(manifest_key) is None:
                 raise RuntimeError("远端 manifest 验证失败")
-            updating = updating.model_copy(update={"upload_state": "published"})
+            updating = updating.model_copy(
+                update={
+                    "upload_state": "uploaded",
+                    "index_state": "pending",
+                    "index_message": "已上传 Bucket，等待标注端扫描并回执",
+                    "manifest_generation": manifest_generation,
+                }
+            )
             self.catalog.upsert(updating)
-            return manifest.model_dump(mode="json")
+            return {
+                **manifest.model_dump(mode="json"),
+                "manifest_generation": manifest_generation,
+                "upload_state": "uploaded",
+                "index_state": "pending",
+            }
         except Exception:
             self.catalog.upsert(updating.model_copy(update={"upload_state": "failed"}))
             raise
+
+    async def refresh_publish_status(self, recording_id: str) -> RecordingSummary:
+        """读取标注端回执，严格区分上传成功与实际进入标注索引。"""
+
+        summary = self._required_summary(recording_id)
+        if summary.upload_state not in {"uploaded", "published"}:
+            return summary
+        if summary.manifest_generation is None:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": "旧发布记录缺少 manifest generation，需重新录制并发布",
+                }
+            )
+            self.catalog.upsert(updated)
+            return updated
+        key = f"index-receipts/{recording_id}.json"
+        try:
+            payload, _generation = await asyncio.to_thread(
+                self.object_store.read_json, key
+            )
+            receipt = IndexReceipt.model_validate(payload)
+        except FileNotFoundError:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": "已上传 Bucket，等待标注端扫描",
+                }
+            )
+        except ValueError as error:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": f"索引回执格式无效：{error}",
+                }
+            )
+        else:
+            if receipt.manifest_generation != summary.manifest_generation:
+                updated = summary.model_copy(
+                    update={
+                        "index_state": "pending",
+                        "index_message": "回执属于另一版 manifest，等待标注端处理当前版本",
+                    }
+                )
+            else:
+                updated = summary.model_copy(
+                    update={
+                        "index_state": (
+                            "indexed" if receipt.status == "indexed" else "rejected"
+                        ),
+                        "index_message": receipt.message or receipt.code,
+                    }
+                )
+        self.catalog.upsert(updated)
+        return updated
 
     def publish_estimate(self, recording_id: str) -> dict[str, int | str]:
         summary = self._required_summary(recording_id)

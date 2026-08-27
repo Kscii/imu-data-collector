@@ -21,6 +21,17 @@ class RecordingState(StrEnum):
     FAILED = "failed"
 
 
+class DeviceSessionState(StrEnum):
+    """独立于录制生命周期的本机硬件会话状态。"""
+
+    IDLE = "idle"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+    RELEASING = "releasing"
+    ERROR = "error"
+
+
 class ReviewWorkflowState(StrEnum):
     """标注快照的当前工作流状态；不保存逐次修订历史。"""
 
@@ -205,6 +216,8 @@ class SyncDocument(BaseModel):
     policy: Literal["conditional_fixed_offset_v1"] = "conditional_fixed_offset_v1"
     apply_fixed_offset: bool = False
     reviewer_id: str | None = None
+    # 本地采集端仍把乐观锁随同步文档传递；公网标注端额外要求
+    # SyncSaveRequest.expected_revision，不能依赖此兼容字段。
     expected_revision: int | None = Field(default=None, ge=0, exclude=True)
 
     @model_validator(mode="after")
@@ -219,6 +232,19 @@ class SourceArtifact(BaseModel):
     filename: str
     size_bytes: int = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TrainingExportReference(BaseModel):
+    """当前 review 唯一有效的不可变训练导出。"""
+
+    source_review_revision: int = Field(ge=0)
+    object_key: str = Field(min_length=1, max_length=1024)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    logical_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(gt=0)
+    calibration_profile_id: str = Field(min_length=1, max_length=160)
+    calibration_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at_utc: str
 
 
 class ReviewWorkflow(BaseModel):
@@ -241,13 +267,14 @@ class ReviewWorkflow(BaseModel):
 class ReviewDocument(BaseModel):
     """原始 H5/MKV 之外唯一可变的同步、标注与审核快照。"""
 
-    schema_version: Literal["1.0.0"] = "1.0.0"
+    schema_version: Literal["1.0.0", "1.1.0"] = "1.1.0"
     recording_id: str
     revision: int = Field(default=0, ge=0)
     sources: list[SourceArtifact]
     sync: SyncDocument
     annotations: AnnotationDocument
     workflow: ReviewWorkflow = Field(default_factory=ReviewWorkflow)
+    active_export: TrainingExportReference | None = None
 
 
 class ReviewWorkflowRequest(BaseModel):
@@ -280,6 +307,20 @@ class TrainingReleaseRevokeRequest(BaseModel):
 
 class RevisionRequest(BaseModel):
     expected_revision: int = Field(ge=0)
+
+
+class AnnotationSaveRequest(BaseModel):
+    """带 review 乐观锁的正式标注保存请求。"""
+
+    expected_revision: int = Field(ge=0)
+    document: AnnotationDocument
+
+
+class SyncSaveRequest(BaseModel):
+    """带 review 乐观锁的正式同步保存请求。"""
+
+    expected_revision: int = Field(ge=0)
+    document: SyncDocument
 
 
 class QuarantineRequest(BaseModel):
@@ -393,6 +434,11 @@ class RecordingSummary(BaseModel):
     mkv_path: str | None = None
     issues: list[str] = Field(default_factory=list)
     upload_state: str = "not_requested"
+    index_state: Literal["not_requested", "pending", "indexed", "rejected"] = (
+        "not_requested"
+    )
+    index_message: str = ""
+    manifest_generation: int | None = None
 
 
 class ArtifactDescriptor(BaseModel):
@@ -407,18 +453,36 @@ class ArtifactDescriptor(BaseModel):
 
 
 class CalibrationProfile(BaseModel):
-    """录制时生效的物理尺度配置；未验证时禁止训练导出。"""
+    """录制时冻结的设备专属校准档案；未验证时禁止训练导出。"""
 
     profile_id: str = "unverified"
     verified: bool = False
     accel_counts_per_g: float | None = Field(default=None, gt=0)
     gyro_counts_per_dps: float | None = Field(default=None, gt=0)
+    accel_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gyro_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    raw_axis_order: tuple[int, int, int] = (0, 1, 2)
+    axis_signs: tuple[Literal[-1, 1], Literal[-1, 1], Literal[-1, 1]] = (1, 1, 1)
+    method: str = "unverified"
+    evidence_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_transform(self) -> CalibrationProfile:
+        if sorted(self.raw_axis_order) != [0, 1, 2]:
+            raise ValueError("raw_axis_order 必须是 0、1、2 的排列")
+        if self.verified and (
+            self.profile_id == "unverified"
+            or self.accel_counts_per_g is None
+            or self.gyro_counts_per_dps is None
+        ):
+            raise ValueError("已验证校准必须具有档案 ID 和两个物理尺度")
+        return self
 
 
 class CaptureManifestV2(BaseModel):
     """采集端与标注端之间唯一稳定的公开交接合同。"""
 
-    schema_version: Literal["2.0.0"] = "2.0.0"
+    schema_version: Literal["2.0.0", "2.1.0"] = "2.1.0"
     recording_id: str
     collection_id: str
     participant_id: str
@@ -441,6 +505,44 @@ class CaptureManifestV2(BaseModel):
         if any(not item.object_key.startswith(prefix) for item in self.artifacts):
             raise ValueError("manifest 制品对象键必须位于本录制前缀")
         return self
+
+
+class AnnotationCapabilities(BaseModel):
+    """标注端写入 Bucket、供采集端在上传前读取的能力合同。"""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    accepted_manifest_schema_versions: list[str]
+    accepted_capture_h5_schema_versions: list[str]
+    annotation_build_id: str
+    generated_at_utc: str
+
+
+class IndexReceipt(BaseModel):
+    """一个 manifest 被标注端实际接收或拒绝的可查询回执。"""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    recording_id: str
+    manifest_generation: int
+    status: Literal["indexed", "rejected"]
+    annotation_build_id: str
+    processed_at_utc: str
+    code: str = "indexed"
+    message: str = ""
+
+
+class IndexRefreshIssue(BaseModel):
+    recording_id: str
+    manifest_key: str
+    stage: str
+    code: str
+    message: str
+
+
+class IndexRefreshResult(BaseModel):
+    imported: int = 0
+    unchanged: int = 0
+    skipped: int = 0
+    issues: list[IndexRefreshIssue] = Field(default_factory=list)
 
 
 class PublishStatus(BaseModel):

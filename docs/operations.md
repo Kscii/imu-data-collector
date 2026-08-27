@@ -1,5 +1,46 @@
 # 采集、标注、上传与恢复
 
+## 按需启动和重启本机采集后端
+
+首次安装持久的用户级服务定义（不启用开机自启）：
+
+```bash
+cd /home/kscii/Codes/imu-data-collector
+./scripts/install-user-service.sh
+```
+
+日常最常用的重启命令：
+
+```bash
+systemctl --user restart imu-data-collector.service
+```
+
+这条命令只重启已经安装的版本，不会重新构建网页。修改或拉取源码后使用：
+
+```bash
+./scripts/update-local-capture.sh
+```
+
+脚本会拒绝打断正在录制或收尾的会话，完成锁定依赖安装、前端暂存构建、前后端版本校验、
+静态目录原子切换、服务重启和健康检查。只有没有源码变化的日常故障恢复才直接使用
+`systemctl --user restart`。
+
+状态和日志分别使用：
+
+```bash
+systemctl --user status imu-data-collector.service --no-pager
+journalctl --user -u imu-data-collector.service -n 100 --no-pager
+```
+
+该服务只监听 `127.0.0.1:8765`。不要同时运行前台 `uv run imu-collector start`，否则第二个
+进程会因端口占用退出。页面检测到前后端源码哈希不一致时会禁用设备按钮并提示执行一键更新
+脚本；单纯重启不能把旧静态文件变成新构建。
+
+浏览器会长期保持 WebSocket 和 MJPEG 连接，后端为此设置 5 秒优雅关机上限：重启时先等待
+活动请求结束，随后取消仍占用的预览连接，再执行应用 shutdown 释放 BLE 通知和 FFmpeg。
+systemd 的 `TimeoutStopSec=25` 只是外层保险，正常重启不应再走到 SIGKILL；若日志出现
+`State 'stop-sigterm' timed out`，应先按设备泄漏处理，不能把它视为正常停止。
+
 ## 为双模 CW12EU-T 显式启用 BLE 承载
 
 本机 BlueZ 5.87 的 `Device1.PreferredBearer` 与 `Bearer.LE1` 仍属于实验 D-Bus 接口。CW12EU-T 同时提供经典蓝牙与 BLE，默认连接可能错误地选择经典蓝牙，因此需要为 `bluetoothd` 持久增加 `--experimental`。
@@ -28,7 +69,12 @@ uv run imu-collector probe-imu --seconds 15
 bluetoothctl info 83:FC:90:14:1E:A4
 ```
 
-项目连接代码会在每次重连时显式设置 `PreferredBearer=le` 并调用 `Bearer.LE1.Connect()`。正常停止后，`bluetoothctl info` 应显示 `PreferredBearer: le`，且 `BREDR.Paired`、`BREDR.Bonded` 均为 `no`。
+项目连接代码会先从 BlueZ ObjectManager 查找当前地址的缓存设备路径：若设备已经连接或已经被
+BlueZ 发现，直接使用该路径附着 GATT，不再要求设备重新广播；只有路径不存在时才启动扫描。
+随后仍显式设置 `PreferredBearer=le` 并调用 `Bearer.LE1.Connect()`。这可以接管应用异常退出后
+BlueZ 暂时保留的 LE 连接，也减少日常重复扫描，但不等于接受只有传输层 `Connected` 的假阳性；
+WebUI 仍需通知订阅与真实样本到达。正常停止后，`bluetoothctl info` 应显示
+`PreferredBearer: le`，且 `BREDR.Paired`、`BREDR.Bonded` 均为 `no`。
 
 安装会重启蓝牙服务，正在使用的耳机、手柄等会断开，需要重新连接。验证实际生效：
 
@@ -51,9 +97,32 @@ sudo ./scripts/uninstall-bluetooth-experimental.sh
 5. 检查镜头范围和背景隐私；v1 不录音。
 6. 开始后做一次明显同步动作，结束前再做一次。
 
-内置摄像头在画面近乎全黑、镜头被遮挡或光线不足时，可能因自动曝光把真实输入降到
-约 10 FPS，即使 UVC profile 宣称 30 FPS。开始正式试采前必须确认预览曝光正常，并以
-WebUI/离线 PTS 的实际 FPS 为准；平台不通过复制画面伪装成 30 FPS。
+摄像头启用自动曝光时，画面近乎全黑、镜头被遮挡或光线不足可能使真实输入降到约
+15 FPS，即使 UVC profile 宣称 30 FPS。当前罗技 C930c 配置会在每次启动 FFmpeg 前写入并
+回读手动曝光、曝光时长、增益、动态帧率和电源频率。若控件不支持、回读不一致或正式录制前
+最近窗口的摄像头输入低于 29 FPS，`prod` 预检会拒绝开始；整段视频按 PTS 低于 27 FPS 也会
+在收尾质量门禁中失败。平台不通过复制画面伪装成 30 FPS。
+
+WebUI 的“摄像头输入 FPS”来自 FFmpeg 对 V4L2 源帧 PTS 的滚动统计，正常目标约 30；
+“浏览器预览 FPS”是为了降低 JPEG 编码、网络和绘图开销而主动限制的输出，正常约 10。
+因此预览显示 10 不表示 H.264 落盘只有 10。两者必须分开判断。
+
+## 设备预览与录制切换
+
+日常流程只需连接一次设备：
+
+1. 点击“连接预览设备”，等待摄像头画面与 IMU 最近一包时间都开始更新。
+2. 点击“开始录制”。BLE 不会断开或重新枚举 GATT；只有摄像头 FFmpeg 在预览与落盘模式间
+   切换，页面会短暂显示“摄像头正在切换”，并保留上一帧。
+3. 点击“结束录制”。IMU 曲线和同一 BLE 通知会话继续运行，摄像头切回不落盘预览；不应再
+   依靠 Ctrl+R 恢复画面。
+4. 当天不再采集时才点击“释放预览设备”。
+
+后端保证同一时刻最多一个 BLE/GATT 打开操作。若重复点击或旧请求还在清理，界面会提示
+“已有设备连接操作正在进行”，等待当前操作完成即可，不能同时另开前台命令或手机连接。
+预览中的意外 IMU 或摄像头故障分别按 1、2、4 秒自动重试三次；三次失败后健康的另一设备
+继续运行，使用“重试失败设备”手动恢复。系统托盘显示 Bluetooth `Connected` 只证明 LE
+链路存在；WebUI 还要求 GATT 服务发现、通知订阅和真实通知包持续到达，二者不能混为一谈。
 
 每次录制还必须在开始前选择数据级别：
 
@@ -74,7 +143,8 @@ WebUI 应选择彩色 1080p30 MJPEG 主节点，而不是同一设备的灰度�
 ## 录制中 WebUI 应关注
 
 - 视频是否连续且构图正确。
-- 实际编码 FPS，而不是只看请求 FPS。
+- 摄像头输入 FPS 和浏览器预览 FPS；前者用于判断采集质量，后者约 10 属于设计值。
+- 固定曝光控件是否显示已应用；任何不支持或回读不一致都要先解决再录 `prod`。
 - IMU 六轴曲线是否随动作变化、最后通知时间是否持续更新。
 - BLE 包数/样本数、回调丢弃数、磁盘剩余空间、编码器错误。
 - 任何设备滑动、重新佩戴或异常都应在会话备注中记录。

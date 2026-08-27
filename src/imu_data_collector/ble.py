@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
 from dbus_fast import Variant
 from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType, MessageType
@@ -33,6 +34,38 @@ class CW12EUBleSource:
         self.last_packet_ns: int | None = None
         self.disconnect_reason: str | None = None
         self._stopping = False
+
+    @staticmethod
+    async def _find_cached_device_path(address: str) -> str | None:
+        """从 BlueZ 对象树复用已知设备；已连接设备通常不会继续广播。"""
+
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        try:
+            reply = await bus.call(
+                Message(
+                    destination="org.bluez",
+                    path="/",
+                    interface="org.freedesktop.DBus.ObjectManager",
+                    member="GetManagedObjects",
+                )
+            )
+            if reply.message_type == MessageType.ERROR:
+                raise RuntimeError(
+                    "无法读取 BlueZ 设备对象树："
+                    f"{reply.error_name} {reply.body}"
+                )
+            wanted = address.upper()
+            for path, interfaces in reply.body[0].items():
+                properties = interfaces.get("org.bluez.Device1")
+                if not properties:
+                    continue
+                candidate = properties.get("Address")
+                if candidate is not None and str(candidate.value).upper() == wanted:
+                    return str(path)
+            return None
+        finally:
+            bus.disconnect()
+            await bus.wait_for_disconnect()
 
     @staticmethod
     async def _connect_le_bearer(device_path: str) -> None:
@@ -82,8 +115,18 @@ class CW12EUBleSource:
             await bus.wait_for_disconnect()
 
     async def connect(self, timeout: float = 15.0) -> None:
+        device_path = await self._find_cached_device_path(self.settings.address)
+        device: BLEDevice | None = None
+        if device_path is not None:
+            # 直接提供 BlueZ path 可跳过 Bleak 的隐式扫描，也能接管应用异常退出后仍由
+            # BlueZ 保持的 LE 连接。该设备使用 public address，路径可稳定复用。
+            device = BLEDevice(
+                self.settings.address,
+                self.settings.name,
+                {"path": device_path},
+            )
+
         found_event = asyncio.Event()
-        device = None
 
         def detection_callback(found: Any, advertisement: Any) -> None:
             nonlocal device
@@ -95,28 +138,30 @@ class CW12EUBleSource:
                 device = found
                 found_event.set()
 
-        scanner = BleakScanner(
-            detection_callback=detection_callback,
-            bluez={"filters": {"Pattern": self.settings.name}},
-        )
-        await scanner.start()
-        try:
-            await asyncio.wait_for(found_event.wait(), timeout=timeout)
-            if device is None:
-                raise RuntimeError("扫描回调没有返回 CW12EU-T 设备对象")
-            self.client = BleakClient(
-                device,
-                disconnected_callback=self._on_disconnect,
-                timeout=timeout,
+        if device is None:
+            scanner = BleakScanner(
+                detection_callback=detection_callback,
+                bluez={"filters": {"Pattern": self.settings.name}},
             )
-            device_path = device.details.get("path")
-            if not isinstance(device_path, str):
-                raise RuntimeError("BlueZ 扫描结果缺少设备 D-Bus 路径")
-            await self._connect_le_bearer(device_path)
-            await asyncio.sleep(0.1)
-            await self.client.connect()
-        finally:
-            await scanner.stop()
+            await scanner.start()
+            try:
+                await asyncio.wait_for(found_event.wait(), timeout=timeout)
+                if device is None:
+                    raise RuntimeError("扫描回调没有返回 CW12EU-T 设备对象")
+            finally:
+                await scanner.stop()
+
+        self.client = BleakClient(
+            device,
+            disconnected_callback=self._on_disconnect,
+            timeout=timeout,
+        )
+        device_path = device.details.get("path")
+        if not isinstance(device_path, str):
+            raise RuntimeError("BlueZ 设备对象缺少 D-Bus 路径")
+        await self._connect_le_bearer(device_path)
+        await asyncio.sleep(0.1)
+        await self.client.connect()
         self.connected = True
         self.disconnect_reason = None
         self._stopping = False

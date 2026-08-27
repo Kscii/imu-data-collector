@@ -79,6 +79,16 @@ class AnnotationCatalog:
             ).fetchone()
         return CaptureManifestV2.model_validate_json(row[0]) if row else None
 
+    def manifest_generation(self, recording_id: str) -> int | None:
+        """返回已索引 manifest 的对象 generation，用于跳过未变化录制。"""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT manifest_generation FROM recordings WHERE recording_id = ?",
+                (recording_id,),
+            ).fetchone()
+        return int(row[0]) if row else None
+
     def get_for_deletion(
         self, recording_id: str
     ) -> tuple[CaptureManifestV2, str] | None:

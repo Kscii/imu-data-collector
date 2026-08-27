@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,18 @@ def validate_capture_h5(
         metrics["training_eligible"] = str(training_eligible).lower()
         if schema_version == CAPTURE_SCHEMA_VERSION and "data_tier" not in handle.attrs:
             issues.append("missing data_tier for current schema")
+        if schema_version == CAPTURE_SCHEMA_VERSION:
+            if "calibration_profile_id" not in handle.attrs:
+                issues.append("missing calibration_profile_id for current schema")
+            if "imu" in handle:
+                for name in (
+                    "accel_bias_counts_json",
+                    "gyro_bias_counts_json",
+                    "raw_axis_order_json",
+                    "axis_signs_json",
+                ):
+                    if name not in handle["imu"].attrs:
+                        issues.append(f"missing IMU calibration attribute {name}")
         if data_tier not in {"test", "prod", "legacy_unclassified"}:
             issues.append(f"invalid data_tier: {data_tier}")
         if training_eligible and data_tier != "prod":
@@ -186,6 +199,7 @@ def validate_capture_h5(
         )
         if schema_version == CAPTURE_SCHEMA_VERSION:
             required += (
+                "imu/packets/packet_kind",
                 "imu/packets/fitted_packet_end_time_ns",
                 "imu/packets/fit_residual_ns",
                 "imu/connection_events/event",
@@ -202,6 +216,16 @@ def validate_capture_h5(
         offsets = np.asarray(handle["imu/packets/payload_offsets"], dtype=np.int64)
         receive = np.asarray(handle["imu/packets/receive_time_ns"], dtype=np.int64)
         sample_counts = np.asarray(handle["imu/packets/sample_count"], dtype=np.int64)
+        packet_kinds = (
+            np.asarray(handle["imu/packets/packet_kind"], dtype=np.uint8)
+            if "imu/packets/packet_kind" in handle
+            else None
+        )
+        parse_valid = (
+            np.asarray(handle["imu/packets/parse_valid"], dtype=np.bool_)
+            if "imu/packets/parse_valid" in handle
+            else None
+        )
         fitted_packet_end = (
             handle["imu/packets/fitted_packet_end_time_ns"]
             if "imu/packets/fitted_packet_end_time_ns" in handle
@@ -254,6 +278,10 @@ def validate_capture_h5(
             issues.append("packet payload offsets are invalid")
         if len(sample_counts) != packet_count:
             issues.append("packet sample_count length mismatch")
+        if packet_kinds is not None and len(packet_kinds) != packet_count:
+            issues.append("packet kind length mismatch")
+        if parse_valid is not None and len(parse_valid) != packet_count:
+            issues.append("packet parse_valid length mismatch")
         if fitted_packet_end is not None and len(fitted_packet_end) != packet_count:
             issues.append("fitted packet timestamp length mismatch")
         if packet_fit_residual is not None and len(packet_fit_residual) != packet_count:
@@ -269,6 +297,40 @@ def validate_capture_h5(
         if parse_error_count > 0:
             issues.append(f"IMU packet parsing failed {parse_error_count} times")
         if schema_version == CAPTURE_SCHEMA_VERSION:
+            assert packet_kinds is not None
+            assert parse_valid is not None
+            allowed_kinds = {1, 2, 255}
+            actual_kinds = {int(value) for value in np.unique(packet_kinds)}
+            if not actual_kinds.issubset(allowed_kinds):
+                issues.append("packet_kind contains unsupported values")
+            imu_mask = packet_kinds == 1
+            auxiliary_mask = packet_kinds == 2
+            unknown_mask = packet_kinds == 255
+            imu_packet_count = int(np.count_nonzero(imu_mask))
+            auxiliary_count = int(np.count_nonzero(auxiliary_mask))
+            unknown_count = int(np.count_nonzero(unknown_mask))
+            metrics.update(
+                imu_packet_count=imu_packet_count,
+                auxiliary_notification_count=auxiliary_count,
+                unknown_notification_count=unknown_count,
+            )
+            for name, observed in (
+                ("imu_packet_count", imu_packet_count),
+                ("auxiliary_notification_count", auxiliary_count),
+                ("unknown_notification_count", unknown_count),
+            ):
+                if name not in handle.attrs:
+                    issues.append(f"missing notification count attribute {name}")
+                elif int(handle.attrs[name]) != observed:
+                    issues.append(f"notification count attribute mismatch: {name}")
+            if not np.array_equal(parse_valid, imu_mask):
+                issues.append("parse_valid must be true only for IMU sample packets")
+            if np.any(sample_counts[~imu_mask] != 0):
+                issues.append("non-IMU notifications must have zero sample_count")
+            if np.any(sample_counts[imu_mask] <= 0):
+                issues.append("IMU sample packets must have positive sample_count")
+            if parse_error_count != unknown_count:
+                issues.append("parse_error_count must equal unknown notification count")
             observed_rate_hz = float(metrics["observed_rate_hz"])
             if expected_rate_hz > 0 and not (
                 expected_rate_hz * 0.95
@@ -311,6 +373,16 @@ def validate_capture_h5(
             issues.append("values_si must have shape (N, 6)")
         calibrated = bool(handle.attrs.get("calibration_verified", False))
         metrics["calibration_verified"] = str(calibrated).lower()
+        if calibrated and sample_count and not np.isfinite(values_si[:]).all():
+            issues.append("verified calibration produced non-finite values_si")
+        if calibrated and schema_version == CAPTURE_SCHEMA_VERSION:
+            try:
+                order = json.loads(str(handle["imu"].attrs["raw_axis_order_json"]))
+                signs = json.loads(str(handle["imu"].attrs["axis_signs_json"]))
+                if sorted(order) != [0, 1, 2] or any(item not in (-1, 1) for item in signs):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                issues.append("invalid verified calibration axis transform")
         if require_calibration and not calibrated:
             issues.append("device calibration is not verified")
 
@@ -337,6 +409,31 @@ def validate_capture_h5(
                     if len(video_pts) > 1 and video_pts[-1] > video_pts[0]
                     else 0.0
                 )
+                if (
+                    schema_version == CAPTURE_SCHEMA_VERSION
+                    and data_tier == "prod"
+                    and float(metrics["video_actual_span_fps"]) < 27.0
+                ):
+                    issues.append("prod video actual span FPS is below 27")
+                if schema_version == CAPTURE_SCHEMA_VERSION and data_tier == "prod":
+                    try:
+                        requested_controls = json.loads(
+                            str(handle["video"].attrs["camera_controls_requested_json"])
+                        )
+                        effective_controls = json.loads(
+                            str(handle["video"].attrs["camera_controls_effective_json"])
+                        )
+                        control_errors = json.loads(
+                            str(handle["video"].attrs["camera_control_errors_json"])
+                        )
+                        if (
+                            not requested_controls
+                            or requested_controls != effective_controls
+                            or control_errors
+                        ):
+                            issues.append("prod video fixed camera controls are not verified")
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        issues.append("prod video fixed camera controls are missing or invalid")
                 metrics["video_max_frame_gap_ms"] = (
                     float(np.max(pts_deltas) / 1e6) if len(pts_deltas) else 0.0
                 )

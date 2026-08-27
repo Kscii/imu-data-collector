@@ -12,10 +12,28 @@
 
 录制前的设备预览是独立的内存态：连接后持续解析 IMU 通知并输出摄像头低帧率 MJPEG，
 只向本机 WebUI 提供实时画面、最近 120 秒六轴曲线、频率、最后一包距今时间、解析错误
-和回调丢弃，不创建 H5/MKV。业务状态拆为“设备是否预览”和“文件是否录制”；开始正式
-录制时，以新的录制起点清空计数并落盘，结束后自动恢复预览，因此预检样本不会混入原始
-采集文件。V4L2 摄像头通常只能由一个 FFmpeg 进程占用，切换落盘状态时允许约一秒内部
-进程切换，但页面和设备监看语义保持一致。
+和回调丢弃，不创建 H5/MKV。业务状态拆为“设备是否连接”和“文件是否录制”。用户点击
+“连接预览设备”后，BLE 连接与通知消费任务会一直复用到用户明确释放设备或发生真实断线；
+开始/停止录制不再取消通知订阅，也不再重新扫描、配对或枚举 GATT。H5 写入由录制边界门控，
+只接收视频正式起点之后的通知，因此预检样本不会混入原始采集文件，WebUI 的实时曲线则连续
+保留。
+
+V4L2 摄像头通常只能由一个 FFmpeg 进程占用，所以预览、正式落盘和录制后预览仍需短暂切换
+FFmpeg。浏览器连接的不是某个 FFmpeg 进程，而是会话级 `PreviewFrameHub`：流 URL 和会话 ID
+在上述切换中保持不变，切换期间保留最后一张 JPEG，新的进程准备好后继续向同一通道发布。
+只有用户明确释放预览时才关闭 MJPEG 通道。未建立或已释放的通道返回明确的 HTTP 409，不能
+再返回会让浏览器一直等待且不自动恢复的 200 空响应。
+
+设备会话另有 `idle/connecting/connected/reconnecting/releasing/error` 状态，不再借用
+`recording/failed` 推断硬件是否仍被占用。预览连接、释放和摄像头切换都有操作编号；慢速
+BLE 扫描不持有全局状态锁，释放可以使仍在进行的旧操作失效。预览意外断线按 1、2、4 秒
+退避重连三次；正式录制或 IMU 表征则不重连、不拼接两段连接，立即停止并保留带错误原因的
+partial。释放接口是幂等的，即使 BLE 或 FFmpeg 已先行退出，也必须把逻辑状态恢复为空闲。
+后端另有连接 single-flight 门禁：同一时刻只允许一个扫描/GATT 打开操作；重复 HTTP 请求、
+双击和旧标签页不能创建第二个 Bleak 客户端与当前单连接 IMU 争用。IMU 与摄像头由独立健康
+状态和独立重试计数管理，一方失败不会主动释放另一方。
+BLE 打开优先复用 BlueZ ObjectManager 中当前地址对应的 D-Bus path；已连接设备不广播时也能
+直接附着已有 LE 连接并订阅 GATT。只有 BlueZ 中不存在该设备对象时才扫描广播。
 
 因此，转换不应发生在原始落盘阶段，而应发生在标注冻结之后的 adapter/build 阶段。这样更容易修正协议、同步和标签，也能尝试不同窗口策略而不重拍数据。
 
@@ -27,7 +45,9 @@
   无损重封装交付 MKV，使首帧媒体 PTS 为零。H5 的 `media_time_ns` 用于浏览器 seek，
   `pts_monotonic_ns` 和 `recording_time_ns` 用于同步与标注；重封装前后逐帧时间间隔必须一致。
 - 视频编码禁用 B 帧并使用 VFR：保留具有唯一源时间戳的真实帧，不为满足名义 30 FPS
-  而复制画面。光线不足导致自动曝光降低真实 FPS 时，应显示并告警实际值，而不是补帧。
+  而复制画面。C930c 在固定采集环境下使用回读验证的手动曝光，WebUI 分开显示约 30 FPS
+  摄像头源输入和约 10 FPS 浏览器预览；`prod` 仍以源 PTS 和整段 PTS 门禁，而不是预览速率
+  判断质量。
 - BLE 包内没有已确认的设备时间戳，因此先把“包末样本”关联到接收时间，再根据所有包做线性回归重建样本间隔。该时间是估计值，必须保留质量字段和拟合残差。
 - 同步锚点在 H5 和 API 中都使用“相对本次录制起点的纳秒”，避免把开机时长暴露为界面坐标。正式流程恰好使用开始和结束两个轻拍，检查同一连接内偏移是否稳定；当前实证不足以支持把两个点拟合成任意 `scale`，因此正式模型固定 `scale=1`。
 
@@ -55,10 +75,10 @@ schema `1.3.0` 起保留以下不可变或可重建证据：
 - `video/frames/pts_monotonic_ns`：视频帧 PTS 所在的单调时钟时间；
 - 根属性 `recording_start_monotonic_ns`：本条录制的相对时间原点。
 
-在同步方法尚未验证期间，逐帧人工观察写入独立的
-`_diagnostics/sync_validation_01/*.sync-experiment.json`，不得调用正式 `/sync` 写入。实验分析
-始终从 `time_monotonic_ns - recording_start_monotonic_ns` 重新得到 host-only 时间。正式同步、
-标注和审核只更新对象存储中的 `review.json`，不能修改原始包、原始计数、主机时间或 MKV。
+早期方法验证曾把逐帧人工观察写入独立的
+`_diagnostics/sync_validation_01/*.sync-experiment.json`，且不调用正式 `/sync` 写入。流程冻结后，
+这些实验录制已按用户确认清理；生产同步只更新对象存储中的 `review.json`，不能修改原始包、
+原始计数、主机时间或 MKV。
 
 ## 文件组织
 
@@ -89,7 +109,8 @@ GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest�
 ```text
 /
   attrs: participant_id, recording_id, data_tier, clock_domain, schema_version, ...
-  imu/packets/: payload_values, payload_offsets, receive_time_ns, parse_valid,
+  imu/packets/: payload_values, payload_offsets, receive_time_ns, packet_kind,
+                parse_valid,
                 fitted_packet_end_time_ns, fit_residual_ns
   imu/connection_events/: event, time_monotonic_ns, notes
   imu/samples/: raw_counts, trailer, values_si, time_monotonic_ns,
@@ -110,6 +131,12 @@ H5 只按 `legacy_unclassified` 读取，不能进入训练集。`test` 是不�
 文件名即使含有或不含有 `test` 都不参与判定。`prod` 只表示正式采集意图，不等于已经
 通过校准、同步、标注和完整性质量门禁。从 schema `1.3.0` 开始，主机相对时间与对齐时间
 分列保存，并增加包拟合诊断、BLE 连接事件和显式排除区间。
+从 schema `1.4.0` 开始，H5 还冻结校准 profile、原始空间零偏、轴顺序、轴符号、目标坐标系、
+比例和证据文件 SHA-256；`values_si` 由这些属性可重建，`raw_counts` 永远不被覆盖。
+从 schema `1.5.0` 开始，每条 BLE 通知还保存稳定的 `packet_kind`：`1` 是 IMU 样本包，`2` 是
+已知 10 字节辅助状态包，`255` 是未知无效包。三类通知都完整保留原始 payload；辅助包的
+`sample_count=0` 且不参与样本时间拟合，也不会被算作解析失败。辅助包末尾字节尚无可靠协议
+证据，因此平台不把它解释成电量。只有未知包会增加 `parse_error_count` 并阻断生产录制。
 
 FFmpeg 的诊断文本会以 JSON 列表随视频元数据保存。例如罗技 C930c 在 MJPEG 启动时
 稳定报告一次 `overread 8`，但重复 20 秒实测均为 601 帧、30.0 FPS，且 PTS 无重复或

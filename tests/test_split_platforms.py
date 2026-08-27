@@ -1,8 +1,10 @@
 import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from imu_data_collector.annotation_api import create_annotation_app
@@ -15,16 +17,23 @@ from imu_data_collector.config import (
     Settings,
     StorageSettings,
 )
+from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
+from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ArtifactDescriptor,
     CalibrationProfile,
     CaptureManifestV2,
     DataTier,
+    IndexReceipt,
+    RecordingState,
+    RecordingSummary,
     ReviewWorkflowState,
     SyncExperimentDocument,
     SyncObservation,
+    TrainingExportReference,
 )
+from imu_data_collector.publisher import _require_annotation_capabilities
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 
 
@@ -67,6 +76,7 @@ def _settings(tmp_path: Path) -> Settings:
         annotation=AnnotationSettings(
             catalog_path=tmp_path / "annotation.sqlite3",
             review_policy="single_user",
+            catalog_refresh_interval_s=0,
         ),
     )
 
@@ -76,6 +86,8 @@ def _publish_fixture(
     tmp_path: Path,
     *,
     data_tier: DataTier = DataTier.TEST,
+    manifest_schema_version: str = "2.1.0",
+    source_h5_schema_version: str = CAPTURE_SCHEMA_VERSION,
 ) -> str:
     recording_id = "fixture_001"
     source = tmp_path / "source"
@@ -121,7 +133,8 @@ def _publish_fixture(
         data_tier=data_tier,
         captured_at_utc="2026-08-26T00:00:00+00:00",
         duration_ns=1_000_000_000,
-        source_h5_schema_version="1.0.0",
+        schema_version=manifest_schema_version,
+        source_h5_schema_version=source_h5_schema_version,
         software_revision="test",
         calibration=CalibrationProfile(),
         artifacts=descriptors,
@@ -132,6 +145,50 @@ def _publish_fixture(
         if_generation_match=0,
     )
     return recording_id
+
+
+def _install_exported_review(app, store, tmp_path: Path, recording_id: str) -> None:
+    aligned = tmp_path / f"{recording_id}.aligned.h5"
+    aligned.write_bytes(b"aligned")
+    digest = sha256_file(aligned)
+    logical_digest = "b" * 64
+    key = f"exports/{recording_id}/review-0/aligned30-{logical_digest[:16]}.h5"
+    info = store.put_file(
+        aligned,
+        key,
+        content_type="application/x-hdf5",
+        metadata={
+            "sha256": digest,
+            "logical_content_sha256": logical_digest,
+            "recording_id": recording_id,
+            "source_review_revision": "0",
+        },
+    )
+    service = app.state.annotation_service
+    manifest = service.required_manifest(recording_id)
+    review, generation = service.reviews.load(manifest)
+    exported = review.model_copy(
+        update={
+            "workflow": review.workflow.model_copy(
+                update={"state": ReviewWorkflowState.EXPORTED}
+            ),
+            "active_export": TrainingExportReference(
+                source_review_revision=0,
+                object_key=key,
+                sha256=digest,
+                logical_content_sha256=logical_digest,
+                size_bytes=info.size_bytes,
+                calibration_profile_id="fixture",
+                calibration_evidence_sha256="c" * 64,
+                created_at_utc="2026-08-26T00:00:00+00:00",
+            ),
+        }
+    )
+    store.write_json(
+        f"reviews/{recording_id}/review.json",
+        exported.model_dump(mode="json"),
+        if_generation_match=generation,
+    )
 
 
 def test_capture_app_does_not_expose_annotation_or_export_routes(
@@ -187,7 +244,12 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
 
     with TestClient(app) as client:
         refreshed = client.post("/api/v1/index/refresh")
-        assert refreshed.json() == {"imported": 1, "skipped": 0}
+        assert refreshed.json() == {
+            "imported": 1,
+            "unchanged": 0,
+            "skipped": 0,
+            "issues": [],
+        }
 
         recordings = client.get("/api/v1/recordings").json()
         assert recordings[0]["recording_id"] == recording_id
@@ -250,6 +312,151 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         )
         assert forbidden.status_code == 422
         assert "test 数据永久禁止" in forbidden.json()["detail"]
+
+
+def test_annotation_accepts_manifest_2_0_and_publishes_capabilities(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_fixture(
+        store, tmp_path, manifest_schema_version="2.0.0"
+    )
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        capabilities, _generation = store.read_json(
+            "contracts/annotation-capabilities.json"
+        )
+        assert capabilities["accepted_manifest_schema_versions"] == [
+            "2.0.0",
+            "2.1.0",
+        ]
+        assert capabilities["accepted_capture_h5_schema_versions"] == [
+            CAPTURE_SCHEMA_VERSION
+        ]
+        result = client.post("/api/v1/index/refresh").json()
+
+    assert result["imported"] == 1
+    receipt, _generation = store.read_json(
+        f"index-receipts/{recording_id}.json"
+    )
+    assert receipt["status"] == "indexed"
+    assert receipt["manifest_generation"] > 0
+
+
+def test_annotation_rejection_has_structured_issue_and_receipt(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_fixture(
+        store,
+        tmp_path,
+        source_h5_schema_version="1.4.0",
+    )
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        result = client.post("/api/v1/index/refresh").json()
+
+    assert result["imported"] == 0
+    assert result["skipped"] == 1
+    assert result["issues"][0]["recording_id"] == recording_id
+    assert result["issues"][0]["stage"] == "manifest"
+    assert result["issues"][0]["code"] == "unsupported_h5_schema"
+    receipt, _generation = store.read_json(
+        f"index-receipts/{recording_id}.json"
+    )
+    assert receipt["status"] == "rejected"
+    assert receipt["code"] == "unsupported_h5_schema"
+
+
+def test_missing_capabilities_blocks_before_any_capture_object(tmp_path: Path) -> None:
+    store = LocalFilesystemStore(tmp_path / "objects")
+
+    with pytest.raises(RuntimeError, match="上传任何对象前停止"):
+        _require_annotation_capabilities(store, CAPTURE_SCHEMA_VERSION)
+
+    assert store.list("captures/") == []
+
+
+@pytest.mark.asyncio
+async def test_capture_keeps_pending_when_receipt_generation_is_stale(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    coordinator = RecordingCoordinator(settings)
+    summary = RecordingSummary(
+        recording_id="generation-check",
+        collection_id="pilot",
+        participant_id="xfan0282",
+        data_tier=DataTier.TEST,
+        state=RecordingState.READY,
+        started_at_utc="2026-08-27T00:00:00+00:00",
+        upload_state="uploaded",
+        index_state="pending",
+        manifest_generation=200,
+    )
+    coordinator.catalog.upsert(summary)
+    coordinator.object_store.write_json(
+        "index-receipts/generation-check.json",
+        IndexReceipt(
+            recording_id="generation-check",
+            manifest_generation=199,
+            status="indexed",
+            annotation_build_id="test",
+            processed_at_utc="2026-08-27T00:00:00+00:00",
+        ).model_dump(mode="json"),
+        if_generation_match=0,
+    )
+
+    updated = await coordinator.refresh_publish_status("generation-check")
+    await coordinator.shutdown()
+
+    assert updated.index_state == "pending"
+    assert "另一版 manifest" in updated.index_message
+
+
+def test_annotation_background_refresh_discovers_new_manifest(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.annotation.catalog_refresh_interval_s = 0.02
+    store = LocalFilesystemStore(settings.storage.root)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/recordings").json() == []
+        recording_id = _publish_fixture(store, tmp_path)
+        deadline = time.monotonic() + 1.0
+        recordings: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            recordings = client.get("/api/v1/recordings").json()
+            if recordings:
+                break
+            time.sleep(0.02)
+
+    assert [item["recording_id"] for item in recordings] == [recording_id]
+
+
+def test_annotation_refresh_skips_unchanged_manifest_generation(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    _publish_fixture(store, tmp_path)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/index/refresh").json() == {
+            "imported": 1,
+            "unchanged": 0,
+            "skipped": 0,
+            "issues": [],
+        }
+        assert client.post("/api/v1/index/refresh").json() == {
+            "imported": 0,
+            "unchanged": 1,
+            "skipped": 0,
+            "issues": [],
+        }
 
 
 def test_iap_identity_is_required_mapped_and_cannot_claim_admin(
@@ -464,32 +671,11 @@ def test_training_release_writes_queryable_sidecar_manifest(tmp_path: Path) -> N
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
-    aligned = tmp_path / "aligned.h5"
-    aligned.write_bytes(b"aligned")
-    store.put_file(
-        aligned,
-        f"exports/{recording_id}/aligned30.h5",
-        content_type="application/x-hdf5",
-    )
     app = create_annotation_app(settings, store)
 
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        service = app.state.annotation_service
-        manifest = service.required_manifest(recording_id)
-        review, generation = service.reviews.load(manifest)
-        exported = review.model_copy(
-            update={
-                "workflow": review.workflow.model_copy(
-                    update={"state": ReviewWorkflowState.EXPORTED}
-                )
-            }
-        )
-        store.write_json(
-            f"reviews/{recording_id}/review.json",
-            exported.model_dump(mode="json"),
-            if_generation_match=generation,
-        )
+        _install_exported_review(app, store, tmp_path, recording_id)
         released = client.post("/api/v1/training-releases")
         repeated = client.post("/api/v1/training-releases")
         listed = client.get("/api/v1/training-releases")
@@ -512,31 +698,11 @@ def test_training_release_range_download_and_revoke(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
-    aligned = tmp_path / "aligned.h5"
-    aligned.write_bytes(b"aligned")
-    store.put_file(
-        aligned,
-        f"exports/{recording_id}/aligned30.h5",
-        content_type="application/x-hdf5",
-    )
     app = create_annotation_app(settings, store)
 
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        service = app.state.annotation_service
-        manifest = service.required_manifest(recording_id)
-        review, generation = service.reviews.load(manifest)
-        store.write_json(
-            f"reviews/{recording_id}/review.json",
-            review.model_copy(
-                update={
-                    "workflow": review.workflow.model_copy(
-                        update={"state": ReviewWorkflowState.EXPORTED}
-                    )
-                }
-            ).model_dump(mode="json"),
-            if_generation_match=generation,
-        )
+        _install_exported_review(app, store, tmp_path, recording_id)
         release = client.post("/api/v1/training-releases").json()
         release_id = release["release_id"]
         partial = client.get(
@@ -582,30 +748,10 @@ def test_training_release_revoke_retries_after_partial_delete(tmp_path: Path) ->
     settings = _settings(tmp_path)
     store = FailOnceReleaseDeleteStore(settings.storage.root)
     recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
-    aligned = tmp_path / "aligned.h5"
-    aligned.write_bytes(b"aligned")
-    store.put_file(
-        aligned,
-        f"exports/{recording_id}/aligned30.h5",
-        content_type="application/x-hdf5",
-    )
     app = create_annotation_app(settings, store)
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        service = app.state.annotation_service
-        manifest = service.required_manifest(recording_id)
-        review, generation = service.reviews.load(manifest)
-        store.write_json(
-            f"reviews/{recording_id}/review.json",
-            review.model_copy(
-                update={
-                    "workflow": review.workflow.model_copy(
-                        update={"state": ReviewWorkflowState.EXPORTED}
-                    )
-                }
-            ).model_dump(mode="json"),
-            if_generation_match=generation,
-        )
+        _install_exported_review(app, store, tmp_path, recording_id)
         release_id = client.post("/api/v1/training-releases").json()["release_id"]
         body = {
             "confirmation": f"REVOKE {release_id}",

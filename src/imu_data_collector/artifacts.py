@@ -74,7 +74,7 @@ def create_capture_package(
 def create_training_release(
     files: list[tuple[str, str, Path]], output_path: Path
 ) -> Path:
-    """Bundle exported per-recording aligned files into one immutable TAR."""
+    """把逐录制训练文件打包成一个不可变 TAR。"""
 
     if not files:
         raise ValueError("没有已导出的 aligned30.h5 可加入训练发布")
@@ -312,6 +312,10 @@ def export_aligned30(
         raw,
         imu_settings.accel_counts_per_g,
         imu_settings.gyro_counts_per_dps,
+        accel_bias_counts=imu_settings.accel_bias_counts,
+        gyro_bias_counts=imu_settings.gyro_bias_counts,
+        raw_axis_order=imu_settings.raw_axis_order,
+        axis_signs=imu_settings.axis_signs,
     ).astype(np.float64)
     values = np.column_stack(
         [np.interp(target_ns, imu_time_ns, calibrated[:, axis]) for axis in range(6)]

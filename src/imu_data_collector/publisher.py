@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import h5py
 from imu_data_collector.config import Settings
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
+    AnnotationCapabilities,
     ArtifactDescriptor,
     CalibrationProfile,
     CaptureManifestV2,
@@ -103,11 +105,34 @@ def _put_idempotent(store: ObjectStore, path: Path, artifact: ArtifactDescriptor
     )
 
 
+def _require_annotation_capabilities(
+    store: ObjectStore, source_h5_schema_version: str
+) -> AnnotationCapabilities:
+    """在第一个对象上传前确认生产标注端确实理解本次交接格式。"""
+
+    try:
+        payload, _generation = store.read_json(
+            "contracts/annotation-capabilities.json"
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "标注端尚未公布能力合同，已在上传任何对象前停止"
+        ) from error
+    capabilities = AnnotationCapabilities.model_validate(payload)
+    if "2.1.0" not in capabilities.accepted_manifest_schema_versions:
+        raise RuntimeError("标注端不接受 manifest schema 2.1.0")
+    if source_h5_schema_version not in capabilities.accepted_capture_h5_schema_versions:
+        raise RuntimeError(
+            "标注端不接受 capture H5 schema " + source_h5_schema_version
+        )
+    return capabilities
+
+
 async def publish_recording(
     summary: RecordingSummary,
     settings: Settings,
     store: ObjectStore,
-) -> CaptureManifestV2:
+) -> tuple[CaptureManifestV2, int]:
     """先上传三个制品，最后写 manifest 作为原子可见标记。"""
 
     if not summary.h5_path or not summary.mkv_path:
@@ -118,6 +143,53 @@ async def publish_recording(
     mkv_path = Path(summary.mkv_path)
     if not h5_path.is_file() or not mkv_path.is_file():
         raise ValueError("录制源文件不存在")
+    with h5py.File(h5_path, "r") as handle:
+        source_schema = str(handle.attrs.get("capture_schema_version", "unknown"))
+        body_location = str(handle.attrs.get("body_location", "chest"))
+        imu_attrs = handle["imu"].attrs
+        calibration = CalibrationProfile(
+            profile_id=str(
+                imu_attrs.get(
+                    "calibration_profile_id",
+                    handle.attrs.get("calibration_profile_id", "unverified"),
+                )
+            ),
+            verified=bool(handle.attrs.get("calibration_verified", False)),
+            accel_counts_per_g=(
+                float(imu_attrs["accel_counts_per_g"])
+                if "accel_counts_per_g" in imu_attrs
+                else None
+            ),
+            gyro_counts_per_dps=(
+                float(imu_attrs["gyro_counts_per_dps"])
+                if "gyro_counts_per_dps" in imu_attrs
+                else None
+            ),
+            accel_bias_counts=tuple(
+                json.loads(str(imu_attrs.get("accel_bias_counts_json", "[0, 0, 0]")))
+            ),
+            gyro_bias_counts=tuple(
+                json.loads(str(imu_attrs.get("gyro_bias_counts_json", "[0, 0, 0]")))
+            ),
+            raw_axis_order=tuple(
+                json.loads(str(imu_attrs.get("raw_axis_order_json", "[0, 1, 2]")))
+            ),
+            axis_signs=tuple(
+                json.loads(str(imu_attrs.get("axis_signs_json", "[1, 1, 1]")))
+            ),
+            method=str(imu_attrs.get("calibration_method", "unverified")),
+            evidence_sha256=(
+                str(imu_attrs["calibration_evidence_sha256"])
+                if "calibration_evidence_sha256" in imu_attrs
+                else None
+            ),
+        )
+    if settings.storage.backend == "gcs":
+        await asyncio.to_thread(
+            _require_annotation_capabilities,
+            store,
+            source_schema,
+        )
     proxy_path = await build_preview_mp4(mkv_path, h5_path.parent / "preview.mp4")
     paths = {
         "capture_h5": h5_path,
@@ -129,9 +201,6 @@ async def publish_recording(
         _descriptor(summary.recording_id, "video_mkv", mkv_path, "video/x-matroska"),
         _descriptor(summary.recording_id, "preview_mp4", proxy_path, "video/mp4"),
     ]
-    with h5py.File(h5_path, "r") as handle:
-        source_schema = str(handle.attrs.get("schema_version", "unknown"))
-        body_location = str(handle.attrs.get("body_location", "chest"))
     manifest = CaptureManifestV2(
         recording_id=summary.recording_id,
         collection_id=summary.collection_id,
@@ -142,18 +211,7 @@ async def publish_recording(
         duration_ns=int(summary.duration_ns or 0),
         source_h5_schema_version=source_schema,
         software_revision=os.environ.get("IMU_PLATFORM_REVISION", "working-tree"),
-        calibration=CalibrationProfile(
-            profile_id=(
-                "configured-v1"
-                if settings.imu.accel_counts_per_g and settings.imu.gyro_counts_per_dps
-                else "unverified"
-            ),
-            verified=bool(
-                settings.imu.accel_counts_per_g and settings.imu.gyro_counts_per_dps
-            ),
-            accel_counts_per_g=settings.imu.accel_counts_per_g,
-            gyro_counts_per_dps=settings.imu.gyro_counts_per_dps,
-        ),
+        calibration=calibration,
         artifacts=artifacts,
     )
     for artifact in artifacts:
@@ -166,17 +224,20 @@ async def publish_recording(
     manifest_key = f"captures/{summary.recording_id}/manifest.json"
     current = await asyncio.to_thread(store.stat, manifest_key)
     if current is None:
-        await asyncio.to_thread(
+        written = await asyncio.to_thread(
             store.write_json,
             manifest_key,
             manifest.model_dump(mode="json"),
             if_generation_match=0,
         )
+        manifest_generation = written.generation
     else:
-        existing, _generation = await asyncio.to_thread(store.read_json, manifest_key)
+        existing, manifest_generation = await asyncio.to_thread(
+            store.read_json, manifest_key
+        )
         if CaptureManifestV2.model_validate(existing) != manifest:
             raise ObjectConflictError("远端 manifest 已存在且内容不同")
-    return manifest
+    return manifest, manifest_generation
 
 
 def published_at() -> str:
