@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 
 import yaml
@@ -33,8 +34,8 @@ def _member_args(path: Path, command: str, *, apply: bool) -> argparse.Namespace
     )
 
 
-def test_member_management_is_preview_first_and_updates_private_mapping(
-    tmp_path: Path, capsys
+def test_member_management_is_preview_first_and_preserves_config_metadata(
+    tmp_path: Path, capsys, monkeypatch
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
@@ -48,6 +49,16 @@ def test_member_management_is_preview_first_and_updates_private_mapping(
         ),
         encoding="utf-8",
     )
+    path.chmod(0o640)
+    original = path.stat()
+    chown_calls: list[tuple[Path, int, int]] = []
+    real_chown = os.chown
+
+    def record_chown(target, uid: int, gid: int) -> None:
+        chown_calls.append((Path(target), uid, gid))
+        real_chown(target, uid, gid)
+
+    monkeypatch.setattr("imu_data_collector.annotation_cli.os.chown", record_chown)
 
     _manage_member(_member_args(path, "member-add", apply=False))
     preview = json.loads(capsys.readouterr().out)
@@ -62,6 +73,12 @@ def test_member_management_is_preview_first_and_updates_private_mapping(
     assert yaml.safe_load(path.read_text())["identity"]["email_to_unikey"] == {
         "member@example.com": "rkim6933"
     }
+    assert chown_calls[-1][1:] == (original.st_uid, original.st_gid)
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert (path.stat().st_uid, path.stat().st_gid) == (
+        original.st_uid,
+        original.st_gid,
+    )
 
     _manage_member(_member_args(path, "member-remove", apply=True))
     removed = json.loads(capsys.readouterr().out)
