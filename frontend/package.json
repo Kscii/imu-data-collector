@@ -9,6 +9,7 @@
     "build": "npm run build:capture && npm run build:annotation",
     "build:capture": "tsc -b && vite build --mode capture",
     "build:annotation": "tsc -b && vite build --mode annotation",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

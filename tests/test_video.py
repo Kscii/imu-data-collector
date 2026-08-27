@@ -159,7 +159,7 @@ async def test_normalize_video_timeline_uses_lossless_remux(
     async def fake_run(*args: str, timeout_seconds: float = 10.0):
         nonlocal captured
         captured = args
-        assert timeout_seconds == 180.0
+        assert timeout_seconds == 300.0
         output.write_bytes(b"normalized")
         return 0, "", ""
 

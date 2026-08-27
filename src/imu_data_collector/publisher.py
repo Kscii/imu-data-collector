@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,14 +24,25 @@ from imu_data_collector.models import (
 from imu_data_collector.storage import ObjectConflictError, ObjectStore
 
 
-async def build_preview_mp4(mkv_path: Path, output_path: Path) -> Path:
+async def build_preview_mp4(
+    mkv_path: Path,
+    output_path: Path,
+    *,
+    timeout_seconds: float = 1800.0,
+    nice_value: int = 0,
+) -> Path:
     """无重编码生成浏览器代理；原始 MKV 始终保留。"""
 
     if output_path.is_file() and output_path.stat().st_mtime_ns >= mkv_path.stat().st_mtime_ns:
         return output_path
     temporary = output_path.with_name(f".{output_path.stem}.{os.getpid()}.partial.mp4")
     temporary.unlink(missing_ok=True)
-    process = await asyncio.create_subprocess_exec(
+    command: list[str] = []
+    if shutil.which("ionice"):
+        command.extend(("ionice", "-c", "2", "-n", "7"))
+    if nice_value and shutil.which("nice"):
+        command.extend(("nice", "-n", str(nice_value)))
+    command.extend((
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
@@ -47,10 +59,29 @@ async def build_preview_mp4(mkv_path: Path, output_path: Path) -> Path:
         "-f",
         "mp4",
         str(temporary),
+    ))
+    process = await asyncio.create_subprocess_exec(
+        *command,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, stderr = await process.communicate()
+    try:
+        _stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_seconds
+        )
+    except asyncio.CancelledError:
+        process.kill()
+        await process.communicate()
+        temporary.unlink(missing_ok=True)
+        raise
+    except TimeoutError as error:
+        process.kill()
+        _stdout, stderr = await process.communicate()
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"生成 MP4 浏览代理超时（{timeout_seconds:.0f} 秒）："
+            + stderr.decode("utf-8", errors="replace").strip()
+        ) from error
     if process.returncode:
         temporary.unlink(missing_ok=True)
         raise RuntimeError(
@@ -206,17 +237,31 @@ async def publish_recording(
             store,
             source_schema,
         )
-    proxy_path = await build_preview_mp4(mkv_path, h5_path.parent / "preview.mp4")
+    proxy_path = await build_preview_mp4(
+        mkv_path,
+        h5_path.parent / "preview.mp4",
+        nice_value=settings.background_jobs.subprocess_nice,
+    )
     paths = {
         "capture_h5": h5_path,
         "video_mkv": mkv_path,
         "preview_mp4": proxy_path,
     }
-    artifacts = [
-        _descriptor(summary.recording_id, "capture_h5", h5_path, "application/x-hdf5"),
-        _descriptor(summary.recording_id, "video_mkv", mkv_path, "video/x-matroska"),
-        _descriptor(summary.recording_id, "preview_mp4", proxy_path, "video/mp4"),
-    ]
+    artifacts: list[ArtifactDescriptor] = []
+    for role, path, content_type in (
+        ("capture_h5", h5_path, "application/x-hdf5"),
+        ("video_mkv", mkv_path, "video/x-matroska"),
+        ("preview_mp4", proxy_path, "video/mp4"),
+    ):
+        artifacts.append(
+            await asyncio.to_thread(
+                _descriptor,
+                summary.recording_id,
+                role,
+                path,
+                content_type,
+            )
+        )
     manifest = CaptureManifestV2(
         recording_id=summary.recording_id,
         collection_id=summary.collection_id,

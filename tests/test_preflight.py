@@ -13,6 +13,7 @@ from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.cw12eu import pack_test_frame
 from imu_data_collector.hdf5_store import CaptureH5Writer
 from imu_data_collector.models import (
+    BackgroundJobKind,
     DataTier,
     DeviceSessionState,
     PreviewStartRequest,
@@ -21,7 +22,6 @@ from imu_data_collector.models import (
     RecordingSummary,
 )
 from imu_data_collector.validation import ValidationReport
-from imu_data_collector.video import VideoFrameTable
 
 
 class _FakeVideo:
@@ -510,7 +510,9 @@ async def test_start_recording_reuses_preview_ble(tmp_path: Path) -> None:
 
         result = await coordinator.stop()
 
-        assert result.state == RecordingState.NEEDS_ATTENTION
+        assert result.state == RecordingState.FINALIZING
+        assert result.finalization_job is not None
+        assert result.finalization_job.state.value == "queued"
         assert coordinator.mode == "devices_preview"
         assert coordinator.ble is ble
         assert ble.connected
@@ -519,6 +521,7 @@ async def test_start_recording_reuses_preview_ble(tmp_path: Path) -> None:
         assert capture_video.starts == 2
         with h5py.File(Path(result.h5_path or ""), "r") as handle:
             persisted_events = handle["imu/connection_events/event"][:].astype(str)
+            assert handle.attrs["state"] == "pending_finalization"
         assert "ble_retained_after_capture" in persisted_events
     finally:
         if coordinator.mode == "devices_preview":
@@ -533,8 +536,8 @@ async def test_start_recording_reuses_preview_ble(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_validation_failure_reaches_terminal_state_before_preview_restore(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_stop_freezes_capture_and_queues_finalization_before_preview_restore(
+    tmp_path: Path,
 ) -> None:
     coordinator = _coordinator(tmp_path)
     recording_id = "recording-validation-lock"
@@ -563,8 +566,8 @@ async def test_stop_validation_failure_reaches_terminal_state_before_preview_res
     capture_video.control_state = SimpleNamespace(
         ready=True,
         errors=[],
-        requested={},
-        effective={},
+        requested={"gain": 192},
+        effective={"gain": 192},
     )
     capture_video.progress.errors = []
     preview_video = _FakeVideo("/dev/video-preview")
@@ -587,39 +590,43 @@ async def test_stop_validation_failure_reaches_terminal_state_before_preview_res
     coordinator.video = capture_video  # type: ignore[assignment]
     coordinator.ble = ble  # type: ignore[assignment]
 
-    async def probe(*_args, **_kwargs) -> VideoFrameTable:
-        return VideoFrameTable(
-            pts_monotonic_ns=np.asarray([1_050_000_000, 1_083_333_333]),
-            duration_ns=np.asarray([33_333_333, 33_333_333]),
-            key_frame=np.asarray([True, False]),
-            codec="h264",
-            width=1920,
-            height=1080,
-        )
-
-    async def normalize(source: Path, target: Path) -> None:
-        target.write_bytes(source.read_bytes())
-
-    def fail_validation(*_args, **_kwargs):
-        raise BlockingIOError(11, "fixture H5 lock")
-
     async def restore_preview(_camera_id: str | None):
         persisted = coordinator.catalog.get(recording_id)
         assert coordinator.writer is None
         assert persisted is not None
-        assert persisted.state == RecordingState.NEEDS_ATTENTION
+        assert persisted.state == RecordingState.FINALIZING
+        assert persisted.finalization_job is not None
+        assert persisted.finalization_job.state.value == "queued"
+        with h5py.File(partial_h5, "r") as handle:
+            assert handle.attrs["state"] == "pending_finalization"
         return {"camera_id": "fixture"}, preview_video
 
-    monkeypatch.setattr("imu_data_collector.coordinator.probe_video_frames", probe)
-    monkeypatch.setattr("imu_data_collector.coordinator.normalize_video_timeline", normalize)
-    monkeypatch.setattr("imu_data_collector.coordinator.validate_capture_h5", fail_validation)
     coordinator._open_preview_video = restore_preview  # type: ignore[method-assign]
 
     result = await coordinator.stop()
 
-    assert result.state == RecordingState.NEEDS_ATTENTION
-    assert any("H5 收尾验证失败" in issue for issue in result.issues), result.issues
-    assert coordinator.state == RecordingState.NEEDS_ATTENTION
+    assert result.state == RecordingState.FINALIZING
+    assert result.finalization_job is not None
+    assert result.finalization_job.state.value == "queued"
+    assert coordinator.state == RecordingState.IDLE
     assert coordinator.writer is None
     assert coordinator.video is preview_video
-    assert Path(result.h5_path or "").name == f"{recording_id}.h5"
+    assert Path(result.h5_path or "").name == f"{recording_id}.partial.h5"
+
+    with pytest.raises(ValueError, match="仍在执行或等待自动重试"):
+        await coordinator.retry_finalization(recording_id)
+
+    claimed = coordinator.catalog.claim_next_job()
+    assert claimed is not None
+    failed = coordinator.catalog.fail_job(
+        recording_id,
+        BackgroundJobKind.FINALIZE,
+        "fixture failure",
+        (),
+    )
+    assert failed.state.value == "failed"
+    await coordinator.retry_finalization(recording_id)
+    retried = coordinator.catalog.get_job(recording_id, BackgroundJobKind.FINALIZE)
+    assert retried is not None
+    assert retried[0].state.value == "queued"
+    assert retried[1]["camera_controls_requested"] == {"gain": 192}

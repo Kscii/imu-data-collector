@@ -60,6 +60,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         _app.state.startup_revalidation = await asyncio.to_thread(
             coordinator.revalidate_unuploaded_recordings
         )
+        _app.state.background_jobs = await coordinator.start_background_jobs()
         yield
         await coordinator.shutdown()
 
@@ -99,6 +100,11 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
             "allowed_unikeys": list(active.identity.allowed_unikeys),
             "data_tiers": ["test", "prod"],
             "default_data_tier": "test",
+            "background_jobs": {
+                "allow_during_recording": active.background_jobs.allow_during_recording,
+                "automatic_prod_publish": True,
+                "max_attempts": len(active.background_jobs.retry_delays_seconds) + 1,
+            },
             "imu": {
                 "name": active.imu.name,
                 "address": active.imu.address,
@@ -160,7 +166,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
                 ),
             ) from error
 
-    @app.post("/api/v1/recordings/stop")
+    @app.post("/api/v1/recordings/stop", status_code=202)
     async def stop() -> dict[str, Any]:
         try:
             return (await coordinator.stop()).model_dump(mode="json")
@@ -264,11 +270,24 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         except (OSError, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.post("/api/v1/recordings/{recording_id}/publish")
+    @app.post("/api/v1/recordings/{recording_id}/publish", status_code=202)
     async def publish(recording_id: str) -> dict[str, Any]:
         required(recording_id)
         try:
             return await coordinator.publish(recording_id)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post(
+        "/api/v1/recordings/{recording_id}/finalization/retry",
+        status_code=202,
+    )
+    async def retry_finalization(recording_id: str) -> dict[str, Any]:
+        required(recording_id)
+        try:
+            return await coordinator.retry_finalization(recording_id)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except Exception as error:

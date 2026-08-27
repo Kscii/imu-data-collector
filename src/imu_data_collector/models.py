@@ -58,6 +58,23 @@ class PublishState(StrEnum):
     FAILED = "failed"
 
 
+class BackgroundJobKind(StrEnum):
+    """本机持久化后台任务类型。"""
+
+    FINALIZE = "finalize"
+    PUBLISH = "publish"
+
+
+class BackgroundJobState(StrEnum):
+    """后台任务只保存当前状态，不累积无界历史。"""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class BinaryLabel(StrEnum):
     FALL = "fall"
     NON_FALL = "non_fall"
@@ -163,6 +180,57 @@ class AnnotationDocument(BaseModel):
     segments: list[ActivitySegment] = Field(default_factory=list)
     events: list[AnnotationEvent] = Field(default_factory=list)
     exclusions: list[ExclusionInterval] = Field(default_factory=list)
+
+
+class ActivityTaxonomyEntry(BaseModel):
+    """可持久化、可停用的活动标签。"""
+
+    code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    display_name_zh: str = Field(min_length=1, max_length=80)
+    display_name_en: str = Field(min_length=1, max_length=80)
+    active: bool = True
+
+
+class ActivityTaxonomyDefinition(BaseModel):
+    """一个不可变的活动分类表版本。"""
+
+    taxonomy_id: str = Field(min_length=1, max_length=80)
+    version: str = Field(min_length=1, max_length=80)
+    revision: int = Field(default=1, ge=1)
+    fall: list[ActivityTaxonomyEntry] = Field(min_length=1)
+    non_fall: list[ActivityTaxonomyEntry] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_codes(self) -> ActivityTaxonomyDefinition:
+        codes = [item.code for item in (*self.fall, *self.non_fall)]
+        if len(codes) != len(set(codes)):
+            raise ValueError("activity taxonomy codes must be unique")
+        return self
+
+
+class ActivityTaxonomyCreateRequest(BaseModel):
+    expected_version: str = Field(min_length=1, max_length=80)
+    binary_label: BinaryLabel
+    code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    display_name_zh: str = Field(min_length=1, max_length=80)
+    display_name_en: str = Field(min_length=1, max_length=80)
+
+
+class ActivityTaxonomyUpdateRequest(BaseModel):
+    expected_version: str = Field(min_length=1, max_length=80)
+    display_name_zh: str | None = Field(default=None, min_length=1, max_length=80)
+    display_name_en: str | None = Field(default=None, min_length=1, max_length=80)
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_change(self) -> ActivityTaxonomyUpdateRequest:
+        if (
+            self.display_name_zh is None
+            and self.display_name_en is None
+            and self.active is None
+        ):
+            raise ValueError("taxonomy update requires at least one change")
+        return self
 
 
 class SyncAnchor(BaseModel):
@@ -403,6 +471,20 @@ class CharacterizationStageRequest(BaseModel):
     notes: str = Field(default="", max_length=2000)
 
 
+class BackgroundJobStatus(BaseModel):
+    """面向 API 和前端的后台任务当前快照。"""
+
+    kind: BackgroundJobKind
+    state: BackgroundJobState
+    phase: str = "queued"
+    attempts: int = Field(default=0, ge=0)
+    max_attempts: int = Field(default=4, ge=1)
+    next_attempt_at_utc: str | None = None
+    last_error: str | None = None
+    created_at_utc: str
+    updated_at_utc: str
+
+
 class RecordingSummary(BaseModel):
     recording_id: str
     collection_id: str
@@ -425,6 +507,8 @@ class RecordingSummary(BaseModel):
     )
     index_message: str = ""
     manifest_generation: int | None = None
+    finalization_job: BackgroundJobStatus | None = None
+    upload_job: BackgroundJobStatus | None = None
 
 
 class ArtifactDescriptor(BaseModel):

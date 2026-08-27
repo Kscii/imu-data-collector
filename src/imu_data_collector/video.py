@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import glob
-import json
 import re
+import shutil
 import signal
 import time
 from collections import deque
@@ -31,6 +31,10 @@ async def _run_capture(
         stdout, stderr = await asyncio.wait_for(
             process.communicate(), timeout=timeout_seconds
         )
+    except asyncio.CancelledError:
+        process.kill()
+        await process.communicate()
+        raise
     except TimeoutError:
         process.kill()
         stdout, stderr = await process.communicate()
@@ -633,8 +637,16 @@ async def probe_video_frames(
     recording_start_monotonic_ns: int,
     *,
     pts_are_monotonic: bool = True,
+    timeout_seconds: float = 600.0,
+    stall_timeout_seconds: float = 90.0,
+    nice_value: int = 0,
 ) -> VideoFrameTable:
-    code, stdout, stderr = await _run_capture(
+    command: list[str] = []
+    if shutil.which("ionice"):
+        command.extend(("ionice", "-c", "2", "-n", "7"))
+    if nice_value and shutil.which("nice"):
+        command.extend(("nice", "-n", str(nice_value)))
+    command.extend((
         "ffprobe",
         "-v",
         "error",
@@ -645,27 +657,68 @@ async def probe_video_frames(
         "-show_entries",
         "stream=codec_name,width,height:frame=pts_time,best_effort_timestamp_time,pkt_duration_time,key_frame",
         "-of",
-        "json",
+        "compact=p=1:nk=0",
         str(path),
-        timeout_seconds=120.0,
+    ))
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        close_fds=True,
     )
-    if code:
-        raise RuntimeError(f"ffprobe failed: {stderr}")
-    payload = json.loads(stdout)
-    streams = payload.get("streams", [])
-    if not streams:
-        raise ValueError("recorded MKV has no video stream")
-    frames = payload.get("frames", [])
+    assert process.stdout is not None
+    assert process.stderr is not None
     pts_seconds: list[float] = []
     durations: list[float] = []
     keys: list[bool] = []
-    for frame in frames:
-        pts_value = frame.get("pts_time", frame.get("best_effort_timestamp_time"))
-        if pts_value is None:
-            continue
-        pts_seconds.append(float(pts_value))
-        durations.append(float(frame.get("pkt_duration_time", 0.0)))
-        keys.append(bool(int(frame.get("key_frame", 0))))
+    stream: dict[str, str] | None = None
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            while True:
+                line = await asyncio.wait_for(
+                    process.stdout.readline(), timeout=stall_timeout_seconds
+                )
+                if not line:
+                    break
+                fields = line.decode(errors="replace").strip().split("|")
+                if not fields:
+                    continue
+                values = {
+                    key: value
+                    for field in fields[1:]
+                    if "=" in field
+                    for key, value in (field.split("=", 1),)
+                }
+                if fields[0] == "stream":
+                    stream = values
+                    continue
+                if fields[0] != "frame":
+                    continue
+                pts_value = values.get(
+                    "pts_time", values.get("best_effort_timestamp_time")
+                )
+                if pts_value is None:
+                    continue
+                pts_seconds.append(float(pts_value))
+                durations.append(float(values.get("pkt_duration_time", 0.0)))
+                keys.append(bool(int(values.get("key_frame", 0))))
+            stderr = (await process.stderr.read()).decode(errors="replace")
+            code = await process.wait()
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
+    except TimeoutError as error:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(
+            f"ffprobe 超时：{path.name}，总时限 {timeout_seconds:.0f} 秒，"
+            f"无进展时限 {stall_timeout_seconds:.0f} 秒"
+        ) from error
+    if code:
+        raise RuntimeError(f"ffprobe failed: {stderr.strip()}")
+    if stream is None:
+        raise ValueError("recorded MKV has no video stream")
     pts = np.rint(np.asarray(pts_seconds, dtype=np.float64) * 1e9).astype(np.int64)
     if len(pts) and not pts_are_monotonic:
         pts = pts - pts[0] + int(recording_start_monotonic_ns)
@@ -674,7 +727,6 @@ async def probe_video_frames(
         positive = duration_ns[duration_ns > 0]
         fallback = int(np.median(np.diff(pts))) if len(pts) > 1 else 0
         duration_ns[duration_ns <= 0] = int(np.median(positive)) if len(positive) else fallback
-    stream = streams[0]
     return VideoFrameTable(
         pts_monotonic_ns=pts,
         duration_ns=duration_ns,
@@ -685,12 +737,23 @@ async def probe_video_frames(
     )
 
 
-async def normalize_video_timeline(source_path: Path, output_path: Path) -> None:
+async def normalize_video_timeline(
+    source_path: Path,
+    output_path: Path,
+    *,
+    timeout_seconds: float = 300.0,
+    nice_value: int = 0,
+) -> None:
     """无损重封装视频码流，使交付 MKV 的首帧媒体 PTS 从零开始。"""
 
     if source_path == output_path:
         raise ValueError("源 MKV 与规范化输出 MKV 不能是同一路径")
-    code, _stdout, stderr = await _run_capture(
+    command: list[str] = []
+    if shutil.which("ionice"):
+        command.extend(("ionice", "-c", "2", "-n", "7"))
+    if nice_value and shutil.which("nice"):
+        command.extend(("nice", "-n", str(nice_value)))
+    command.extend((
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
@@ -703,7 +766,9 @@ async def normalize_video_timeline(source_path: Path, output_path: Path) -> None
         "copy",
         "-y",
         str(output_path),
-        timeout_seconds=180.0,
+    ))
+    code, _stdout, stderr = await _run_capture(
+        *command, timeout_seconds=timeout_seconds
     )
     if code:
         raise RuntimeError(f"MKV 时间轴无损重封装失败：{stderr}")

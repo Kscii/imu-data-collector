@@ -376,6 +376,8 @@ def export_aligned30(
                     "sequence_count": 1,
                     "sample_count": sample_count,
                     "annotation_count": len(annotations),
+                    "taxonomy_id": document.annotations.taxonomy_id,
+                    "taxonomy_version": document.annotations.taxonomy_version,
                     "logical_content_sha256": logical_digest,
                 }
             )

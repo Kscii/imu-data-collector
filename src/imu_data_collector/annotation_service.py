@@ -34,6 +34,10 @@ from imu_data_collector.config import (
 from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
+    ActivityTaxonomyCreateRequest,
+    ActivityTaxonomyDefinition,
+    ActivityTaxonomyEntry,
+    ActivityTaxonomyUpdateRequest,
     AnnotationCapabilities,
     AnnotationDocument,
     AnnotationEvent,
@@ -54,6 +58,7 @@ from imu_data_collector.review import ReviewConflictError, workflow_with_timesta
 from imu_data_collector.storage import ObjectConflictError, ObjectStore
 from imu_data_collector.sync import assess_conditional_fixed_offset
 from imu_data_collector.sync_experiment import read_frame_times, read_sync_window
+from imu_data_collector.taxonomy_store import ActivityTaxonomyStore
 from imu_data_collector.validation import validate_annotations
 
 logger = logging.getLogger(__name__)
@@ -74,7 +79,9 @@ class AnnotationService:
     def __init__(self, settings: Settings, store: ObjectStore) -> None:
         self.settings = settings
         self.store = store
-        self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
+        seed_taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
+        self.taxonomies = ActivityTaxonomyStore(store, seed_taxonomy)
+        self.taxonomy = self.taxonomies.current()[0].model_dump(mode="json")
         self.calibration_evidence = load_calibration_evidence(
             settings.calibration_evidence_path
         )
@@ -88,6 +95,141 @@ class AnnotationService:
         self.reviews = AnnotationReviewStore(store, self.taxonomy)
         self._release_delete_lock = threading.RLock()
         self._catalog_refresh_lock = threading.Lock()
+
+    def _publish_taxonomy(self, definition: ActivityTaxonomyDefinition) -> dict[str, Any]:
+        payload = definition.model_dump(mode="json")
+        self.taxonomy = payload
+        self.reviews.taxonomy = payload
+        return payload
+
+    def taxonomy_definition(self, version: str | None = None) -> dict[str, Any]:
+        """返回当前或历史活动分类表；历史快照从不被当前配置重写。"""
+
+        try:
+            definition = (
+                self.taxonomies.version(version)
+                if version is not None
+                else self.taxonomies.current()[0]
+            )
+        except FileNotFoundError as error:
+            raise KeyError(version) from error
+        if version is None and definition.version != self.taxonomy["version"]:
+            self._publish_taxonomy(definition)
+        return definition.model_dump(mode="json")
+
+    def _taxonomy_usage(self) -> dict[str, int]:
+        usage = {
+            item["code"]: 0
+            for label in ("fall", "non_fall")
+            for item in self.taxonomy[label]
+        }
+        for manifest in self.catalog.list():
+            try:
+                payload, _generation = self.store.read_json(
+                    self.reviews.key(manifest.recording_id)
+                )
+                review = ReviewDocument.model_validate(payload)
+            except (FileNotFoundError, ValidationError, ValueError):
+                continue
+            for segment in review.annotations.segments:
+                usage[segment.activity_code] = usage.get(segment.activity_code, 0) + 1
+        return usage
+
+    def taxonomy_admin_summary(self) -> dict[str, Any]:
+        definition = self.taxonomy_definition()
+        usage = self._taxonomy_usage()
+        return {
+            **definition,
+            "fall": [
+                {**item, "usage_count": usage.get(item["code"], 0)}
+                for item in definition["fall"]
+            ],
+            "non_fall": [
+                {**item, "usage_count": usage.get(item["code"], 0)}
+                for item in definition["non_fall"]
+            ],
+        }
+
+    def create_taxonomy_activity(
+        self, request: ActivityTaxonomyCreateRequest
+    ) -> dict[str, Any]:
+        def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
+            if any(
+                item.code == request.code
+                for item in (*current.fall, *current.non_fall)
+            ):
+                raise ValueError(f"活动标签 code 已存在：{request.code}")
+            entry = ActivityTaxonomyEntry(
+                code=request.code,
+                display_name_zh=request.display_name_zh.strip(),
+                display_name_en=request.display_name_en.strip(),
+            )
+            field = request.binary_label.value
+            return current.model_copy(
+                update={field: [*getattr(current, field), entry]}
+            )
+
+        return self._publish_taxonomy(
+            self.taxonomies.mutate(request.expected_version, update)
+        )
+
+    def update_taxonomy_activity(
+        self, code: str, request: ActivityTaxonomyUpdateRequest
+    ) -> dict[str, Any]:
+        def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
+            found = False
+            changes = {
+                name: value.strip() if isinstance(value, str) else value
+                for name, value in {
+                    "display_name_zh": request.display_name_zh,
+                    "display_name_en": request.display_name_en,
+                    "active": request.active,
+                }.items()
+                if value is not None
+            }
+            updated: dict[str, list[ActivityTaxonomyEntry]] = {}
+            for label in ("fall", "non_fall"):
+                entries = []
+                for item in getattr(current, label):
+                    if item.code == code:
+                        found = True
+                        item = ActivityTaxonomyEntry.model_validate(
+                            item.model_dump(mode="json") | changes
+                        )
+                    entries.append(item)
+                updated[label] = entries
+            if not found:
+                raise KeyError(code)
+            if any(not any(item.active for item in entries) for entries in updated.values()):
+                raise ValueError("每个标签类型至少保留一个启用活动")
+            return current.model_copy(update=updated)
+
+        return self._publish_taxonomy(
+            self.taxonomies.mutate(request.expected_version, update)
+        )
+
+    def delete_taxonomy_activity(self, code: str, expected_version: str) -> dict[str, Any]:
+        usage = self._taxonomy_usage().get(code, 0)
+        if usage:
+            raise ValueError(f"活动标签已被 {usage} 个区间使用，只能停用")
+
+        def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
+            found = False
+            updated: dict[str, list[ActivityTaxonomyEntry]] = {}
+            for label in ("fall", "non_fall"):
+                entries = [item for item in getattr(current, label) if item.code != code]
+                if len(entries) != len(getattr(current, label)):
+                    found = True
+                if not entries:
+                    raise ValueError("每个标签类型至少保留一个活动")
+                updated[label] = entries
+            if not found:
+                raise KeyError(code)
+            return current.model_copy(update=updated)
+
+        return self._publish_taxonomy(
+            self.taxonomies.mutate(expected_version, update)
+        )
 
     @contextmanager
     def _cache_lock(self, digest: str) -> Iterator[None]:
@@ -714,9 +856,34 @@ class AnnotationService:
         if current.revision != expected_revision:
             raise ReviewConflictError("review.json 已更新，请刷新后重试")
         self._require_current_annotator(current, actor_id)
+        current_taxonomy = self.taxonomy_definition()
+        active_codes = {
+            item["code"]
+            for label in ("fall", "non_fall")
+            for item in current_taxonomy[label]
+            if item.get("active", True)
+        }
+        previous_codes = {
+            (item.segment_id, item.activity_code)
+            for item in current.annotations.segments
+        }
+        newly_selected_inactive = sorted(
+            {
+                item.activity_code
+                for item in document.segments
+                if item.activity_code not in active_codes
+                and (item.segment_id, item.activity_code) not in previous_codes
+            }
+        )
+        if newly_selected_inactive:
+            raise ValueError(
+                "停用标签不能用于新标注：" + "、".join(newly_selected_inactive)
+            )
         h5_path = self.cached_h5(manifest)
         document = document.model_copy(
             update={
+                "taxonomy_id": current_taxonomy["taxonomy_id"],
+                "taxonomy_version": current_taxonomy["version"],
                 "segments": [
                     item.model_copy(update={"annotator_id": actor_id})
                     for item in document.segments
@@ -738,7 +905,7 @@ class AnnotationService:
         }
         if len(annotators) > 1:
             raise ValueError("一个 review.json 修订只能由一名标注者保存")
-        issues = validate_annotations(enriched, self.taxonomy, manifest.duration_ns)
+        issues = validate_annotations(enriched, current_taxonomy, manifest.duration_ns)
         if issues:
             raise ValueError("；".join(issues))
         if enriched.revision != current.annotations.revision + 1:
@@ -1146,6 +1313,14 @@ class AnnotationService:
             / f"review-{expected_revision}"
             / "aligned30.h5"
         )
+        try:
+            export_taxonomy = self.taxonomy_definition(
+                review.annotations.taxonomy_version
+            )
+        except KeyError as error:
+            raise ValueError(
+                f"找不到标注使用的 taxonomy 版本：{review.annotations.taxonomy_version}"
+            ) from error
         export_aligned30(
             review,
             h5_path,
@@ -1163,7 +1338,7 @@ class AnnotationService:
                 calibration_method=authoritative.method,
                 calibration_evidence_sha256=authoritative.evidence_sha256,
             ),
-            self.taxonomy,
+            export_taxonomy,
             source_hashes_verified=True,
         )
         digest = sha256_file(output)
