@@ -19,6 +19,7 @@ from imu_data_collector.config import (
     StorageSettings,
     load_settings,
 )
+from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
@@ -106,7 +107,7 @@ def _publish_calibrated_recording(
     with h5py.File(h5_path, "w") as handle:
         handle.attrs.update(
             {
-                "capture_schema_version": "2.0.0",
+                "capture_schema_version": CAPTURE_SCHEMA_VERSION,
                 "recording_id": recording_id,
                 "collection_id": "pilot",
                 "participant_id": "xfan0282",
@@ -206,7 +207,7 @@ def _publish_calibrated_recording(
         data_tier=DataTier.PROD,
         captured_at_utc=started_at,
         duration_ns=2_000_000_000,
-        source_h5_schema_version="2.0.0",
+        source_h5_schema_version=CAPTURE_SCHEMA_VERSION,
         software_revision="test",
         calibration=calibration,
         artifacts=descriptors,
@@ -287,7 +288,12 @@ def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> Non
     recording_id = _publish_calibrated_recording(settings, store, tmp_path)
     app = create_annotation_app(settings, store)
     service = app.state.annotation_service
-    assert service.refresh() == {"imported": 1, "skipped": 0}
+    assert service.refresh() == {
+        "imported": 1,
+        "unchanged": 0,
+        "skipped": 0,
+        "issues": [],
+    }
     _accepted_review(service, recording_id)
 
     first_review = service.review(recording_id)
@@ -434,7 +440,10 @@ def test_manifest_without_sha256_metadata_is_not_indexed(tmp_path: Path) -> None
     ).unlink()
     service = create_annotation_app(settings, store).state.annotation_service
 
-    assert service.refresh() == {"imported": 0, "skipped": 1}
+    result = service.refresh()
+    assert result["imported"] == 0
+    assert result["skipped"] == 1
+    assert result["issues"][0]["code"] == "artifact_sha_missing"
     assert service.list_recordings() == []
 
 

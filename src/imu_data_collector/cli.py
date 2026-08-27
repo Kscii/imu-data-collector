@@ -28,7 +28,11 @@ from imu_data_collector.characterization import (
 )
 from imu_data_collector.config import load_activity_taxonomy, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
-from imu_data_collector.cw12eu import parse_notification
+from imu_data_collector.cw12eu import (
+    NotificationKind,
+    classify_notification,
+    parse_notification,
+)
 from imu_data_collector.models import (
     CharacterizationStage,
     CharacterizationStageRequest,
@@ -170,6 +174,7 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
     packet_lengths: Counter[int] = Counter()
     packet_times: list[int] = []
     parsed_samples = 0
+    auxiliary_notifications = 0
     parse_errors: list[str] = []
     first_payload_hex: str | None = None
     await source.start()
@@ -188,6 +193,18 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
                 first_payload_hex = packet.payload.hex()
             packet_lengths[len(packet.payload)] += 1
             packet_times.append(packet.receive_time_ns)
+            kind = classify_notification(
+                packet.payload, settings.imu.frame_size_bytes
+            )
+            if kind == NotificationKind.AUXILIARY_STATUS:
+                auxiliary_notifications += 1
+                continue
+            if kind == NotificationKind.UNKNOWN_INVALID:
+                parse_errors.append(
+                    f"unknown notification length {len(packet.payload)}: "
+                    f"{packet.payload.hex()}"
+                )
+                continue
             try:
                 parsed_samples += parse_notification(
                     packet.payload, settings.imu.frame_size_bytes
@@ -220,6 +237,7 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
         "packet_count": len(packet_times),
         "packet_length_histogram": dict(sorted(packet_lengths.items())),
         "parsed_candidate_samples": parsed_samples,
+        "auxiliary_notifications": auxiliary_notifications,
         "estimated_sample_coverage_seconds": coverage_seconds,
         "candidate_sample_rate_hz": estimated_rate_hz,
         "packet_interval_median_ms": percentile(intervals_ms, 0.5),

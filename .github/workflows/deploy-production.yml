@@ -48,7 +48,8 @@ jobs:
           tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
             --exclude='*/__pycache__' --exclude='*.pyc' -czf "${bundle}" \
             LICENSE README.md pyproject.toml uv.lock \
-            configs/activities.yaml configs/systemd/imu-annotation.service \
+            configs/activities.yaml configs/calibration-evidence.yaml \
+            configs/systemd/imu-annotation.service \
             configs/systemd/imu-annotation-gc.service \
             configs/systemd/imu-annotation-gc.timer \
             frontend/dist-annotation src

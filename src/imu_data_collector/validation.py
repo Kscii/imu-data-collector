@@ -199,6 +199,7 @@ def validate_capture_h5(
         )
         if schema_version == CAPTURE_SCHEMA_VERSION:
             required += (
+                "imu/packets/packet_kind",
                 "imu/packets/fitted_packet_end_time_ns",
                 "imu/packets/fit_residual_ns",
                 "imu/connection_events/event",
@@ -215,6 +216,16 @@ def validate_capture_h5(
         offsets = np.asarray(handle["imu/packets/payload_offsets"], dtype=np.int64)
         receive = np.asarray(handle["imu/packets/receive_time_ns"], dtype=np.int64)
         sample_counts = np.asarray(handle["imu/packets/sample_count"], dtype=np.int64)
+        packet_kinds = (
+            np.asarray(handle["imu/packets/packet_kind"], dtype=np.uint8)
+            if "imu/packets/packet_kind" in handle
+            else None
+        )
+        parse_valid = (
+            np.asarray(handle["imu/packets/parse_valid"], dtype=np.bool_)
+            if "imu/packets/parse_valid" in handle
+            else None
+        )
         fitted_packet_end = (
             handle["imu/packets/fitted_packet_end_time_ns"]
             if "imu/packets/fitted_packet_end_time_ns" in handle
@@ -267,6 +278,10 @@ def validate_capture_h5(
             issues.append("packet payload offsets are invalid")
         if len(sample_counts) != packet_count:
             issues.append("packet sample_count length mismatch")
+        if packet_kinds is not None and len(packet_kinds) != packet_count:
+            issues.append("packet kind length mismatch")
+        if parse_valid is not None and len(parse_valid) != packet_count:
+            issues.append("packet parse_valid length mismatch")
         if fitted_packet_end is not None and len(fitted_packet_end) != packet_count:
             issues.append("fitted packet timestamp length mismatch")
         if packet_fit_residual is not None and len(packet_fit_residual) != packet_count:
@@ -282,6 +297,40 @@ def validate_capture_h5(
         if parse_error_count > 0:
             issues.append(f"IMU packet parsing failed {parse_error_count} times")
         if schema_version == CAPTURE_SCHEMA_VERSION:
+            assert packet_kinds is not None
+            assert parse_valid is not None
+            allowed_kinds = {1, 2, 255}
+            actual_kinds = {int(value) for value in np.unique(packet_kinds)}
+            if not actual_kinds.issubset(allowed_kinds):
+                issues.append("packet_kind contains unsupported values")
+            imu_mask = packet_kinds == 1
+            auxiliary_mask = packet_kinds == 2
+            unknown_mask = packet_kinds == 255
+            imu_packet_count = int(np.count_nonzero(imu_mask))
+            auxiliary_count = int(np.count_nonzero(auxiliary_mask))
+            unknown_count = int(np.count_nonzero(unknown_mask))
+            metrics.update(
+                imu_packet_count=imu_packet_count,
+                auxiliary_notification_count=auxiliary_count,
+                unknown_notification_count=unknown_count,
+            )
+            for name, observed in (
+                ("imu_packet_count", imu_packet_count),
+                ("auxiliary_notification_count", auxiliary_count),
+                ("unknown_notification_count", unknown_count),
+            ):
+                if name not in handle.attrs:
+                    issues.append(f"missing notification count attribute {name}")
+                elif int(handle.attrs[name]) != observed:
+                    issues.append(f"notification count attribute mismatch: {name}")
+            if not np.array_equal(parse_valid, imu_mask):
+                issues.append("parse_valid must be true only for IMU sample packets")
+            if np.any(sample_counts[~imu_mask] != 0):
+                issues.append("non-IMU notifications must have zero sample_count")
+            if np.any(sample_counts[imu_mask] <= 0):
+                issues.append("IMU sample packets must have positive sample_count")
+            if parse_error_count != unknown_count:
+                issues.append("parse_error_count must equal unknown notification count")
             observed_rate_hz = float(metrics["observed_rate_hz"])
             if expected_rate_hz > 0 and not (
                 expected_rate_hz * 0.95

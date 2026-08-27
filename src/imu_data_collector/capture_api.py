@@ -269,6 +269,16 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @app.get("/api/v1/recordings/{recording_id}/publish/status")
+    async def publish_status(recording_id: str) -> dict[str, Any]:
+        required(recording_id)
+        try:
+            return (
+                await coordinator.refresh_publish_status(recording_id)
+            ).model_dump(mode="json")
+        except Exception as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     @app.delete("/api/v1/recordings/{recording_id}")
     async def delete(
         recording_id: str, request: RecordingDeleteRequest

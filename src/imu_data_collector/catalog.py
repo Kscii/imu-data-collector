@@ -37,7 +37,10 @@ class RecordingCatalog:
                     h5_path TEXT,
                     mkv_path TEXT,
                     issues_json TEXT NOT NULL DEFAULT '[]',
-                    upload_state TEXT NOT NULL DEFAULT 'not_requested'
+                    upload_state TEXT NOT NULL DEFAULT 'not_requested',
+                    index_state TEXT NOT NULL DEFAULT 'not_requested',
+                    index_message TEXT NOT NULL DEFAULT '',
+                    manifest_generation INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS recordings_collection_idx
                     ON recordings(collection_id, started_at_utc);
@@ -61,6 +64,15 @@ class RecordingCatalog:
                     "ALTER TABLE recordings ADD COLUMN data_tier "
                     "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
                 )
+            for name, definition in (
+                ("index_state", "TEXT NOT NULL DEFAULT 'not_requested'"),
+                ("index_message", "TEXT NOT NULL DEFAULT ''"),
+                ("manifest_generation", "INTEGER"),
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE recordings ADD COLUMN {name} {definition}"
+                    )
 
     def upsert(self, summary: RecordingSummary) -> None:
         payload = summary.model_dump(mode="json")
@@ -70,8 +82,9 @@ class RecordingCatalog:
                 INSERT INTO recordings (
                     recording_id, collection_id, participant_id, data_tier, state,
                     started_at_utc, ended_at_utc, duration_ns, h5_path, mkv_path,
-                    issues_json, upload_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    issues_json, upload_state, index_state, index_message,
+                    manifest_generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recording_id) DO UPDATE SET
                     data_tier=excluded.data_tier,
                     state=excluded.state,
@@ -80,7 +93,10 @@ class RecordingCatalog:
                     h5_path=excluded.h5_path,
                     mkv_path=excluded.mkv_path,
                     issues_json=excluded.issues_json,
-                    upload_state=excluded.upload_state
+                    upload_state=excluded.upload_state,
+                    index_state=excluded.index_state,
+                    index_message=excluded.index_message,
+                    manifest_generation=excluded.manifest_generation
                 """,
                 (
                     payload["recording_id"],
@@ -95,6 +111,9 @@ class RecordingCatalog:
                     payload["mkv_path"],
                     json.dumps(payload["issues"], ensure_ascii=False),
                     payload["upload_state"],
+                    payload["index_state"],
+                    payload["index_message"],
+                    payload["manifest_generation"],
                 ),
             )
 
@@ -147,4 +166,7 @@ class RecordingCatalog:
             mkv_path=row["mkv_path"],
             issues=json.loads(row["issues_json"]),
             upload_state=row["upload_state"],
+            index_state=row["index_state"],
+            index_message=row["index_message"],
+            manifest_generation=row["manifest_generation"],
         )

@@ -22,6 +22,7 @@ from imu_data_collector.auth import (
     AuthorizationError,
     TokenVerifier,
 )
+from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.models import (
     AnnotationRecordingDeleteRequest,
@@ -73,6 +74,7 @@ def create_annotation_app(
     async def lifespan(_app: FastAPI):
         interval = active.annotation.catalog_refresh_interval_s
         refresh_thread: threading.Thread | None = None
+        service.publish_capabilities()
         if interval > 0:
             refresh_stop.clear()
             refresh_thread = threading.Thread(
@@ -133,6 +135,7 @@ def create_annotation_app(
         return {
             "ok": True,
             "application": "annotation",
+            "build_id": ANNOTATION_API_BUILD_ID,
         }
 
     @app.get("/api/v1/config")
@@ -162,7 +165,7 @@ def create_annotation_app(
         return service.taxonomy
 
     @app.post("/api/v1/index/refresh")
-    def refresh(request: Request) -> dict[str, int]:
+    def refresh(request: Request) -> dict[str, Any]:
         admin_actor(request)
         return service.refresh()
 

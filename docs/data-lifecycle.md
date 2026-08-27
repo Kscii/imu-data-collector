@@ -4,15 +4,19 @@
 
 每个 `recording_id` 有独立本地目录。正常收尾后事实层是同名 H5/MKV；两者不再因同步、
 标注或审核而修改。用户在采集页确认后手动发布 `capture.h5`、`video.mkv`、可重建的
-`preview.mp4`，最后写入 `manifest.json`。只有 manifest 已出现且三个对象的大小与 SHA-256
-一致，标注端才会索引该录制。
+`preview.mp4`，最后写入 `manifest.json`。GCS 发布前，采集端必须先读取
+`contracts/annotation-capabilities.json`，确认标注端接受当前 manifest 和 capture H5 schema；
+能力不兼容时不会上传任何对象。只有 manifest 已出现且三个对象的大小与 SHA-256 一致，标注端
+才会索引该录制，并写入 `index-receipts/<recording_id>.json`。
 
 `review.json` 只保存当前同步、标注、工作流状态、最新审核意见和单调增加的 revision。并发
 保存必须携带预期 revision；过期写入返回冲突，不覆盖新结果。不保留完整编辑历史。
 
 云端标注服务默认每 10 秒后台扫描一次 `captures/` 中的 manifest。SQLite catalog 保存已见
 generation，未变化的录制不会重复下载 manifest 或重新校验三个制品。后台扫描失败时继续提供
-已有索引，并在下一轮重试；管理员还可以在标注页面点击“立即扫描 Bucket”强制刷新。
+已有索引，并在下一轮重试；管理员还可以在标注页面点击“立即扫描 Bucket”强制刷新。扫描结果
+分别报告导入、未变化和拒绝条目，并给出录制 ID、阶段、稳定错误码和消息。采集页依据回执明确
+显示“已上传 Bucket”“标注端已接收”或“标注端拒绝”，不再用一个“已发布”混淆两步。
 
 工作流固定为：
 

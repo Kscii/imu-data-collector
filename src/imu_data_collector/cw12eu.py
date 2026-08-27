@@ -5,10 +5,36 @@ from __future__ import annotations
 import math
 import struct
 from dataclasses import dataclass
+from enum import IntEnum
 
 import numpy as np
 
 from imu_data_collector.constants import CW12EU_FRAME_BYTES, STANDARD_GRAVITY_MPS2
+
+
+class NotificationKind(IntEnum):
+    """写入 H5 的稳定通知类型码。"""
+
+    IMU_SAMPLES = 1
+    AUXILIARY_STATUS = 2
+    UNKNOWN_INVALID = 255
+
+
+# 已在多次真实录制中观察到的 10 字节辅助状态通知。最后两个字节的语义
+# 尚未由供应商协议或独立实验确认，因此只识别包族，不解释电量等字段。
+CW12EU_AUXILIARY_PREFIX = bytes.fromhex("aa1a0200f0f0f0f0")
+
+
+def classify_notification(
+    payload: bytes, frame_size: int = CW12EU_FRAME_BYTES
+) -> NotificationKind:
+    """先区分样本包、已知辅助包和未知无效包。"""
+
+    if len(payload) == 10 and payload.startswith(CW12EU_AUXILIARY_PREFIX):
+        return NotificationKind.AUXILIARY_STATUS
+    if payload and frame_size == CW12EU_FRAME_BYTES and len(payload) % frame_size == 0:
+        return NotificationKind.IMU_SAMPLES
+    return NotificationKind.UNKNOWN_INVALID
 
 
 @dataclass(frozen=True, slots=True)

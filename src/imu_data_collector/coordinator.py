@@ -22,7 +22,11 @@ from imu_data_collector.ble import CW12EUBleSource
 from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
-from imu_data_collector.cw12eu import parse_notification
+from imu_data_collector.cw12eu import (
+    NotificationKind,
+    classify_notification,
+    parse_notification,
+)
 from imu_data_collector.hdf5_store import CaptureH5Writer
 from imu_data_collector.maintenance import (
     hard_delete_recording,
@@ -39,6 +43,7 @@ from imu_data_collector.models import (
     DataTier,
     DeviceSessionState,
     EventKind,
+    IndexReceipt,
     PreviewStartRequest,
     RecordingStartRequest,
     RecordingState,
@@ -1031,6 +1036,14 @@ class RecordingCoordinator:
                 and packet.receive_time_ns >= writer.recording_start_monotonic_ns
             ):
                 writer.append_notification(packet.payload, packet.receive_time_ns)
+            packet_kind = classify_notification(
+                packet.payload, self.settings.imu.frame_size_bytes
+            )
+            if packet_kind == NotificationKind.AUXILIARY_STATUS:
+                continue
+            if packet_kind == NotificationKind.UNKNOWN_INVALID:
+                self.preview_parse_errors += 1
+                continue
             try:
                 parsed = parse_notification(
                     packet.payload, self.settings.imu.frame_size_bytes
@@ -1926,18 +1939,87 @@ class RecordingCoordinator:
         try:
             updating = updating.model_copy(update={"upload_state": "uploading"})
             self.catalog.upsert(updating)
-            manifest = await publish_recording(updating, self.settings, self.object_store)
+            manifest, manifest_generation = await publish_recording(
+                updating, self.settings, self.object_store
+            )
             updating = updating.model_copy(update={"upload_state": "verifying"})
             self.catalog.upsert(updating)
             manifest_key = f"captures/{recording_id}/manifest.json"
             if self.object_store.stat(manifest_key) is None:
                 raise RuntimeError("远端 manifest 验证失败")
-            updating = updating.model_copy(update={"upload_state": "published"})
+            updating = updating.model_copy(
+                update={
+                    "upload_state": "uploaded",
+                    "index_state": "pending",
+                    "index_message": "已上传 Bucket，等待标注端扫描并回执",
+                    "manifest_generation": manifest_generation,
+                }
+            )
             self.catalog.upsert(updating)
-            return manifest.model_dump(mode="json")
+            return {
+                **manifest.model_dump(mode="json"),
+                "manifest_generation": manifest_generation,
+                "upload_state": "uploaded",
+                "index_state": "pending",
+            }
         except Exception:
             self.catalog.upsert(updating.model_copy(update={"upload_state": "failed"}))
             raise
+
+    async def refresh_publish_status(self, recording_id: str) -> RecordingSummary:
+        """读取标注端回执，严格区分上传成功与实际进入标注索引。"""
+
+        summary = self._required_summary(recording_id)
+        if summary.upload_state not in {"uploaded", "published"}:
+            return summary
+        if summary.manifest_generation is None:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": "旧发布记录缺少 manifest generation，需重新录制并发布",
+                }
+            )
+            self.catalog.upsert(updated)
+            return updated
+        key = f"index-receipts/{recording_id}.json"
+        try:
+            payload, _generation = await asyncio.to_thread(
+                self.object_store.read_json, key
+            )
+            receipt = IndexReceipt.model_validate(payload)
+        except FileNotFoundError:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": "已上传 Bucket，等待标注端扫描",
+                }
+            )
+        except ValueError as error:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": f"索引回执格式无效：{error}",
+                }
+            )
+        else:
+            if receipt.manifest_generation != summary.manifest_generation:
+                updated = summary.model_copy(
+                    update={
+                        "index_state": "pending",
+                        "index_message": "回执属于另一版 manifest，等待标注端处理当前版本",
+                    }
+                )
+            else:
+                updated = summary.model_copy(
+                    update={
+                        "index_state": (
+                            "indexed" if receipt.status == "indexed" else "rejected"
+                        ),
+                        "index_message": receipt.message or receipt.code,
+                    }
+                )
+        self.catalog.upsert(updated)
+        return updated
 
     def publish_estimate(self, recording_id: str) -> dict[str, int | str]:
         summary = self._required_summary(recording_id)

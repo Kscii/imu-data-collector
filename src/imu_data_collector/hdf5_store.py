@@ -21,7 +21,9 @@ from imu_data_collector.constants import (
     FEATURE_UNITS,
 )
 from imu_data_collector.cw12eu import (
+    NotificationKind,
     calibrate_counts,
+    classify_notification,
     parse_notification,
     reconstruct_sample_times,
 )
@@ -93,6 +95,9 @@ class CaptureH5Writer:
         self.handle = h5py.File(path, "w", libver="latest")
         self._disable_file_descriptor_inheritance()
         self.packet_count = 0
+        self.imu_packet_count = 0
+        self.auxiliary_notification_count = 0
+        self.unknown_notification_count = 0
         self.sample_count = 0
         self.parse_errors: list[str] = []
         self._initialize()
@@ -206,6 +211,7 @@ class CaptureH5Writer:
             ("fit_residual_ns", "i8"),
             ("sample_count", "u2"),
             ("parse_valid", "?"),
+            ("packet_kind", "u1"),
         ):
             packets.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(1_024,))
 
@@ -391,6 +397,32 @@ class CaptureH5Writer:
         )
         _resize_append(packets["fit_residual_ns"], np.asarray([0], dtype=np.int64))
 
+        kind = classify_notification(payload, self.imu_settings.frame_size_bytes)
+        _resize_append(
+            packets["packet_kind"], np.asarray([int(kind)], dtype=np.uint8)
+        )
+
+        if kind == NotificationKind.AUXILIARY_STATUS:
+            _resize_append(packets["sample_count"], np.asarray([0], dtype=np.uint16))
+            _resize_append(packets["parse_valid"], np.asarray([False], dtype=np.bool_))
+            self.packet_count += 1
+            self.auxiliary_notification_count += 1
+            self._update_notification_counts()
+            self.handle.flush()
+            return 0
+
+        if kind == NotificationKind.UNKNOWN_INVALID:
+            _resize_append(packets["sample_count"], np.asarray([0], dtype=np.uint16))
+            _resize_append(packets["parse_valid"], np.asarray([False], dtype=np.bool_))
+            self.parse_errors.append(
+                f"unknown notification length {len(payload)}: {payload.hex()}"
+            )
+            self.packet_count += 1
+            self.unknown_notification_count += 1
+            self._update_notification_counts()
+            self.handle.flush()
+            return 0
+
         try:
             parsed = parse_notification(payload, self.imu_settings.frame_size_bytes)
         except ValueError as error:
@@ -398,6 +430,9 @@ class CaptureH5Writer:
             _resize_append(packets["parse_valid"], np.asarray([False], dtype=np.bool_))
             self.parse_errors.append(str(error))
             self.packet_count += 1
+            self.unknown_notification_count += 1
+            packets["packet_kind"][-1] = int(NotificationKind.UNKNOWN_INVALID)
+            self._update_notification_counts()
             self.handle.flush()
             return 0
 
@@ -443,11 +478,23 @@ class CaptureH5Writer:
             samples["time_quality"], np.full(parsed.sample_count, 1, dtype=np.uint8)
         )
         self.packet_count += 1
+        self.imu_packet_count += 1
         self.sample_count += parsed.sample_count
-        self.handle.attrs["packet_count"] = self.packet_count
-        self.handle.attrs["sample_count"] = self.sample_count
+        self._update_notification_counts()
         self.handle.flush()
         return parsed.sample_count
+
+    def _update_notification_counts(self) -> None:
+        self.handle.attrs.update(
+            {
+                "packet_count": self.packet_count,
+                "imu_packet_count": self.imu_packet_count,
+                "auxiliary_notification_count": self.auxiliary_notification_count,
+                "unknown_notification_count": self.unknown_notification_count,
+                "sample_count": self.sample_count,
+                "parse_error_count": self.unknown_notification_count,
+            }
+        )
 
     def reconstruct_times(self) -> tuple[float, float]:
         packets = self.handle["imu/packets"]
@@ -756,7 +803,12 @@ class CaptureH5Writer:
                 "ended_at_utc": ended_at_utc or datetime.now(UTC).isoformat(),
                 "duration_ns": max(maxima, default=0),
                 "state": "finalized",
-                "parse_error_count": len(self.parse_errors),
+                "packet_count": self.packet_count,
+                "imu_packet_count": self.imu_packet_count,
+                "auxiliary_notification_count": self.auxiliary_notification_count,
+                "unknown_notification_count": self.unknown_notification_count,
+                "sample_count": self.sample_count,
+                "parse_error_count": self.unknown_notification_count,
                 "parse_errors": json.dumps(self.parse_errors[:20]),
             }
         )

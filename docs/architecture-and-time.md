@@ -109,7 +109,8 @@ GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest�
 ```text
 /
   attrs: participant_id, recording_id, data_tier, clock_domain, schema_version, ...
-  imu/packets/: payload_values, payload_offsets, receive_time_ns, parse_valid,
+  imu/packets/: payload_values, payload_offsets, receive_time_ns, packet_kind,
+                parse_valid,
                 fitted_packet_end_time_ns, fit_residual_ns
   imu/connection_events/: event, time_monotonic_ns, notes
   imu/samples/: raw_counts, trailer, values_si, time_monotonic_ns,
@@ -132,6 +133,10 @@ H5 只按 `legacy_unclassified` 读取，不能进入训练集。`test` 是不�
 分列保存，并增加包拟合诊断、BLE 连接事件和显式排除区间。
 从 schema `1.4.0` 开始，H5 还冻结校准 profile、原始空间零偏、轴顺序、轴符号、目标坐标系、
 比例和证据文件 SHA-256；`values_si` 由这些属性可重建，`raw_counts` 永远不被覆盖。
+从 schema `1.5.0` 开始，每条 BLE 通知还保存稳定的 `packet_kind`：`1` 是 IMU 样本包，`2` 是
+已知 10 字节辅助状态包，`255` 是未知无效包。三类通知都完整保留原始 payload；辅助包的
+`sample_count=0` 且不参与样本时间拟合，也不会被算作解析失败。辅助包末尾字节尚无可靠协议
+证据，因此平台不把它解释成电量。只有未知包会增加 `parse_error_count` 并阻断生产录制。
 
 FFmpeg 的诊断文本会以 JSON 列表随视频元数据保存。例如罗技 C930c 在 MJPEG 启动时
 稳定报告一次 `overread 8`，但重复 20 秒实测均为 601 帧、30.0 FPS，且 PTS 无重复或

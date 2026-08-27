@@ -19,18 +19,22 @@ from typing import Any
 
 import h5py
 import numpy as np
+from pydantic import ValidationError
 
 from imu_data_collector.annotation_catalog import AnnotationCatalog
 from imu_data_collector.annotation_review import AnnotationReviewStore
 from imu_data_collector.artifacts import create_training_release, export_aligned30
+from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import (
     ImuSettings,
     Settings,
     load_activity_taxonomy,
     load_calibration_evidence,
 )
+from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
+    AnnotationCapabilities,
     AnnotationDocument,
     AnnotationEvent,
     AnnotationReviewWorkflowRequest,
@@ -38,6 +42,9 @@ from imu_data_collector.models import (
     CalibrationProfile,
     CaptureManifestV2,
     EventKind,
+    IndexReceipt,
+    IndexRefreshIssue,
+    IndexRefreshResult,
     ReviewDocument,
     ReviewPolicy,
     ReviewWorkflowState,
@@ -52,6 +59,17 @@ from imu_data_collector.sync_experiment import read_frame_times, read_sync_windo
 from imu_data_collector.validation import validate_annotations
 
 logger = logging.getLogger(__name__)
+
+ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.0.0", "2.1.0")
+
+
+class ManifestIndexError(ValueError):
+    """可稳定呈现给采集端和管理员的索引失败。"""
+
+    def __init__(self, code: str, stage: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
 
 
 class AnnotationService:
@@ -87,12 +105,79 @@ class AnnotationService:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def refresh(self) -> dict[str, int]:
+    def publish_capabilities(self) -> AnnotationCapabilities:
+        """公布采集端上传前必须核对的生产能力合同。"""
+
+        capabilities = AnnotationCapabilities(
+            accepted_manifest_schema_versions=list(ACCEPTED_MANIFEST_SCHEMA_VERSIONS),
+            accepted_capture_h5_schema_versions=[CAPTURE_SCHEMA_VERSION],
+            annotation_build_id=ANNOTATION_API_BUILD_ID,
+            generated_at_utc=datetime.now(UTC).isoformat(),
+        )
+        key = "contracts/annotation-capabilities.json"
+        try:
+            _payload, generation = self.store.read_json(key)
+        except FileNotFoundError:
+            generation = 0
+        self.store.write_json(
+            key,
+            capabilities.model_dump(mode="json"),
+            if_generation_match=generation,
+        )
+        return capabilities
+
+    @staticmethod
+    def _receipt_key(recording_id: str) -> str:
+        return f"index-receipts/{recording_id}.json"
+
+    def _receipt_matches(self, recording_id: str, manifest_generation: int) -> bool:
+        try:
+            payload, _generation = self.store.read_json(
+                self._receipt_key(recording_id)
+            )
+            receipt = IndexReceipt.model_validate(payload)
+        except (FileNotFoundError, ValidationError, ValueError):
+            return False
+        return (
+            receipt.manifest_generation == manifest_generation
+            and receipt.status == "indexed"
+        )
+
+    def _write_receipt(
+        self,
+        recording_id: str,
+        manifest_generation: int,
+        *,
+        status: str,
+        code: str,
+        message: str,
+    ) -> IndexReceipt:
+        receipt = IndexReceipt(
+            recording_id=recording_id,
+            manifest_generation=manifest_generation,
+            status=status,
+            annotation_build_id=ANNOTATION_API_BUILD_ID,
+            processed_at_utc=datetime.now(UTC).isoformat(),
+            code=code,
+            message=message,
+        )
+        key = self._receipt_key(recording_id)
+        try:
+            _payload, generation = self.store.read_json(key)
+        except FileNotFoundError:
+            generation = 0
+        self.store.write_json(
+            key,
+            receipt.model_dump(mode="json"),
+            if_generation_match=generation,
+        )
+        return receipt
+
+    def refresh(self) -> dict[str, Any]:
         """扫描 Bucket，并只校验新增或 generation 已变化的 manifest。"""
 
         with self._catalog_refresh_lock:
-            imported = 0
-            skipped = 0
+            result = IndexRefreshResult()
             for info in self.store.list("captures/"):
                 if not info.key.endswith("/manifest.json"):
                     continue
@@ -100,32 +185,129 @@ class AnnotationService:
                     "/manifest.json"
                 )
                 if not recording_id or "/" in recording_id:
-                    skipped += 1
+                    result.skipped += 1
+                    result.issues.append(
+                        IndexRefreshIssue(
+                            recording_id=recording_id or "unknown",
+                            manifest_key=info.key,
+                            stage="discovery",
+                            code="manifest_invalid",
+                            message="manifest 对象键中的 recording_id 无效",
+                        )
+                    )
                     continue
-                if self.catalog.manifest_generation(recording_id) == info.generation:
+                if (
+                    self.catalog.manifest_generation(recording_id) == info.generation
+                    and self._receipt_matches(recording_id, info.generation)
+                ):
+                    result.unchanged += 1
                     continue
                 try:
                     payload, generation = self.store.read_json(info.key)
-                    manifest = CaptureManifestV2.model_validate(payload)
+                    schema_version = str(payload.get("schema_version", ""))
+                    if schema_version not in ACCEPTED_MANIFEST_SCHEMA_VERSIONS:
+                        raise ManifestIndexError(
+                            "unsupported_schema",
+                            "manifest",
+                            f"不支持 manifest schema {schema_version or 'missing'}",
+                        )
+                    try:
+                        manifest = CaptureManifestV2.model_validate(payload)
+                    except ValidationError as error:
+                        raise ManifestIndexError(
+                            "manifest_invalid", "manifest", str(error)
+                        ) from error
+                    if manifest.recording_id != recording_id:
+                        raise ManifestIndexError(
+                            "manifest_invalid",
+                            "manifest",
+                            "manifest recording_id 与对象键不一致",
+                        )
+                    if manifest.source_h5_schema_version != CAPTURE_SCHEMA_VERSION:
+                        raise ManifestIndexError(
+                            "unsupported_h5_schema",
+                            "manifest",
+                            "不支持 capture H5 schema "
+                            f"{manifest.source_h5_schema_version}",
+                        )
                     self._verify_manifest_objects(manifest)
                     self.catalog.upsert(manifest, generation)
-                    imported += 1
-                except (FileNotFoundError, ValueError):
-                    skipped += 1
-            return {"imported": imported, "skipped": skipped}
+                    self._write_receipt(
+                        recording_id,
+                        generation,
+                        status="indexed",
+                        code="indexed",
+                        message="标注端已校验并建立索引",
+                    )
+                    result.imported += 1
+                except FileNotFoundError as error:
+                    failure = ManifestIndexError(
+                        "artifact_missing", "artifact", str(error)
+                    )
+                    self._record_refresh_failure(result, recording_id, info, failure)
+                except ManifestIndexError as error:
+                    self._record_refresh_failure(result, recording_id, info, error)
+                except (ValidationError, ValueError) as error:
+                    failure = ManifestIndexError(
+                        "manifest_invalid", "manifest", str(error)
+                    )
+                    self._record_refresh_failure(result, recording_id, info, failure)
+            return result.model_dump(mode="json")
+
+    def _record_refresh_failure(
+        self,
+        result: IndexRefreshResult,
+        recording_id: str,
+        info: Any,
+        error: ManifestIndexError,
+    ) -> None:
+        result.skipped += 1
+        result.issues.append(
+            IndexRefreshIssue(
+                recording_id=recording_id,
+                manifest_key=info.key,
+                stage=error.stage,
+                code=error.code,
+                message=str(error),
+            )
+        )
+        try:
+            self._write_receipt(
+                recording_id,
+                info.generation,
+                status="rejected",
+                code=error.code,
+                message=str(error),
+            )
+        except (ObjectConflictError, OSError, ValueError):
+            logger.exception("写入索引拒绝回执失败：%s", recording_id)
 
     def _verify_manifest_objects(self, manifest: CaptureManifestV2) -> None:
         for artifact in manifest.artifacts:
             info = self.store.stat(artifact.object_key)
             if info is None:
-                raise ValueError(f"manifest 缺少制品：{artifact.role}")
+                raise ManifestIndexError(
+                    "artifact_missing", "artifact", f"manifest 缺少制品：{artifact.role}"
+                )
             if info.size_bytes != artifact.size_bytes:
-                raise ValueError(f"制品大小不匹配：{artifact.role}")
+                raise ManifestIndexError(
+                    "artifact_size_mismatch",
+                    "artifact",
+                    f"制品大小不匹配：{artifact.role}",
+                )
             stored_sha = info.metadata.get("sha256")
             if not stored_sha:
-                raise ValueError(f"制品缺少 SHA-256 metadata：{artifact.role}")
+                raise ManifestIndexError(
+                    "artifact_sha_missing",
+                    "artifact",
+                    f"制品缺少 SHA-256 metadata：{artifact.role}",
+                )
             if stored_sha != artifact.sha256:
-                raise ValueError(f"制品 SHA-256 不匹配：{artifact.role}")
+                raise ManifestIndexError(
+                    "artifact_sha_mismatch",
+                    "artifact",
+                    f"制品 SHA-256 不匹配：{artifact.role}",
+                )
 
     def list_recordings(self) -> list[CaptureManifestV2]:
         return self.catalog.list()

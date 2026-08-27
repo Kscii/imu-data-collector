@@ -2,11 +2,27 @@ import numpy as np
 import pytest
 
 from imu_data_collector.cw12eu import (
+    NotificationKind,
     calibrate_counts,
+    classify_notification,
     pack_test_frame,
     parse_notification,
     reconstruct_sample_times,
 )
+
+
+def test_notification_classifier_separates_samples_auxiliary_and_unknown() -> None:
+    imu = pack_test_frame((1, 2, 3, 4, 5, 6), b"\x00\x00\x00\x01")
+    auxiliary_variants = (
+        bytes.fromhex("aa1a0200f0f0f0f00146"),
+        bytes.fromhex("aa1a0200f0f0f0f00046"),
+    )
+
+    assert classify_notification(imu) == NotificationKind.IMU_SAMPLES
+    for payload in auxiliary_variants:
+        assert classify_notification(payload) == NotificationKind.AUXILIARY_STATUS
+    assert classify_notification(b"\x00" * 10) == NotificationKind.UNKNOWN_INVALID
+    assert classify_notification(b"\x00" * 15) == NotificationKind.UNKNOWN_INVALID
 
 
 def test_notification_parser_preserves_all_candidate_fields() -> None:

@@ -434,6 +434,11 @@ class RecordingSummary(BaseModel):
     mkv_path: str | None = None
     issues: list[str] = Field(default_factory=list)
     upload_state: str = "not_requested"
+    index_state: Literal["not_requested", "pending", "indexed", "rejected"] = (
+        "not_requested"
+    )
+    index_message: str = ""
+    manifest_generation: int | None = None
 
 
 class ArtifactDescriptor(BaseModel):
@@ -500,6 +505,44 @@ class CaptureManifestV2(BaseModel):
         if any(not item.object_key.startswith(prefix) for item in self.artifacts):
             raise ValueError("manifest 制品对象键必须位于本录制前缀")
         return self
+
+
+class AnnotationCapabilities(BaseModel):
+    """标注端写入 Bucket、供采集端在上传前读取的能力合同。"""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    accepted_manifest_schema_versions: list[str]
+    accepted_capture_h5_schema_versions: list[str]
+    annotation_build_id: str
+    generated_at_utc: str
+
+
+class IndexReceipt(BaseModel):
+    """一个 manifest 被标注端实际接收或拒绝的可查询回执。"""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    recording_id: str
+    manifest_generation: int
+    status: Literal["indexed", "rejected"]
+    annotation_build_id: str
+    processed_at_utc: str
+    code: str = "indexed"
+    message: str = ""
+
+
+class IndexRefreshIssue(BaseModel):
+    recording_id: str
+    manifest_key: str
+    stage: str
+    code: str
+    message: str
+
+
+class IndexRefreshResult(BaseModel):
+    imported: int = 0
+    unchanged: int = 0
+    skipped: int = 0
+    issues: list[IndexRefreshIssue] = Field(default_factory=list)
 
 
 class PublishStatus(BaseModel):

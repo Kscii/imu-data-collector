@@ -261,6 +261,76 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
     assert validate_capture_h5(path, taxonomy()).ready
 
 
+def test_auxiliary_notifications_are_preserved_without_blocking_validation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "auxiliary.h5"
+    writer = CaptureH5Writer(
+        path,
+        RecordingStartRequest(
+            collection_id="auxiliary_check",
+            participant_id="xfan0282",
+        ),
+        "auxiliary-recording",
+        1_000_000_000,
+        ImuSettings(),
+        taxonomy(),
+        video_status="not_requested",
+    )
+    frame = pack_test_frame((1, 2, 4096, 4, 5, 6), b"\x00\x00\x00\x01")
+    writer.append_notification(frame, 1_040_000_000)
+    writer.append_notification(
+        bytes.fromhex("aa1a0200f0f0f0f00146"), 1_050_000_000
+    )
+    writer.append_notification(frame, 1_080_000_000)
+    writer.reconstruct_times()
+    writer.write_sync([])
+    writer.finish()
+
+    report = validate_capture_h5(path, taxonomy(), require_video=False)
+    assert report.ready, report.issues
+    assert report.metrics["imu_packet_count"] == 2
+    assert report.metrics["auxiliary_notification_count"] == 1
+    assert report.metrics["unknown_notification_count"] == 0
+    with h5py.File(path, "r") as handle:
+        assert str(handle.attrs["capture_schema_version"]) == "1.5.0"
+        assert handle["imu/packets/packet_kind"][:].tolist() == [1, 2, 1]
+        assert handle["imu/packets/parse_valid"][:].tolist() == [True, False, True]
+        assert handle["imu/packets/sample_count"][:].tolist() == [1, 0, 1]
+        offsets = handle["imu/packets/payload_offsets"][:]
+        payload = bytes(handle["imu/packets/payload_values"][offsets[1] : offsets[2]])
+        assert payload == bytes.fromhex("aa1a0200f0f0f0f00146")
+
+
+def test_unknown_notification_still_blocks_production_readiness(tmp_path: Path) -> None:
+    path = tmp_path / "unknown.h5"
+    writer = CaptureH5Writer(
+        path,
+        RecordingStartRequest(
+            collection_id="unknown_check",
+            participant_id="xfan0282",
+        ),
+        "unknown-recording",
+        1_000_000_000,
+        ImuSettings(),
+        taxonomy(),
+        video_status="not_requested",
+    )
+    frame = pack_test_frame((1, 2, 4096, 4, 5, 6), b"\x00\x00\x00\x01")
+    writer.append_notification(frame, 1_040_000_000)
+    writer.append_notification(b"\x42" * 10, 1_050_000_000)
+    writer.append_notification(frame, 1_080_000_000)
+    writer.reconstruct_times()
+    writer.write_sync([])
+    writer.finish()
+
+    report = validate_capture_h5(path, taxonomy(), require_video=False)
+    assert not report.ready
+    assert report.metrics["unknown_notification_count"] == 1
+    assert report.metrics["parse_error_count"] == 1
+    assert any("parsing failed 1 times" in issue for issue in report.issues)
+
+
 def test_prod_capture_requires_verified_fixed_camera_controls(tmp_path: Path) -> None:
     path = build_capture(tmp_path, data_tier=DataTier.PROD)
 

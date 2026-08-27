@@ -13,6 +13,9 @@ type Recording = {
   duration_ns?: number;
   issues: string[];
   upload_state: string;
+  index_state?: "not_requested" | "pending" | "indexed" | "rejected";
+  index_message?: string;
+  manifest_generation?: number | null;
   purpose?: "annotation" | "calibration_evidence";
 };
 
@@ -1374,12 +1377,16 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     setIndexMessage("");
     setError("");
     try {
-      const result = await api<{ imported: number; skipped: number }>(
+      const result = await api<{ imported: number; unchanged: number; skipped: number; issues: { recording_id: string; code: string; message: string }[] }>(
         "/api/v1/index/refresh",
         { method: "POST" }
       );
       await onChanged();
-      setIndexMessage(`扫描完成：新增或更新 ${result.imported} 条，跳过异常 ${result.skipped} 条`);
+      const firstIssue = result.issues[0];
+      setIndexMessage(
+        `扫描完成：新增或更新 ${result.imported} 条，未变化 ${result.unchanged} 条，跳过异常 ${result.skipped} 条`
+        + (firstIssue ? `；${firstIssue.recording_id} [${firstIssue.code}] ${firstIssue.message}` : "")
+      );
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1809,6 +1816,26 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
   const [busy, setBusy] = useState("");
   const [incomplete, setIncomplete] = useState<{ relative_path: string; size_bytes: number; reason: string }[]>([]);
 
+  useEffect(() => {
+    const pending = recordings.filter((recording) => recording.index_state === "pending");
+    if (pending.length === 0) return;
+    let active = true;
+    const poll = async () => {
+      await Promise.allSettled(
+        pending.map((recording) =>
+          api(`/api/v1/recordings/${recording.recording_id}/publish/status`)
+        )
+      );
+      if (active) onChanged();
+    };
+    poll();
+    const timer = window.setInterval(poll, 3_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [recordings.map((item) => `${item.recording_id}:${item.index_state}`).join("|")]);
+
   const publish = async (recording: Recording) => {
     setError("");
     setMessage("");
@@ -1818,7 +1845,7 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
       const gib = estimate.estimated_bytes / 1024 ** 3;
       if (!window.confirm(`将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。\n预计读取或上传约 ${gib.toFixed(2)} GiB，继续吗？`)) return;
       await api(`/api/v1/recordings/${recording.recording_id}/publish`, { method: "POST" });
-      setMessage(`已发布到标注存储：${recording.recording_id}`);
+      setMessage(`已上传 Bucket，正在等待标注端接收：${recording.recording_id}`);
       onChanged();
     } catch (e) {
       setError((e as Error).message);
@@ -1876,9 +1903,16 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
       <p className="stage-help">这里只负责确认采集结果并交给标注存储；同步、标注、审核和训练导出全部在独立标注平台完成。</p>
       {recordings.map((recording) => <article key={recording.recording_id}>
         <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {recording.data_tier} · {seconds(recording.duration_ns)}</span></div>
-        <div className="status-grid"><span>采集 {recording.state}</span><span>发布 {recording.upload_state}</span></div>
+        <div className="status-grid">
+          <span>采集 {recording.state}</span>
+          <span>{["uploaded", "published"].includes(recording.upload_state) ? "已上传 Bucket" : `上传 ${recording.upload_state}`}</span>
+          {recording.index_state === "indexed" && <span>标注端已接收</span>}
+          {recording.index_state === "pending" && <span>等待标注端接收</span>}
+          {recording.index_state === "rejected" && <span className="warning-text">标注端拒绝</span>}
+        </div>
+        {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{recording.index_message}</p>}
         <div className="save-row">
-          <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id || recording.upload_state === "published"} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : recording.upload_state === "published" ? "已发布" : "估算并发布"}</button>
+          <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id || ["uploaded", "published"].includes(recording.upload_state)} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : ["uploaded", "published"].includes(recording.upload_state) ? "已上传 Bucket" : "估算并发布"}</button>
           <button className="danger" disabled={Boolean(busy)} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>
         {recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}

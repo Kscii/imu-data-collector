@@ -13,6 +13,7 @@ import h5py
 from imu_data_collector.config import Settings
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
+    AnnotationCapabilities,
     ArtifactDescriptor,
     CalibrationProfile,
     CaptureManifestV2,
@@ -104,11 +105,34 @@ def _put_idempotent(store: ObjectStore, path: Path, artifact: ArtifactDescriptor
     )
 
 
+def _require_annotation_capabilities(
+    store: ObjectStore, source_h5_schema_version: str
+) -> AnnotationCapabilities:
+    """在第一个对象上传前确认生产标注端确实理解本次交接格式。"""
+
+    try:
+        payload, _generation = store.read_json(
+            "contracts/annotation-capabilities.json"
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "标注端尚未公布能力合同，已在上传任何对象前停止"
+        ) from error
+    capabilities = AnnotationCapabilities.model_validate(payload)
+    if "2.1.0" not in capabilities.accepted_manifest_schema_versions:
+        raise RuntimeError("标注端不接受 manifest schema 2.1.0")
+    if source_h5_schema_version not in capabilities.accepted_capture_h5_schema_versions:
+        raise RuntimeError(
+            "标注端不接受 capture H5 schema " + source_h5_schema_version
+        )
+    return capabilities
+
+
 async def publish_recording(
     summary: RecordingSummary,
     settings: Settings,
     store: ObjectStore,
-) -> CaptureManifestV2:
+) -> tuple[CaptureManifestV2, int]:
     """先上传三个制品，最后写 manifest 作为原子可见标记。"""
 
     if not summary.h5_path or not summary.mkv_path:
@@ -119,17 +143,6 @@ async def publish_recording(
     mkv_path = Path(summary.mkv_path)
     if not h5_path.is_file() or not mkv_path.is_file():
         raise ValueError("录制源文件不存在")
-    proxy_path = await build_preview_mp4(mkv_path, h5_path.parent / "preview.mp4")
-    paths = {
-        "capture_h5": h5_path,
-        "video_mkv": mkv_path,
-        "preview_mp4": proxy_path,
-    }
-    artifacts = [
-        _descriptor(summary.recording_id, "capture_h5", h5_path, "application/x-hdf5"),
-        _descriptor(summary.recording_id, "video_mkv", mkv_path, "video/x-matroska"),
-        _descriptor(summary.recording_id, "preview_mp4", proxy_path, "video/mp4"),
-    ]
     with h5py.File(h5_path, "r") as handle:
         source_schema = str(handle.attrs.get("capture_schema_version", "unknown"))
         body_location = str(handle.attrs.get("body_location", "chest"))
@@ -171,6 +184,23 @@ async def publish_recording(
                 else None
             ),
         )
+    if settings.storage.backend == "gcs":
+        await asyncio.to_thread(
+            _require_annotation_capabilities,
+            store,
+            source_schema,
+        )
+    proxy_path = await build_preview_mp4(mkv_path, h5_path.parent / "preview.mp4")
+    paths = {
+        "capture_h5": h5_path,
+        "video_mkv": mkv_path,
+        "preview_mp4": proxy_path,
+    }
+    artifacts = [
+        _descriptor(summary.recording_id, "capture_h5", h5_path, "application/x-hdf5"),
+        _descriptor(summary.recording_id, "video_mkv", mkv_path, "video/x-matroska"),
+        _descriptor(summary.recording_id, "preview_mp4", proxy_path, "video/mp4"),
+    ]
     manifest = CaptureManifestV2(
         recording_id=summary.recording_id,
         collection_id=summary.collection_id,
@@ -194,17 +224,20 @@ async def publish_recording(
     manifest_key = f"captures/{summary.recording_id}/manifest.json"
     current = await asyncio.to_thread(store.stat, manifest_key)
     if current is None:
-        await asyncio.to_thread(
+        written = await asyncio.to_thread(
             store.write_json,
             manifest_key,
             manifest.model_dump(mode="json"),
             if_generation_match=0,
         )
+        manifest_generation = written.generation
     else:
-        existing, _generation = await asyncio.to_thread(store.read_json, manifest_key)
+        existing, manifest_generation = await asyncio.to_thread(
+            store.read_json, manifest_key
+        )
         if CaptureManifestV2.model_validate(existing) != manifest:
             raise ObjectConflictError("远端 manifest 已存在且内容不同")
-    return manifest
+    return manifest, manifest_generation
 
 
 def published_at() -> str:
