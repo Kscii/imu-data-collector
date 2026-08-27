@@ -5,7 +5,7 @@ from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.models import RecordingState, RecordingSummary
 
 
-def test_existing_catalog_rows_are_migrated_as_legacy_unclassified(
+def test_existing_catalog_rows_without_tier_are_migrated_as_safe_test(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "catalog.sqlite3"
@@ -39,7 +39,7 @@ def test_existing_catalog_rows_are_migrated_as_legacy_unclassified(
     summary = catalog.get("old-1")
 
     assert summary is not None
-    assert summary.data_tier == "legacy_unclassified"
+    assert summary.data_tier == "test"
     assert summary.index_state == "not_requested"
     assert summary.index_message == ""
     assert summary.manifest_generation is None
@@ -62,3 +62,29 @@ def test_new_catalog_rows_preserve_explicit_data_tier(tmp_path: Path) -> None:
 
     assert summary is not None
     assert summary.data_tier == "test"
+
+
+def test_upsert_refreshes_formal_recording_start(tmp_path: Path) -> None:
+    catalog = RecordingCatalog(tmp_path / "catalog.sqlite3")
+    initial = RecordingSummary(
+        recording_id="recording-1",
+        collection_id="collection-1",
+        participant_id="xfan0282",
+        data_tier="prod",
+        state=RecordingState.ARMING,
+        started_at_utc="2026-08-27T01:41:21.043236+00:00",
+    )
+    catalog.upsert(initial)
+    catalog.upsert(
+        initial.model_copy(
+            update={
+                "state": RecordingState.RECORDING,
+                "started_at_utc": "2026-08-27T01:41:21.351792+00:00",
+            }
+        )
+    )
+
+    summary = catalog.get("recording-1")
+
+    assert summary is not None
+    assert summary.started_at_utc == "2026-08-27T01:41:21.351792+00:00"

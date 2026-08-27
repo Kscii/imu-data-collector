@@ -83,7 +83,6 @@ class AnnotationSettings:
     server_host: str = "127.0.0.1"
     server_port: int = 8766
     catalog_path: Path = Path("~/.local/share/imu-annotation/catalog.sqlite3")
-    review_policy: str = "single_user"
     catalog_refresh_interval_s: float = 10.0
 
 
@@ -225,15 +224,18 @@ def load_activity_taxonomy(path: Path) -> dict[str, Any]:
             code = item.get("code") if isinstance(item, dict) else None
             if not code or code in codes:
                 raise ValueError(f"Invalid or duplicate activity code: {code!r}")
+            for field_name in ("display_name_zh", "display_name_en"):
+                if not isinstance(item.get(field_name), str) or not item[field_name].strip():
+                    raise ValueError(f"Activity {code!r} requires {field_name}")
             codes.add(code)
     return payload
 
 
 def load_calibration_evidence(path: Path) -> dict[str, Any]:
-    """读取设备校准证据登记；不存在时允许旧部署继续启动。"""
+    """读取设备校准证据登记。"""
 
     if not path.is_file():
-        return {"schema_version": "1.0.0", "profile_id": "unverified", "evidence": []}
+        raise FileNotFoundError(f"缺少校准证据清单：{path}")
     with path.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
     if payload.get("schema_version") != "1.0.0" or not payload.get("profile_id"):
@@ -246,4 +248,38 @@ def load_calibration_evidence(path: Path) -> dict[str, Any]:
         recording_ids
     ):
         raise ValueError("校准证据 recording_id 必须存在且唯一")
+    bilingual_fields = (
+        (payload.get("device", {}), ("scope_zh", "scope_en")),
+        (
+            payload.get("coordinate_system", {}),
+            (
+                "x_positive_zh",
+                "x_positive_en",
+                "y_positive_zh",
+                "y_positive_en",
+                "z_positive_zh",
+                "z_positive_en",
+            ),
+        ),
+        (payload.get("calibration", {}), ("conclusion_zh", "conclusion_en")),
+    )
+    for section, fields in bilingual_fields:
+        if any(
+            not isinstance(section.get(name), str) or not section[name].strip()
+            for name in fields
+        ):
+            raise ValueError("校准证据清单缺少中英文说明字段")
+    for item in evidence:
+        if any(
+            not isinstance(item.get(name), str) or not item[name].strip()
+            for name in (
+                "setup_zh",
+                "setup_en",
+                "expected_zh",
+                "expected_en",
+                "observed_zh",
+                "observed_en",
+            )
+        ):
+            raise ValueError("每条校准证据必须包含完整中英文语义")
     return payload

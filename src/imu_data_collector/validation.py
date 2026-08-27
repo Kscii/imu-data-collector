@@ -162,7 +162,7 @@ def validate_capture_h5(
         metrics["capture_schema_version"] = schema_version
         if schema_version not in SUPPORTED_CAPTURE_SCHEMA_VERSIONS:
             issues.append("unsupported capture_schema_version")
-        data_tier = str(handle.attrs.get("data_tier", "legacy_unclassified"))
+        data_tier = str(handle.attrs.get("data_tier", "test"))
         training_eligible = bool(handle.attrs.get("training_eligible", False))
         metrics["data_tier"] = data_tier
         metrics["training_eligible"] = str(training_eligible).lower()
@@ -180,7 +180,7 @@ def validate_capture_h5(
                 ):
                     if name not in handle["imu"].attrs:
                         issues.append(f"missing IMU calibration attribute {name}")
-        if data_tier not in {"test", "prod", "legacy_unclassified"}:
+        if data_tier not in {"test", "prod"}:
             issues.append(f"invalid data_tier: {data_tier}")
         if training_eligible and data_tier != "prod":
             issues.append("only prod data may be marked training_eligible")

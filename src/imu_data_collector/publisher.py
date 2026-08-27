@@ -137,8 +137,6 @@ async def publish_recording(
 
     if not summary.h5_path or not summary.mkv_path:
         raise ValueError("录制缺少 H5 或 MKV")
-    if summary.data_tier == "legacy_unclassified":
-        raise ValueError("旧版未分类录制禁止发布")
     h5_path = Path(summary.h5_path)
     mkv_path = Path(summary.mkv_path)
     if not h5_path.is_file() or not mkv_path.is_file():
@@ -146,6 +144,24 @@ async def publish_recording(
     with h5py.File(h5_path, "r") as handle:
         source_schema = str(handle.attrs.get("capture_schema_version", "unknown"))
         body_location = str(handle.attrs.get("body_location", "chest"))
+        h5_identity = {
+            "recording_id": str(handle.attrs.get("recording_id", "")),
+            "collection_id": str(handle.attrs.get("collection_id", "")),
+            "participant_id": str(handle.attrs.get("participant_id", "")),
+            "data_tier": str(handle.attrs.get("data_tier", "")),
+        }
+        summary_identity = {
+            "recording_id": summary.recording_id,
+            "collection_id": summary.collection_id,
+            "participant_id": summary.participant_id,
+            "data_tier": summary.data_tier.value,
+        }
+        if h5_identity != summary_identity:
+            raise ValueError("录制目录索引与 H5 冻结身份不一致")
+        captured_at_utc = str(handle.attrs.get("started_at_utc", ""))
+        duration_ns = int(handle.attrs.get("duration_ns", 0))
+        if not captured_at_utc or duration_ns <= 0:
+            raise ValueError("H5 缺少有效的正式录制起点或时长")
         imu_attrs = handle["imu"].attrs
         calibration = CalibrationProfile(
             profile_id=str(
@@ -207,8 +223,8 @@ async def publish_recording(
         participant_id=summary.participant_id,
         data_tier=DataTier(summary.data_tier),
         body_location=body_location,
-        captured_at_utc=summary.started_at_utc,
-        duration_ns=int(summary.duration_ns or 0),
+        captured_at_utc=captured_at_utc,
+        duration_ns=duration_ns,
         source_h5_schema_version=source_schema,
         software_revision=os.environ.get("IMU_PLATFORM_REVISION", "working-tree"),
         calibration=calibration,
@@ -235,8 +251,23 @@ async def publish_recording(
         existing, manifest_generation = await asyncio.to_thread(
             store.read_json, manifest_key
         )
-        if CaptureManifestV2.model_validate(existing) != manifest:
-            raise ObjectConflictError("远端 manifest 已存在且内容不同")
+        previous = CaptureManifestV2.model_validate(existing)
+        if previous != manifest:
+            previous_stable = previous.model_dump(
+                mode="json", exclude={"captured_at_utc", "software_revision"}
+            )
+            current_stable = manifest.model_dump(
+                mode="json", exclude={"captured_at_utc", "software_revision"}
+            )
+            if previous_stable != current_stable:
+                raise ObjectConflictError("远端 manifest 已存在且稳定内容不同")
+            written = await asyncio.to_thread(
+                store.write_json,
+                manifest_key,
+                manifest.model_dump(mode="json"),
+                if_generation_match=manifest_generation,
+            )
+            manifest_generation = written.generation
     return manifest, manifest_generation
 
 

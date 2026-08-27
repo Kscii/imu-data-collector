@@ -33,13 +33,11 @@ class DeviceSessionState(StrEnum):
 
 
 class ReviewWorkflowState(StrEnum):
-    """标注快照的当前工作流状态；不保存逐次修订历史。"""
+    """标注快照的当前工作流状态；完成即已经具有有效训练导出。"""
 
     UNASSIGNED = "unassigned"
     IN_PROGRESS = "in_progress"
-    SUBMITTED = "submitted"
-    ACCEPTED = "accepted"
-    EXPORTED = "exported"
+    COMPLETED = "completed"
 
 
 class DataTier(StrEnum):
@@ -58,13 +56,6 @@ class PublishState(StrEnum):
     VERIFYING = "verifying"
     PUBLISHED = "published"
     FAILED = "failed"
-
-
-class ReviewPolicy(StrEnum):
-    """标注完成后是否强制由另一名用户审核。"""
-
-    SINGLE_USER = "single_user"
-    TWO_PERSON = "two_person"
 
 
 class BinaryLabel(StrEnum):
@@ -178,7 +169,7 @@ class SyncAnchor(BaseModel):
     imu_time_ns: int = Field(ge=0)
     video_time_ns: int = Field(ge=0)
     label: str = Field(default="tap", max_length=64)
-    role: Literal["start_tap", "end_tap", "legacy"] = "legacy"
+    role: Literal["start_tap", "end_tap"]
     source_video_frame: int | None = Field(default=None, ge=0)
     source_imu_sample: int | None = Field(default=None, ge=0)
     video_interval_start_ns: int | None = Field(default=None, ge=0)
@@ -187,19 +178,16 @@ class SyncAnchor(BaseModel):
 
     @model_validator(mode="after")
     def validate_sync_anchor(self) -> SyncAnchor:
-        if self.role != "legacy":
-            required = {
-                "source_video_frame": self.source_video_frame,
-                "source_imu_sample": self.source_imu_sample,
-                "video_interval_start_ns": self.video_interval_start_ns,
-                "imu_interval_start_ns": self.imu_interval_start_ns,
-                "reviewer_id": self.reviewer_id,
-            }
-            missing = [name for name, value in required.items() if value is None]
-            if missing:
-                raise ValueError(
-                    "正式同步锚点缺少来源字段：" + ", ".join(missing)
-                )
+        required = {
+            "source_video_frame": self.source_video_frame,
+            "source_imu_sample": self.source_imu_sample,
+            "video_interval_start_ns": self.video_interval_start_ns,
+            "imu_interval_start_ns": self.imu_interval_start_ns,
+            "reviewer_id": self.reviewer_id,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError("正式同步锚点缺少来源字段：" + ", ".join(missing))
         if self.video_interval_start_ns is not None:
             if self.video_interval_start_ns > self.video_time_ns:
                 raise ValueError("video interval start must not exceed selected frame time")
@@ -216,9 +204,6 @@ class SyncDocument(BaseModel):
     policy: Literal["conditional_fixed_offset_v1"] = "conditional_fixed_offset_v1"
     apply_fixed_offset: bool = False
     reviewer_id: str | None = None
-    # 本地采集端仍把乐观锁随同步文档传递；公网标注端额外要求
-    # SyncSaveRequest.expected_revision，不能依赖此兼容字段。
-    expected_revision: int | None = Field(default=None, ge=0, exclude=True)
 
     @model_validator(mode="after")
     def validate_reviewer(self) -> SyncDocument:
@@ -250,14 +235,12 @@ class TrainingExportReference(BaseModel):
 class ReviewWorkflow(BaseModel):
     state: ReviewWorkflowState = ReviewWorkflowState.UNASSIGNED
     annotator_id: str | None = None
-    reviewer_id: str | None = None
-    review_comment: str = Field(default="", max_length=2000)
+    last_editor_id: str | None = None
     updated_at_utc: str | None = None
-    review_policy: ReviewPolicy = ReviewPolicy.TWO_PERSON
 
     @model_validator(mode="after")
     def validate_ids(self) -> ReviewWorkflow:
-        for field_name in ("annotator_id", "reviewer_id"):
+        for field_name in ("annotator_id", "last_editor_id"):
             value = getattr(self, field_name)
             if value is not None and not UNIKEY_RE.fullmatch(value):
                 raise ValueError(f"{field_name} must be a lowercase UniKey-like identifier")
@@ -265,9 +248,9 @@ class ReviewWorkflow(BaseModel):
 
 
 class ReviewDocument(BaseModel):
-    """原始 H5/MKV 之外唯一可变的同步、标注与审核快照。"""
+    """原始 H5/MKV 之外唯一可变的同步与标注快照。"""
 
-    schema_version: Literal["1.0.0", "1.1.0"] = "1.1.0"
+    schema_version: Literal["2.0.0"] = "2.0.0"
     recording_id: str
     revision: int = Field(default=0, ge=0)
     sources: list[SourceArtifact]
@@ -278,7 +261,7 @@ class ReviewDocument(BaseModel):
 
 
 class ReviewWorkflowRequest(BaseModel):
-    action: Literal["assign", "submit", "accept", "reject", "reopen", "mark_exported"]
+    action: Literal["assign", "complete", "reopen"]
     actor_id: str
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2000)
@@ -287,7 +270,7 @@ class ReviewWorkflowRequest(BaseModel):
 class AnnotationReviewWorkflowRequest(BaseModel):
     """公网标注端请求；操作者只能由服务端登录会话提供。"""
 
-    action: Literal["assign", "submit", "accept", "reject", "reopen", "mark_exported"]
+    action: Literal["assign", "complete", "reopen"]
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2000)
 
@@ -300,9 +283,8 @@ class AnnotationRecordingDeleteRequest(BaseModel):
     confirmation: str
 
 
-class TrainingReleaseRevokeRequest(BaseModel):
+class TrainingSnapshotDeleteRequest(BaseModel):
     confirmation: str
-    reason: str = Field(min_length=1, max_length=2000)
 
 
 class RevisionRequest(BaseModel):
@@ -425,7 +407,7 @@ class RecordingSummary(BaseModel):
     recording_id: str
     collection_id: str
     participant_id: str
-    data_tier: DataTier | Literal["legacy_unclassified"] = "legacy_unclassified"
+    data_tier: DataTier
     state: RecordingState
     started_at_utc: str
     ended_at_utc: str | None = None
@@ -482,7 +464,7 @@ class CalibrationProfile(BaseModel):
 class CaptureManifestV2(BaseModel):
     """采集端与标注端之间唯一稳定的公开交接合同。"""
 
-    schema_version: Literal["2.0.0", "2.1.0"] = "2.1.0"
+    schema_version: Literal["2.1.0"] = "2.1.0"
     recording_id: str
     collection_id: str
     participant_id: str

@@ -3,15 +3,9 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from fastapi.testclient import TestClient
 
-from imu_data_collector.api import create_app
-from imu_data_collector.config import Settings
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
-    DataTier,
-    RecordingState,
-    RecordingSummary,
     SyncExperimentDocument,
     SyncObservation,
 )
@@ -177,67 +171,6 @@ def test_sync_experiment_is_atomic_and_enriches_exact_times(tmp_path: Path) -> N
     reloaded = load_sync_experiment(data_root, "sync_validation_01")
     assert reloaded == saved
     assert sync_experiment_path(data_root, "sync_validation_01").is_file()
-
-
-def test_sync_experiment_api_round_trip(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    h5_path = tmp_path / "capture.h5"
-    mkv_path = _write_capture(h5_path, "capture")
-    settings = Settings(
-        data_root=data_root,
-        catalog_path=tmp_path / "catalog.sqlite3",
-        activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
-    )
-    app = create_app(settings)
-    app.state.coordinator.catalog.upsert(
-        RecordingSummary(
-            recording_id="capture",
-            collection_id="sync_validation_01",
-            participant_id="xfan0282",
-            data_tier=DataTier.TEST,
-            state=RecordingState.NEEDS_ATTENTION,
-            started_at_utc="2026-08-26T00:00:00+00:00",
-            duration_ns=4_000_000_000,
-            h5_path=str(h5_path),
-            mkv_path=str(mkv_path),
-        )
-    )
-    payload = SyncExperimentDocument(
-        observations=[
-            SyncObservation(
-                observation_id="capture_tap_01",
-                recording_id="capture",
-                video_frame_index=60,
-                video_time_ns=0,
-                imu_sample_index=50,
-                imu_time_ns=0,
-                reviewer_id="xfan0282",
-            )
-        ]
-    ).model_dump(mode="json")
-
-    with TestClient(app) as client:
-        frames = client.get("/api/v1/recordings/capture/frame-times")
-        window = client.get(
-            "/api/v1/recordings/capture/sync-window",
-            params={
-                "frame_index": 60,
-                "radius_seconds": 0.5,
-                "expected_video_minus_imu_ns": 0,
-            },
-        )
-        saved = client.put("/api/v1/sync-experiments/sync_validation_01", json=payload)
-        loaded = client.get("/api/v1/sync-experiments/sync_validation_01")
-
-    assert frames.status_code == 200
-    assert frames.json()["frame_count"] == 120
-    assert window.status_code == 200
-    assert window.json()["candidate_sample_index"] == [50]
-    assert window.json()["recommendation"]["sample_index"] == 50
-    assert saved.status_code == 200
-    assert saved.json()["revision"] == 1
-    assert loaded.json() == saved.json()
 
 
 def test_analysis_compares_host_and_offset_without_changing_sources(

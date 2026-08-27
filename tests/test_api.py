@@ -2,8 +2,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from imu_data_collector.api import _mjpeg_part, create_app
-from imu_data_collector.capture_api import create_capture_app
+from imu_data_collector.capture_api import _mjpeg_part, create_capture_app
 from imu_data_collector.config import Settings
 
 
@@ -26,7 +25,7 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
         catalog_path=tmp_path / "catalog.sqlite3",
         activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
     )
-    app = create_app(settings)
+    app = create_capture_app(settings)
 
     with TestClient(app) as client:
         health = client.get("/api/v1/health")
@@ -66,7 +65,7 @@ def test_start_contract_rejects_non_unikey_participant_before_hardware_access(
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
-    app = create_app(
+    app = create_capture_app(
         Settings(
             data_root=data_root,
             catalog_path=tmp_path / "catalog.sqlite3",
@@ -88,7 +87,7 @@ def test_start_contract_rejects_well_formed_but_unlisted_unikey(
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
-    app = create_app(
+    app = create_capture_app(
         Settings(
             data_root=data_root,
             catalog_path=tmp_path / "catalog.sqlite3",
@@ -103,7 +102,7 @@ def test_start_contract_rejects_well_formed_but_unlisted_unikey(
         )
 
     assert response.status_code == 422
-    assert "白名单" in response.json()["detail"]
+    assert "白名单" in response.json()["detail"]["message"]
 
 
 def test_start_contract_rejects_unknown_data_tier_before_hardware_access(
@@ -111,7 +110,7 @@ def test_start_contract_rejects_unknown_data_tier_before_hardware_access(
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
-    app = create_app(
+    app = create_capture_app(
         Settings(
             data_root=data_root,
             catalog_path=tmp_path / "catalog.sqlite3",
@@ -177,4 +176,4 @@ def test_preview_endpoint_rejects_inactive_channel_instead_of_returning_empty_20
         response = client.get("/api/v1/preview.mjpeg?stream=1")
 
     assert response.status_code == 409
-    assert "预览通道" in response.json()["detail"]
+    assert "预览通道" in response.json()["detail"]["message"]

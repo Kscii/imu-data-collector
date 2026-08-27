@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tarfile
 from pathlib import Path
 
@@ -11,11 +12,10 @@ from imu_data_collector.annotation_service import AnnotationService
 from imu_data_collector.artifacts import (
     _annotation_rows,
     create_capture_package,
-    create_training_release,
+    create_training_snapshot_archive,
     export_aligned30,
 )
-from imu_data_collector.config import ImuSettings, Settings
-from imu_data_collector.coordinator import RecordingCoordinator
+from imu_data_collector.config import ImuSettings
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
@@ -23,11 +23,8 @@ from imu_data_collector.models import (
     AnnotationEvent,
     BinaryLabel,
     EventKind,
-    RecordingState,
-    RecordingSummary,
     ReviewDocument,
     ReviewWorkflow,
-    ReviewWorkflowRequest,
     ReviewWorkflowState,
     SourceArtifact,
     SyncAnchor,
@@ -101,7 +98,7 @@ def artifact(path: Path, role: str) -> SourceArtifact:
     )
 
 
-def accepted_review(h5_path: Path, mkv_path: Path) -> ReviewDocument:
+def completed_review(h5_path: Path, mkv_path: Path) -> ReviewDocument:
     return ReviewDocument(
         recording_id="recording-1",
         sources=[artifact(h5_path, "capture_h5"), artifact(mkv_path, "video_mkv")],
@@ -147,9 +144,9 @@ def accepted_review(h5_path: Path, mkv_path: Path) -> ReviewDocument:
             ],
         ),
         workflow=ReviewWorkflow(
-            state=ReviewWorkflowState.ACCEPTED,
+            state=ReviewWorkflowState.COMPLETED,
             annotator_id="xfan0282",
-            reviewer_id="rkim6933",
+            last_editor_id="xfan0282",
         ),
     )
 
@@ -191,7 +188,7 @@ def test_review_sidecar_is_external_and_optimistically_locked(tmp_path: Path) ->
 
 def test_capture_package_excludes_mutable_review_sidecar(tmp_path: Path) -> None:
     h5_path, mkv_path = write_source_pair(tmp_path)
-    review = accepted_review(h5_path, mkv_path)
+    review = completed_review(h5_path, mkv_path)
     output = create_capture_package(
         review, h5_path, mkv_path, tmp_path / "recording-1.capture.tar"
     )
@@ -203,7 +200,7 @@ def test_capture_package_excludes_mutable_review_sidecar(tmp_path: Path) -> None
 def test_aligned30_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) -> None:
     h5_path, mkv_path = write_source_pair(tmp_path)
     output = export_aligned30(
-        accepted_review(h5_path, mkv_path),
+        completed_review(h5_path, mkv_path),
         h5_path,
         mkv_path,
         tmp_path / "aligned30.h5",
@@ -356,7 +353,7 @@ def test_aligned_grid_keeps_derived_onset_equal_to_fall_activity_start(
         ],
     )
     h5_path, mkv_path = write_source_pair(tmp_path)
-    review = accepted_review(h5_path, mkv_path).model_copy(
+    review = completed_review(h5_path, mkv_path).model_copy(
         update={"annotations": annotations}
     )
 
@@ -372,7 +369,7 @@ def test_aligned30_export_is_blocked_without_verified_calibration(tmp_path: Path
     h5_path, mkv_path = write_source_pair(tmp_path)
     with pytest.raises(ValueError, match="校准"):
         export_aligned30(
-            accepted_review(h5_path, mkv_path),
+            completed_review(h5_path, mkv_path),
             h5_path,
             mkv_path,
             tmp_path / "aligned30.h5",
@@ -381,13 +378,13 @@ def test_aligned30_export_is_blocked_without_verified_calibration(tmp_path: Path
         )
 
 
-def test_training_release_contains_manifest_and_per_recording_h5(tmp_path: Path) -> None:
+def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path) -> None:
     aligned = tmp_path / "aligned30.h5"
     aligned.write_bytes(b"aligned")
 
-    output = create_training_release(
+    output = create_training_snapshot_archive(
         [("xfan0282", "recording-1", aligned)],
-        tmp_path / "cw12eu_training_release_0001.tar",
+        tmp_path / "cw12eu_snapshot_test.tar",
     )
 
     with tarfile.open(output, "r:") as archive:
@@ -395,96 +392,15 @@ def test_training_release_contains_manifest_and_per_recording_h5(tmp_path: Path)
             "manifest.json",
             "recordings/xfan0282/recording-1/aligned30.h5",
         ]
-
-
-@pytest.mark.asyncio
-async def test_coordinator_requires_distinct_reviewer_and_blocks_uncalibrated_export(
-    tmp_path: Path,
-) -> None:
-    h5_path, mkv_path = write_source_pair(tmp_path)
-    coordinator = RecordingCoordinator(
-        Settings(
-            data_root=tmp_path,
-            catalog_path=tmp_path / "catalog.sqlite3",
-            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
-        )
-    )
-    coordinator.catalog.upsert(
-        RecordingSummary(
-            recording_id="recording-1",
-            collection_id="pilot",
-            participant_id="xfan0282",
-            data_tier="prod",
-            state=RecordingState.READY,
-            started_at_utc="2026-08-26T00:00:00+00:00",
-            duration_ns=2_000_000_000,
-            h5_path=str(h5_path),
-            mkv_path=str(mkv_path),
-        )
-    )
-    initial = coordinator.review("recording-1")
-    assigned = coordinator.update_workflow(
-        "recording-1",
-        ReviewWorkflowRequest(
-            action="assign", actor_id="xfan0282", expected_revision=initial.revision
-        ),
-    )
-    annotations = accepted_review(h5_path, mkv_path).annotations.model_copy(
-        update={"revision": 2}
-    )
-    await coordinator.save_annotations("recording-1", annotations)
-    review_after_annotation = coordinator.review("recording-1")
-    await coordinator.save_sync(
-        "recording-1",
-        SyncDocument(
-            anchors=[
-                SyncAnchor(
-                    imu_time_ns=200_000_000,
-                    video_time_ns=199_999_998,
-                    role="start_tap",
-                    source_video_frame=6,
-                    source_imu_sample=5,
-                    video_interval_start_ns=166_666_665,
-                    imu_interval_start_ns=160_000_000,
-                    reviewer_id="xfan0282",
-                ),
-                SyncAnchor(
-                    imu_time_ns=1_600_000_000,
-                    video_time_ns=1_599_999_984,
-                    role="end_tap",
-                    source_video_frame=48,
-                    source_imu_sample=40,
-                    video_interval_start_ns=1_566_666_651,
-                    imu_interval_start_ns=1_560_000_000,
-                    reviewer_id="xfan0282",
-                ),
-            ],
-            expected_revision=review_after_annotation.revision,
-        ),
-    )
-    ready = coordinator.review("recording-1")
-    submitted = coordinator.update_workflow(
-        "recording-1",
-        ReviewWorkflowRequest(
-            action="submit", actor_id="xfan0282", expected_revision=ready.revision
-        ),
-    )
-    with pytest.raises(ValueError, match="不能审核自己"):
-        coordinator.update_workflow(
-            "recording-1",
-            ReviewWorkflowRequest(
-                action="accept",
-                actor_id="xfan0282",
-                expected_revision=submitted.revision,
-            ),
-        )
-    accepted = coordinator.update_workflow(
-        "recording-1",
-        ReviewWorkflowRequest(
-            action="accept", actor_id="rkim6933", expected_revision=submitted.revision
-        ),
-    )
-    assert accepted.workflow.state == ReviewWorkflowState.ACCEPTED
-    with pytest.raises(ValueError, match="校准"):
-        coordinator.export_training("recording-1", accepted.revision)
-    assert assigned.workflow.annotator_id == "xfan0282"
+        manifest_stream = archive.extractfile("manifest.json")
+        assert manifest_stream is not None
+        manifest = json.loads(manifest_stream.read())
+        assert manifest["schema_version"] == "1.0.0"
+        assert manifest["dataset_id"] == "cw12eu"
+        assert manifest["files"] == [
+            {
+                "path": "recordings/xfan0282/recording-1/aligned30.h5",
+                "size_bytes": len(b"aligned"),
+                "sha256": sha256_file(aligned),
+            }
+        ]

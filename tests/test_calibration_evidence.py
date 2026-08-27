@@ -17,6 +17,9 @@ def test_default_profile_matches_versioned_calibration_evidence() -> None:
     assert settings.imu.raw_axis_order == (0, 1, 2)
     assert settings.imu.axis_signs == (1, -1, 1)
     assert len(evidence["evidence"]) == 15
+    assert evidence["device"]["scope_en"]
+    assert evidence["calibration"]["conclusion_en"]
+    assert all(item["setup_en"] for item in evidence["evidence"])
     assert settings.imu.calibration_evidence_sha256 == hashlib.sha256(
         settings.calibration_evidence_path.read_bytes()
     ).hexdigest()

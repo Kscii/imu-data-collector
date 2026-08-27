@@ -1,15 +1,21 @@
-"""用合成校准参数验证采集端 aligned30.h5 可被 SOFT3888 v3 直接读取。"""
+"""生成真实训练快照，并可调用 SOFT3888 的只读合同校验器。"""
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import subprocess
 import tempfile
 from pathlib import Path
 
 import h5py
 import numpy as np
-from fall_detection.data import iter_aligned_recording_file
 
-from imu_data_collector.artifacts import export_aligned30
+from imu_data_collector.artifacts import (
+    create_training_snapshot_archive,
+    export_aligned30,
+)
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
@@ -27,7 +33,19 @@ from imu_data_collector.models import (
 )
 
 
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--soft3888-root",
+        type=Path,
+        default=(Path(value) if (value := os.environ.get("SOFT3888_ROOT")) else None),
+        help="SOFT3888_TU16_04 checkout；提供后会运行其 validate-team",
+    )
+    return parser
+
+
 def main() -> None:
+    arguments = _parser().parse_args()
     taxonomy = {
         "taxonomy_id": "fall_binary_v1",
         "version": "1.0.0",
@@ -77,8 +95,26 @@ def main() -> None:
             sources=[source(capture, "capture_h5"), source(video, "video_mkv")],
             sync=SyncDocument(
                 anchors=[
-                    SyncAnchor(imu_time_ns=200_000_000, video_time_ns=200_000_000),
-                    SyncAnchor(imu_time_ns=1_600_000_000, video_time_ns=1_600_000_000),
+                    SyncAnchor(
+                        imu_time_ns=200_000_000,
+                        video_time_ns=200_000_000,
+                        role="start_tap",
+                        source_video_frame=6,
+                        source_imu_sample=5,
+                        video_interval_start_ns=200_000_000,
+                        imu_interval_start_ns=200_000_000,
+                        reviewer_id="xfan0282",
+                    ),
+                    SyncAnchor(
+                        imu_time_ns=1_600_000_000,
+                        video_time_ns=1_600_000_000,
+                        role="end_tap",
+                        source_video_frame=48,
+                        source_imu_sample=40,
+                        video_interval_start_ns=1_600_000_000,
+                        imu_interval_start_ns=1_600_000_000,
+                        reviewer_id="xfan0282",
+                    ),
                 ]
             ),
             annotations=AnnotationDocument(
@@ -127,9 +163,9 @@ def main() -> None:
                 ],
             ),
             workflow=ReviewWorkflow(
-                state=ReviewWorkflowState.ACCEPTED,
+                state=ReviewWorkflowState.COMPLETED,
                 annotator_id="xfan0282",
-                reviewer_id="rkim6933",
+                last_editor_id="xfan0282",
             ),
         )
         aligned = export_aligned30(
@@ -140,31 +176,36 @@ def main() -> None:
             ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
             taxonomy,
         )
-        recordings = list(iter_aligned_recording_file(aligned))
-        recording = recordings[0] if len(recordings) == 1 else None
-        onset = next(
-            (item for item in recording.annotations if item.kind == "onset"),
-            None,
-        ) if recording else None
-        fall_activity = next(
-            (
-                item
-                for item in recording.annotations
-                if item.kind == "activity" and item.code == "forward_fall"
-            ),
-            None,
-        ) if recording else None
-        if (
-            recording is None
-            or recording.supervision_kind != "temporal"
-            or onset is None
-            or fall_activity is None
-            or onset.start_sample != fall_activity.start_sample
-        ):
-            raise RuntimeError("SOFT3888 没有按 temporal v3 读取合成产物")
+        snapshot = create_training_snapshot_archive(
+            [("xfan0282", "compatibility-1", aligned)],
+            root / "cw12eu_contract_snapshot.tar",
+        )
+        with h5py.File(aligned, "r") as handle:
+            if (
+                str(handle.attrs.get("imu_schema_version")) != "3.0.0"
+                or set(handle.keys()) != {"samples", "sequences", "annotations"}
+            ):
+                raise RuntimeError("采集端没有生成 temporal HDF5 v3 三表合同")
+        if arguments.soft3888_root is None:
+            print(f"采集端快照合同通过：{snapshot.name}；未指定 SOFT3888 checkout")
+            return
+        executable = arguments.soft3888_root / ".venv/bin/imu-data"
+        if not executable.is_file():
+            raise FileNotFoundError(f"找不到 SOFT3888 命令：{executable}")
+        completed = subprocess.run(
+            [str(executable), "validate-team", "--snapshot", str(snapshot)],
+            cwd=arguments.soft3888_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+        if result.get("sequences") != 1 or result.get("annotations", 0) < 3:
+            raise RuntimeError("SOFT3888 没有完整读取 temporal v3 快照")
         print(
-            f"兼容性通过：{recordings[0].recording_id}，"
-            f"{len(recordings[0].values)} 行，{len(recordings[0].annotations)} 条标注"
+            "跨仓库兼容性通过："
+            f"{result['sequences']} 条序列，{result['rows']} 行，"
+            f"{result['annotations']} 条标注"
         )
 
 

@@ -7,7 +7,7 @@
 推荐分三层：
 
 1. **采集原始层**：保存通知原始字节、主机 `CLOCK_MONOTONIC` 接收时刻、候选样本和视频真实 PTS；不重采样。
-2. **同步标注层**：采集端把不可变制品发布到对象存储，独立标注端读取浏览代理和 H5。录制首尾各使用一次镜头可见、IMU 可见的外壳轻拍；人工配对“视频首接触帧”和“IMU 首个明显响应”。默认保留共同主机时钟，只有满足条件时才应用 `video_time = imu_time + fixed_offset`。当前同步、标注和审核快照写入对象存储的 `review.json`。
+2. **同步标注层**：采集端把不可变制品发布到对象存储，独立标注端读取浏览代理和 H5。录制首尾各使用一次镜头可见、IMU 可见的外壳轻拍；人工配对“视频首接触帧”和“IMU 首个明显响应”。默认保留共同主机时钟，只有满足条件时才应用 `video_time = imu_time + fixed_offset`。当前同步、标注、负责人和有效导出写入对象存储的 `review.json`。
 3. **训练冻结层**：在 IMU/视频公共有效区间上插值到严格 30 Hz，保留 activity/onset/impact/exclude 标注，运行质量门禁，写入可复现的三表 HDF5。训练窗口跳过 exclude；原始 H5/MKV 永不被覆盖。
 
 录制前的设备预览是独立的内存态：连接后持续解析 IMU 通知并输出摄像头低帧率 MJPEG，
@@ -94,8 +94,9 @@ schema `1.3.0` 起保留以下不可变或可重建证据：
       <recording_id>.mkv
 ```
 
-GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest，可变审核快照放在
-`reviews/<recording_id>/review.json`，训练派生放在 `exports/` 和 `releases/`。本地事实目录不因
+GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest，可变标注快照放在
+`reviews/<recording_id>/review.json`，训练派生放在 `exports/` 和
+`training-snapshots/`。本地事实目录不因
 上传、标注或导出而改变。
 
 `_diagnostics` 与正式 collection 分离，诊断 H5 根属性含
@@ -126,8 +127,8 @@ GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest�
 ```
 
 从 schema `1.1.0` 开始，新录制必须包含 `data_tier=test|prod`。从 schema `1.2.0` 开始，
-视频必须同时包含主机单调时钟 PTS、录制相对时间和从零开始的 MKV 媒体时间。旧版缺少该属性的
-H5 只按 `legacy_unclassified` 读取，不能进入训练集。`test` 是不可升级的数据用途；
+视频必须同时包含主机单调时钟 PTS、录制相对时间和从零开始的 MKV 媒体时间。缺少该属性的
+本地旧条目按安全的 `test` 读取，不能进入训练集。`test` 是不可升级的数据用途；
 文件名即使含有或不含有 `test` 都不参与判定。`prod` 只表示正式采集意图，不等于已经
 通过校准、同步、标注和完整性质量门禁。从 schema `1.3.0` 开始，主机相对时间与对齐时间
 分列保存，并增加包拟合诊断、BLE 连接事件和显式排除区间。

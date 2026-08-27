@@ -29,7 +29,7 @@ class RecordingCatalog:
                     recording_id TEXT PRIMARY KEY,
                     collection_id TEXT NOT NULL,
                     participant_id TEXT NOT NULL,
-                    data_tier TEXT NOT NULL DEFAULT 'legacy_unclassified',
+                    data_tier TEXT NOT NULL DEFAULT 'test',
                     state TEXT NOT NULL,
                     started_at_utc TEXT NOT NULL,
                     ended_at_utc TEXT,
@@ -62,7 +62,7 @@ class RecordingCatalog:
             if "data_tier" not in columns:
                 connection.execute(
                     "ALTER TABLE recordings ADD COLUMN data_tier "
-                    "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
+                    "TEXT NOT NULL DEFAULT 'test'"
                 )
             for name, definition in (
                 ("index_state", "TEXT NOT NULL DEFAULT 'not_requested'"),
@@ -86,8 +86,11 @@ class RecordingCatalog:
                     manifest_generation
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recording_id) DO UPDATE SET
+                    collection_id=excluded.collection_id,
+                    participant_id=excluded.participant_id,
                     data_tier=excluded.data_tier,
                     state=excluded.state,
+                    started_at_utc=excluded.started_at_utc,
                     ended_at_utc=excluded.ended_at_utc,
                     duration_ns=excluded.duration_ns,
                     h5_path=excluded.h5_path,
