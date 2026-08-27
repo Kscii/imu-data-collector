@@ -438,7 +438,7 @@ def test_formal_recording_start_is_frozen_before_first_packet(tmp_path: Path) ->
     writer.abort_close()
 
 
-def test_legacy_schema_without_data_tier_remains_structurally_readable(
+def test_old_schema_without_data_tier_defaults_to_safe_test(
     tmp_path: Path,
 ) -> None:
     path = build_capture(tmp_path)
@@ -448,7 +448,7 @@ def test_legacy_schema_without_data_tier_remains_structurally_readable(
 
     report = validate_capture_h5(path, taxonomy())
     assert report.ready, report.issues
-    assert report.metrics["data_tier"] == "legacy_unclassified"
+    assert report.metrics["data_tier"] == "test"
     assert report.metrics["training_eligible"] == "false"
 
 

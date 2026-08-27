@@ -71,13 +71,13 @@ def create_capture_package(
     return output_path
 
 
-def create_training_release(
+def create_training_snapshot_archive(
     files: list[tuple[str, str, Path]], output_path: Path
 ) -> Path:
     """把逐录制训练文件打包成一个不可变 TAR。"""
 
     if not files:
-        raise ValueError("没有已导出的 aligned30.h5 可加入训练发布")
+        raise ValueError("没有已完成的 aligned30.h5 可加入训练快照")
     manifest_files = []
     archive_items: list[tuple[str, Path]] = []
     for participant_id, recording_id, path in sorted(files):
@@ -257,10 +257,10 @@ def export_aligned30(
     source_hashes_verified: bool = False,
 ) -> Path:
     if document.workflow.state not in {
-        ReviewWorkflowState.ACCEPTED,
-        ReviewWorkflowState.EXPORTED,
+        ReviewWorkflowState.IN_PROGRESS,
+        ReviewWorkflowState.COMPLETED,
     }:
-        raise ValueError("只有审核通过的录制可以导出训练数据")
+        raise ValueError("只有进行中或已完成的录制可以导出训练数据")
     if not imu_settings.accel_counts_per_g or not imu_settings.gyro_counts_per_dps:
         raise ValueError("真实 IMU 尺度校准尚未验证，禁止导出正式训练数据")
     if not source_hashes_verified:

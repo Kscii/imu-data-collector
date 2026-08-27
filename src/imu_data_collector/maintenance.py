@@ -9,8 +9,7 @@ from pathlib import Path
 import h5py
 
 from imu_data_collector.catalog import RecordingCatalog
-from imu_data_collector.models import RecordingState, RecordingSummary, ReviewWorkflowState
-from imu_data_collector.review import ReviewDocument, review_path_for
+from imu_data_collector.models import RecordingState, RecordingSummary
 
 INCOMPLETE_SUFFIXES = (
     ".partial.h5",
@@ -87,7 +86,9 @@ def rebuild_catalog(data_root: Path, catalog: RecordingCatalog) -> dict[str, int
                     recording_id=recording_id,
                     collection_id=str(handle.attrs["collection_id"]),
                     participant_id=str(handle.attrs["participant_id"]),
-                    data_tier=str(handle.attrs.get("data_tier", "legacy_unclassified")),
+                    # 旧本地文件缺少用途字段时只允许回收到安全的 test 档，
+                    # 绝不因目录重建而获得训练资格。
+                    data_tier=str(handle.attrs.get("data_tier", "test")),
                     state=(
                         RecordingState.READY
                         if not issues
@@ -129,10 +130,5 @@ def hard_delete_recording(
         raise ValueError("录制目录越出数据根目录")
     if directory.name != summary.recording_id:
         raise ValueError("录制目录名与 recording_id 不一致，拒绝递归删除")
-    sidecar = review_path_for(h5_path)
-    if sidecar.is_file():
-        review = ReviewDocument.model_validate_json(sidecar.read_text(encoding="utf-8"))
-        if review.workflow.state == ReviewWorkflowState.EXPORTED:
-            raise ValueError("该录制已经进入不可变训练发布，不能逐条删除")
     shutil.rmtree(directory)
     return directory

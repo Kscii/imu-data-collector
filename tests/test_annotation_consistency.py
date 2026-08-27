@@ -37,7 +37,7 @@ from imu_data_collector.models import (
 from imu_data_collector.storage import LocalFilesystemStore
 
 
-class FailOnceReleaseManifestStore(LocalFilesystemStore):
+class FailOnceSnapshotManifestStore(LocalFilesystemStore):
     def __init__(self, root: Path) -> None:
         super().__init__(root)
         self.fail_once = True
@@ -45,7 +45,7 @@ class FailOnceReleaseManifestStore(LocalFilesystemStore):
     def write_json(self, key, payload, *, if_generation_match):
         if (
             self.fail_once
-            and key.startswith("releases/")
+            and key.startswith("training-snapshots/")
             and key.endswith("/manifest.json")
         ):
             self.fail_once = False
@@ -83,7 +83,6 @@ def _settings(tmp_path: Path) -> Settings:
         ),
         annotation=AnnotationSettings(
             catalog_path=tmp_path / "annotation.sqlite3",
-            review_policy="single_user",
             catalog_refresh_interval_s=0,
         ),
     )
@@ -220,7 +219,7 @@ def _publish_calibrated_recording(
     return recording_id
 
 
-def _accepted_review(service, recording_id: str) -> None:
+def _ready_review(service, recording_id: str) -> None:
     manifest = service.required_manifest(recording_id)
     review, generation = service.reviews.load(manifest)
     sync = SyncDocument(
@@ -268,8 +267,9 @@ def _accepted_review(service, recording_id: str) -> None:
             "annotations": annotations,
             "workflow": review.workflow.model_copy(
                 update={
-                    "state": ReviewWorkflowState.ACCEPTED,
+                    "state": ReviewWorkflowState.IN_PROGRESS,
                     "annotator_id": "xfan0282",
+                    "last_editor_id": "xfan0282",
                 }
             ),
         }
@@ -294,10 +294,18 @@ def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> Non
         "skipped": 0,
         "issues": [],
     }
-    _accepted_review(service, recording_id)
+    _ready_review(service, recording_id)
 
-    first_review = service.review(recording_id)
-    first = service.export_training(recording_id, first_review.revision)
+    first_review = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete",
+            expected_revision=service.review(recording_id).revision,
+        ),
+        "xfan0282",
+    )
+    assert first_review.active_export is not None
+    first = first_review.active_export
     reopened = service.update_workflow(
         recording_id,
         AnnotationReviewWorkflowRequest(
@@ -305,10 +313,17 @@ def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> Non
             expected_revision=service.review(recording_id).revision,
             comment="更正活动类别",
         ),
-        "rkim6933",
+        "xfan0282",
     )
     assert reopened.active_export is None
-    assert reopened.workflow.annotator_id == "rkim6933"
+    taken = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="assign", expected_revision=reopened.revision
+        ),
+        "rkim6933",
+    )
+    assert taken.workflow.annotator_id == "rkim6933"
 
     manifest = service.required_manifest(recording_id)
 
@@ -322,13 +337,21 @@ def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> Non
                     update={"segments": [segment], "revision": 2}
                 ),
                 "workflow": review.workflow.model_copy(
-                    update={"state": ReviewWorkflowState.ACCEPTED}
+                    update={"state": ReviewWorkflowState.IN_PROGRESS}
                 ),
             }
         )
 
-    accepted = service.reviews.mutate(manifest, reopened.revision, accept_changed)
-    second = service.export_training(recording_id, accepted.revision)
+    changed = service.reviews.mutate(manifest, taken.revision, accept_changed)
+    completed = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete", expected_revision=changed.revision
+        ),
+        "rkim6933",
+    )
+    assert completed.active_export is not None
+    second = completed.active_export
 
     assert first.object_key != second.object_key
     assert first.logical_content_sha256 != second.logical_content_sha256
@@ -344,7 +367,7 @@ def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None
     app = create_annotation_app(settings, store)
     service = app.state.annotation_service
     service.refresh()
-    _accepted_review(service, recording_id)
+    _ready_review(service, recording_id)
     manifest = service.required_manifest(recording_id)
     service.catalog.upsert(
         manifest.model_copy(
@@ -358,7 +381,13 @@ def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None
     )
 
     with pytest.raises(ValueError, match="gyro_counts_per_dps"):
-        service.export_training(recording_id, service.review(recording_id).revision)
+        service.update_workflow(
+            recording_id,
+            AnnotationReviewWorkflowRequest(
+                action="complete", expected_revision=service.review(recording_id).revision
+            ),
+            "xfan0282",
+        )
 
 
 def test_configured_evidence_hash_must_match_actual_file(tmp_path: Path) -> None:
@@ -369,10 +398,16 @@ def test_configured_evidence_hash_must_match_actual_file(tmp_path: Path) -> None
     app = create_annotation_app(settings, store)
     service = app.state.annotation_service
     service.refresh()
-    _accepted_review(service, recording_id)
+    _ready_review(service, recording_id)
 
     with pytest.raises(ValueError, match="实际证据文件"):
-        service.export_training(recording_id, service.review(recording_id).revision)
+        service.update_workflow(
+            recording_id,
+            AnnotationReviewWorkflowRequest(
+                action="complete", expected_revision=service.review(recording_id).revision
+            ),
+            "xfan0282",
+        )
 
 
 def test_takeover_changes_owner_and_old_owner_cannot_edit(tmp_path: Path) -> None:
@@ -447,33 +482,50 @@ def test_manifest_without_sha256_metadata_is_not_indexed(tmp_path: Path) -> None
     assert service.list_recordings() == []
 
 
-def test_release_retry_reuses_tar_after_manifest_write_failure(
+def test_snapshot_retry_reuses_tar_after_manifest_write_failure(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
-    store = FailOnceReleaseManifestStore(settings.storage.root)
+    store = FailOnceSnapshotManifestStore(settings.storage.root)
     recording_id = _publish_calibrated_recording(settings, store, tmp_path)
     service = create_annotation_app(settings, store).state.annotation_service
     service.refresh()
-    _accepted_review(service, recording_id)
-    service.export_training(recording_id, service.review(recording_id).revision)
+    _ready_review(service, recording_id)
+    service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete", expected_revision=service.review(recording_id).revision
+        ),
+        "xfan0282",
+    )
 
     with pytest.raises(RuntimeError, match="manifest 写入中断"):
-        service.create_release("xfan0282")
-    assert len([item for item in store.list("releases/") if item.key.endswith(".tar")]) == 1
+        service.create_training_snapshot("xfan0282")
+    assert len(
+        [
+            item
+            for item in store.list("training-snapshots/")
+            if item.key.endswith(".tar")
+        ]
+    ) == 1
 
-    recovered = service.create_release("xfan0282")
-    repeated = service.create_release("xfan0282")
+    recovered = service.create_training_snapshot("xfan0282")
+    repeated = service.create_training_snapshot("xfan0282")
     assert recovered["created"] is True
     assert repeated["created"] is False
-    assert recovered["release_id"] == repeated["release_id"]
-    assert len([item for item in store.list("releases/") if item.key.endswith(".tar")]) == 1
+    assert recovered["snapshot_id"] == repeated["snapshot_id"]
+    assert len(
+        [
+            item
+            for item in store.list("training-snapshots/")
+            if item.key.endswith(".tar")
+        ]
+    ) == 1
     with pytest.raises(ValueError, match="只有管理员"):
-        service.revoke_release(
-            recovered["release_id"],
+        service.delete_training_snapshot(
+            recovered["snapshot_id"],
             actor_id="rkim6933",
-            confirmation=f"REVOKE {recovered['release_id']}",
-            reason="成员误操作",
+            confirmation=f"DELETE {recovered['snapshot_id']}",
         )
 
 
@@ -500,25 +552,31 @@ def test_orphan_cleanup_preserves_active_export(tmp_path: Path) -> None:
     recording_id = _publish_calibrated_recording(settings, store, tmp_path)
     service = create_annotation_app(settings, store).state.annotation_service
     service.refresh()
-    _accepted_review(service, recording_id)
-    active = service.export_training(
-        recording_id, service.review(recording_id).revision
+    _ready_review(service, recording_id)
+    completed = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete", expected_revision=service.review(recording_id).revision
+        ),
+        "xfan0282",
     )
+    assert completed.active_export is not None
+    active = completed.active_export
     orphan = tmp_path / "orphan.bin"
     orphan.write_bytes(b"orphan")
     orphan_export_key = "exports/unreferenced/review-1/aligned30-deadbeef.h5"
-    orphan_release_key = "releases/release-orphan/archive.tar"
+    orphan_snapshot_key = "training-snapshots/snapshot-000000000000000000000000/archive.tar"
     store.put_file(orphan, orphan_export_key, content_type="application/x-hdf5")
-    store.put_file(orphan, orphan_release_key, content_type="application/x-tar")
+    store.put_file(orphan, orphan_snapshot_key, content_type="application/x-tar")
     now = datetime(2026, 8, 27, tzinfo=UTC)
     old = (now - timedelta(days=8)).timestamp()
-    for key in (active.object_key, orphan_export_key, orphan_release_key):
+    for key in (active.object_key, orphan_export_key, orphan_snapshot_key):
         os.utime(store.resolve(key), (old, old))
 
     result = service.cleanup_orphan_uploads(now=now)
 
     assert result["orphan_exports"] == 1
-    assert result["orphan_releases"] == 1
+    assert result["orphan_snapshots"] == 1
     assert store.stat(active.object_key) is not None
     assert store.stat(orphan_export_key) is None
-    assert store.stat(orphan_release_key) is None
+    assert store.stat(orphan_snapshot_key) is None

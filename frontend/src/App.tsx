@@ -1,13 +1,69 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot from "./Plot";
+import {
+  apiErrorMessage,
+  isEnglish,
+  localizedField,
+  tr,
+  useDocumentLocalization,
+  userVisibleMessage,
+} from "./i18n";
 
-document.title = __APP_KIND__ === "annotation" ? "IMU Data Collector · 标注平台" : "IMU 数采平台";
+document.title = __APP_KIND__ === "annotation"
+  ? tr("IMU 数据标注平台", "IMU Annotation Platform")
+  : tr("IMU 数采平台", "IMU Data Collector");
+
+type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "library";
+
+const CAPTURE_FORM_KEY = "imu-capture-form-v1";
+
+function defaultCollectionId(participant: string) {
+  const now = new Date();
+  const date = [now.getFullYear(), now.getMonth() + 1, now.getDate()]
+    .map((value, index) => index === 0 ? String(value) : String(value).padStart(2, "0"))
+    .join("");
+  return `${date}_${participant}_01`;
+}
+
+function nextCollectionId(current: string, participant: string) {
+  const base = defaultCollectionId(participant).slice(0, -2);
+  const match = current.match(new RegExp(`^${base}(\\d{2})$`));
+  const ordinal = match ? Math.min(99, Number(match[1]) + 1) : 1;
+  return `${base}${String(ordinal).padStart(2, "0")}`;
+}
+
+function initialTab(annotationApplication: boolean): AppTab {
+  const view = new URLSearchParams(location.search).get("view");
+  const mapping: Record<string, AppTab> = annotationApplication
+    ? { annotate: "annotate", calibration: "calibration", training: "library" }
+    : { capture: "capture", records: "library", diagnostics: "characterize" };
+  return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
+}
+
+function tabView(tab: AppTab) {
+  return tab === "library"
+    ? (__APP_KIND__ === "annotation" ? "training" : "records")
+    : tab === "characterize" ? "diagnostics" : tab;
+}
+
+function readCaptureForm() {
+  try {
+    return JSON.parse(sessionStorage.getItem(CAPTURE_FORM_KEY) ?? "{}") as {
+      participant?: string;
+      collection?: string;
+      dataTier?: "test" | "prod";
+      cameraId?: string;
+    };
+  } catch {
+    return {};
+  }
+}
 
 type Recording = {
   recording_id: string;
   collection_id: string;
   participant_id: string;
-  data_tier: "test" | "prod" | "legacy_unclassified";
+  data_tier: "test" | "prod";
   state: string;
   started_at_utc: string;
   duration_ns?: number;
@@ -22,11 +78,14 @@ type Recording = {
 type CalibrationEvidence = {
   schema_version: string;
   profile_id: string;
-  device: { name: string; address: string; scope_zh: string };
+  device: { name: string; address: string; scope_zh: string; scope_en: string };
   coordinate_system: {
     x_positive_zh: string;
+    x_positive_en: string;
     y_positive_zh: string;
+    y_positive_en: string;
     z_positive_zh: string;
+    z_positive_en: string;
     handedness: string;
   };
   calibration: {
@@ -38,13 +97,17 @@ type CalibrationEvidence = {
     axis_signs: number[];
     status: string;
     conclusion_zh: string;
+    conclusion_en: string;
   };
   evidence: {
     recording_id: string;
     kind: string;
     setup_zh: string;
+    setup_en: string;
     expected_zh: string;
+    expected_en: string;
     observed_zh: string;
+    observed_en: string;
     available: boolean;
   }[];
 };
@@ -91,8 +154,8 @@ type AnnotationDocument = {
 type Taxonomy = {
   taxonomy_id: string;
   version: string;
-  fall: { code: string; display_name_zh: string }[];
-  non_fall: { code: string; display_name_zh: string }[];
+  fall: { code: string; display_name_zh: string; display_name_en: string }[];
+  non_fall: { code: string; display_name_zh: string; display_name_en: string }[];
 };
 
 type AppConfig = {
@@ -105,7 +168,6 @@ type AppConfig = {
   data_root?: string;
   video?: { width: number; height: number; requested_fps: number; bitrate: string };
   local_actor_id?: string;
-  review_policy?: "single_user" | "two_person";
   catalog_refresh_interval_s?: number;
 };
 
@@ -116,29 +178,26 @@ type Session = {
   auth_mode: "local" | "iap";
 };
 
-type TrainingRelease = {
-  release_id: string;
+type TrainingSnapshot = {
+  snapshot_id: string;
   created_at_utc: string | null;
   created_by: string | null;
   content_fingerprint: string | null;
   archive_sha256: string;
   archive_size_bytes: number;
   recording_count: number;
-  status: "active";
   created?: boolean;
 };
 
 type ReviewDocument = {
-  schema_version: "1.0.0" | "1.1.0";
+  schema_version: "2.0.0";
   recording_id: string;
   revision: number;
   workflow: {
-    state: "unassigned" | "in_progress" | "submitted" | "accepted" | "exported";
+    state: "unassigned" | "in_progress" | "completed";
     annotator_id: string | null;
-    reviewer_id: string | null;
-    review_comment: string;
+    last_editor_id: string | null;
     updated_at_utc: string | null;
-    review_policy: "single_user" | "two_person";
   };
   annotations: AnnotationDocument;
   active_export: {
@@ -172,7 +231,7 @@ type SyncAnchor = {
   imu_time_ns: number;
   video_time_ns: number;
   label: string;
-  role: "start_tap" | "end_tap" | "legacy";
+  role: "start_tap" | "end_tap";
   source_video_frame: number | null;
   source_imu_sample: number | null;
   video_interval_start_ns: number | null;
@@ -254,34 +313,6 @@ type SyncWindow = {
   };
 };
 
-type SyncObservation = {
-  observation_id: string;
-  recording_id: string;
-  video_frame_index: number;
-  video_time_ns: number;
-  imu_sample_index: number;
-  imu_time_ns: number;
-  label: string;
-  reviewer_id: string;
-  notes: string;
-  selection_mode?: "legacy_manual" | "auto_recommended" | "manual_candidate";
-  recommendation_algorithm?: string | null;
-  recommended_sample_index?: number | null;
-  recommendation_confidence?: "high" | "medium" | "low" | null;
-  candidate_strength_rank?: number | null;
-  candidate_score?: number | null;
-  expected_video_minus_imu_ns?: number | null;
-};
-
-type SyncExperimentDocument = {
-  schema_version: "1.0.0";
-  experiment_id: string;
-  revision: number;
-  updated_at_utc: string | null;
-  observations: SyncObservation[];
-  sources: unknown[];
-};
-
 const characterizationStages = [
   ["pipeline_smoke_uncontrolled", "链路冒烟（姿态未控制）", "仅验证连接、落盘和报告；不参与任何尺度或方向候选"],
   ["long_static_button_up", "长时静止（按键面朝上）", "建议 30 分钟；用于频率、间隙、零偏和噪声"],
@@ -300,7 +331,6 @@ const characterizationStages = [
 ] as const;
 
 const LIVE_WINDOW_SECONDS = 120;
-const SYNC_EXPERIMENT_ID = "sync_validation_01";
 const INITIAL_VIDEO_PREVIEW_OFFSET_NS = 200_000_000;
 const exclusionLabels: Record<Exclusion["reason"], string> = {
   sync_tap: "同步轻拍",
@@ -328,18 +358,17 @@ async function api<T>(path: string, init?: RequestInit, timeoutMs = 45_000): Pro
       const payload = await response.json().catch(() => ({}));
       const detail = payload.detail;
       if (detail && typeof detail === "object") {
-        throw new Error([detail.message, detail.hint].filter(Boolean).join("；"));
+        throw new Error(apiErrorMessage(detail, response.status, response.statusText));
       }
-      throw new Error(
-        typeof detail === "string" && detail.trim()
-          ? detail
-          : `${response.status} ${response.statusText}`
-      );
+      throw new Error(apiErrorMessage(detail, response.status, response.statusText));
     }
     return response.json();
   } catch (error) {
     if ((error as Error).name === "AbortError") {
-      throw new Error(`请求超过 ${(timeoutMs / 1000).toFixed(0)} 秒仍未完成，已停止等待`);
+      throw new Error(tr(
+        `请求超过 ${(timeoutMs / 1000).toFixed(0)} 秒仍未完成，已停止等待`,
+        `The request did not finish within ${(timeoutMs / 1000).toFixed(0)} seconds and was cancelled`,
+      ));
     }
     throw error;
   } finally {
@@ -435,60 +464,6 @@ function nearestIndex(values: number[], target: number) {
   return target - values[left - 1] <= values[left] - target ? left - 1 : left;
 }
 
-function median(values: number[]) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
-function recommendOffset(
-  observations: SyncObservation[],
-  recordingId: string,
-  videoTimeNs: number
-): {
-  value: number | null;
-  source: "recording_affine" | "recording_offset" | "global_offset" | "none";
-} {
-  const recording = observations.filter((item) => item.recording_id === recordingId);
-  if (recording.length >= 2) {
-    const meanImu = recording.reduce((sum, item) => sum + item.imu_time_ns, 0) / recording.length;
-    const meanVideo = recording.reduce((sum, item) => sum + item.video_time_ns, 0) / recording.length;
-    const covariance = recording.reduce(
-      (sum, item) => sum + (item.imu_time_ns - meanImu) * (item.video_time_ns - meanVideo),
-      0
-    );
-    const variance = recording.reduce(
-      (sum, item) => sum + (item.imu_time_ns - meanImu) ** 2,
-      0
-    );
-    if (variance > 0) {
-      const scale = covariance / variance;
-      const offset = meanVideo - scale * meanImu;
-      if (Number.isFinite(scale) && scale > 0.98 && scale < 1.02) {
-        const predictedImuTime = (videoTimeNs - offset) / scale;
-        return {
-          value: videoTimeNs - predictedImuTime,
-          source: "recording_affine"
-        };
-      }
-    }
-  }
-  if (recording.length) {
-    return {
-      value: median(recording.map((item) => item.video_time_ns - item.imu_time_ns)),
-      source: "recording_offset"
-    };
-  }
-  if (observations.length) {
-    return {
-      value: median(observations.map((item) => item.video_time_ns - item.imu_time_ns)),
-      source: "global_offset"
-    };
-  }
-  return { value: null, source: "none" };
-}
-
 function stateLabel(state: string) {
   const labels: Record<string, string> = {
     idle: "空闲",
@@ -497,9 +472,18 @@ function stateLabel(state: string) {
     finalizing: "正在收尾",
     ready: "可用",
     needs_attention: "需要检查",
-    failed: "失败"
+    failed: "失败",
+    connected: "已连接",
+    connecting: "正在连接",
+    reconnecting: "正在重连",
+    releasing: "正在释放",
+    error: "异常"
   };
   return labels[state] ?? state;
+}
+
+function tierLabel(tier: "test" | "prod") {
+  return tier === "prod" ? "正式数据" : "测试数据";
 }
 
 function issueLabel(issue: string) {
@@ -507,20 +491,23 @@ function issueLabel(issue: string) {
     "synchronization anchors have not been verified": "同步锚点尚未验证",
     "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证"
   };
-  return labels[issue] ?? issue;
+  return labels[issue] ?? userVisibleMessage(issue);
 }
 
 export default function App() {
+  useDocumentLocalization();
   const annotationApplication = __APP_KIND__ === "annotation";
   const ownsCaptureTab = useCaptureTabLease(!annotationApplication);
-  const diagnosticsVisible = new URLSearchParams(location.search).has("diagnostics");
-  const [tab, setTab] = useState<"capture" | "characterize" | "annotate" | "calibration" | "library">(
-    annotationApplication ? "annotate" : "capture"
-  );
+  const diagnosticsVisible = new URLSearchParams(location.search).has("diagnostics")
+    || new URLSearchParams(location.search).get("view") === "diagnostics";
+  const [captureForm] = useState(readCaptureForm);
+  const [tab, setTab] = useState<AppTab>(() => initialTab(annotationApplication));
   const [live, setLive] = useState<any>({ state: "idle", imu: {}, video: {} });
-  const [participant, setParticipant] = useState("xfan0282");
-  const [collection, setCollection] = useState("xfan0282_test_01");
-  const [dataTier, setDataTier] = useState<"test" | "prod">("test");
+  const [participant, setParticipant] = useState(captureForm.participant ?? "xfan0282");
+  const [collection, setCollection] = useState(
+    captureForm.collection ?? defaultCollectionId(captureForm.participant ?? "xfan0282")
+  );
+  const [dataTier, setDataTier] = useState<"test" | "prod">(captureForm.dataTier ?? "test");
   const [captureError, setCaptureError] = useState("");
   const [captureOperation, setCaptureOperation] = useState("");
   const [recordings, setRecordings] = useState<Recording[]>([]);
@@ -528,13 +515,39 @@ export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
-  const [cameraId, setCameraId] = useState("");
+  const [cameraId, setCameraId] = useState(captureForm.cameraId ?? "");
   const liveRef = useRef<{ t: number[]; values: number[][] }>({ t: [], values: [] });
   const [, redraw] = useState(0);
   const versionMismatch = !annotationApplication
     && config !== null
     && config.build_id !== __CAPTURE_API_BUILD_ID__;
   const captureInteractionBlocked = !ownsCaptureTab || versionMismatch;
+
+  const selectTab = (next: AppTab) => {
+    setTab(next);
+    const url = new URL(location.href);
+    url.searchParams.set("view", tabView(next));
+    history.pushState({}, "", url);
+  };
+
+  useEffect(() => {
+    const onPopState = () => setTab(initialTab(annotationApplication));
+    window.addEventListener("popstate", onPopState);
+    const url = new URL(location.href);
+    if (!url.searchParams.has("view")) {
+      url.searchParams.set("view", tabView(tab));
+      history.replaceState({}, "", url);
+    }
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [annotationApplication]);
+
+  useEffect(() => {
+    if (annotationApplication) return;
+    sessionStorage.setItem(
+      CAPTURE_FORM_KEY,
+      JSON.stringify({ participant, collection, dataTier, cameraId })
+    );
+  }, [annotationApplication, participant, collection, dataTier, cameraId]);
 
   const refreshRecordings = async () => {
     try {
@@ -565,7 +578,9 @@ export default function App() {
       if (!value.allowed_unikeys.includes(participant) && value.allowed_unikeys.length) {
         setParticipant(value.allowed_unikeys[0]);
       }
-      if (value.default_data_tier) setDataTier(value.default_data_tier);
+      if (!captureForm.dataTier && value.default_data_tier) {
+        setDataTier(value.default_data_tier);
+      }
     }).catch((e) => setCaptureError(e.message));
     if (annotationApplication) {
       api<Session>("/api/v1/session").then(setSession).catch((e) => setCaptureError(e.message));
@@ -714,15 +729,15 @@ export default function App() {
       <header>
         <div>
           <span className="eyebrow">{annotationApplication ? "CW12EU-T · 独立标注" : "CW12EU-T · 本机采集"}</span>
-          <h1>{annotationApplication ? "IMU Data Collector" : "IMU 数采平台"}</h1>
+          <h1>{annotationApplication ? "IMU 数据标注平台" : "IMU 数采平台"}</h1>
         </div>
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => setTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => setTab("calibration")}>设备校准证据</button><button className={tab === "library" ? "active" : ""} onClick={() => setTab("library")}>训练发布</button></> : <>
-          <button className={tab === "capture" ? "active" : ""} onClick={() => setTab("capture")}>采集</button>
-          <button className={tab === "library" ? "active" : ""} onClick={() => { setTab("library"); refreshRecordings(); }}>记录与发布</button>
-          {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => setTab("characterize")}>IMU 诊断</button>}
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button></> : <>
+          <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
+          <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
+          {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
         </>}
       </nav>
       {annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
@@ -765,7 +780,7 @@ export default function App() {
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} onChanged={refreshRecordings} />
       )}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
-      {annotationApplication && tab === "library" && session && <TrainingReleasesPage session={session} />}
+      {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary recordings={recordings} onChanged={refreshRecordings} />}
     </div>
   );
@@ -799,30 +814,32 @@ function CalibrationEvidencePage() {
     <section className="panel">
       <div className="panel-title">设备专属工程校准档案</div>
       <p><strong>{profile.profile_id}</strong> · {profile.device.name} · {profile.device.address}</p>
-      <p className="stage-help">{profile.device.scope_zh}</p>
+      <p className="stage-help">{localizedField(profile.device, "scope")}</p>
       <div className="status-grid">
         <span>加速度尺度 {profile.calibration.accel_counts_per_g} counts/g</span>
         <span>角速度尺度 {profile.calibration.gyro_counts_per_dps} counts/(°/s)</span>
         <span>原始加速度零偏 [{profile.calibration.accel_bias_counts_raw.join(", ")}]</span>
         <span>原始角速度零偏 [{profile.calibration.gyro_bias_counts_raw.join(", ")}]</span>
       </div>
-      <p>{profile.calibration.conclusion_zh}</p>
-      <p className="stage-help">目标右手坐标系：+X {profile.coordinate_system.x_positive_zh}；+Y {profile.coordinate_system.y_positive_zh}；+Z {profile.coordinate_system.z_positive_zh}。</p>
+      <p>{localizedField(profile.calibration, "conclusion")}</p>
+      <p className="stage-help">{tr("目标右手坐标系", "Target right-handed coordinate system")}：+X {localizedField(profile.coordinate_system, "x_positive")}；+Y {localizedField(profile.coordinate_system, "y_positive")}；+Z {localizedField(profile.coordinate_system, "z_positive")}。</p>
     </section>
     <section className="annotation-layout calibration-layout">
-      <aside className="panel recording-list">
+      <aside className="panel calibration-evidence-sidebar">
         <div className="panel-title">证据录制（{profile.evidence.length}）</div>
-        {profile.evidence.map((item) => <button key={item.recording_id} className={selected === item.recording_id ? "selected" : ""} disabled={!item.available} onClick={() => setSelected(item.recording_id)}><strong>{item.kind === "accel_static_face" ? "六面静态" : item.kind === "gyro_rotation" ? "360° 旋转" : "动态校验"}</strong><span>{item.recording_id}</span><span>{item.available ? "证据可用" : "制品缺失"}</span></button>)}
+        <div className="calibration-evidence-list">
+          {profile.evidence.map((item) => <button key={item.recording_id} className={selected === item.recording_id ? "selected" : ""} disabled={!item.available} onClick={() => setSelected(item.recording_id)}><strong>{item.kind === "accel_static_face" ? "六面静态" : item.kind === "gyro_rotation" ? "360° 旋转" : "动态校验"}</strong><span>{item.recording_id}</span><span>{item.available ? "证据可用" : "制品缺失"}</span></button>)}
+        </div>
       </aside>
-      <section>
+      <section className="calibration-evidence-detail">
         {current && <>
-          <div className="panel calibration-video"><video key={current.recording_id} controls preload="metadata" src={`/api/v1/recordings/${current.recording_id}/video`} /></div>
+          <div className="panel calibration-video"><video key={current.recording_id} controls preload="metadata" src={`/api/v1/calibration-evidence/${current.recording_id}/video`} /></div>
           <div className="panel">
             <div className="panel-title">已确认实验语义</div>
-            <p><strong>实验：</strong>{current.setup_zh}</p>
-            <p><strong>预期：</strong>{current.expected_zh}</p>
-            <p><strong>观测：</strong>{current.observed_zh}</p>
-            <div className="save-row"><button onClick={copyId}>复制录制 ID</button><a className="button-link" href={`/api/v1/recordings/${current.recording_id}/capture-h5/download`} download>下载原始 H5</a></div>
+            <p><strong>实验：</strong>{localizedField(current, "setup")}</p>
+            <p><strong>预期：</strong>{localizedField(current, "expected")}</p>
+            <p><strong>观测：</strong>{localizedField(current, "observed")}</p>
+            <div className="save-row"><button onClick={copyId}>复制录制 ID</button><a className="button-link" href={`/api/v1/calibration-evidence/${current.recording_id}/capture-h5/download`} download>下载原始 H5</a></div>
             <p className="stage-help">本页只用于理解设备坐标、物理尺度与证据来源，不进入动作标注队列，也不生成训练样本。</p>
           </div>
         </>}
@@ -855,10 +872,11 @@ function CapturePage(props: any) {
   return (
     <main>
       <section className="controls panel">
-        <label>数据批次 ID<input value={collection} onChange={(e) => setCollection(e.target.value)} disabled={interactionBlocked || active || busy} /></label>
-        <label>参与者 UniKey<select value={participant} onChange={(e) => setParticipant(e.target.value)} disabled={interactionBlocked || active || busy}>{allowedUnikeys.map((item: string) => <option value={item} key={item}>{item}</option>)}</select></label>
-        <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">test · 永久禁止训练</option><option value="prod">prod · 仍需通过全部质量门禁</option></select></label>
-        <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
+        <label>采集场次 ID（自动）<input value={collection} readOnly disabled={interactionBlocked || active || busy} /></label>
+        <button disabled={interactionBlocked || active || busy} onClick={() => setCollection(nextCollectionId(collection, participant))}>下一个采集场次</button>
+        <label>参与者 UniKey<select value={participant} onChange={(e) => { const next = e.target.value; setParticipant(next); setCollection(defaultCollectionId(next)); }} disabled={interactionBlocked || active || busy}>{allowedUnikeys.map((item: string) => <option value={item} key={item}>{item}</option>)}</select></label>
+        <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">测试数据（不进入训练）</option><option value="prod">正式数据（需通过质量门禁）</option></select></label>
+        <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
         <button disabled={interactionBlocked || active || busy} onClick={refreshCameras}>重新扫描摄像头</button>
         <button disabled={interactionBlocked || active || busy || anotherSession || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{previewButtonLabel}</button>
         {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>重试失败设备</button>}
@@ -869,11 +887,11 @@ function CapturePage(props: any) {
         <Metric label={`浏览器预览实时 FPS（上限 ${live.video?.preview_fps_limit ?? 10}）`} value={(live.video?.preview_fps ?? 0).toFixed(1)} />
         <Metric label="视频帧" value={live.video?.frame ?? 0} />
         <Metric label="IMU 通知包" value={live.imu?.packet_count ?? 0} />
-        <Metric label="IMU 候选样本" value={live.imu?.sample_count ?? 0} />
+        <Metric label="IMU 样本" value={live.imu?.sample_count ?? 0} />
         <Metric label="IMU 估算频率" value={`${(live.imu?.estimated_sample_rate_hz ?? 0).toFixed(2)} Hz`} />
         <Metric label="最后一包" value={live.imu?.last_packet_age_ms == null ? "—" : `${live.imu.last_packet_age_ms.toFixed(0)} ms 前`} warn={live.imu?.connected && (live.imu?.last_packet_age_ms ?? 0) > 2000} />
-        <Metric label="BLE连接" value={live.imu?.connected ? "已连接" : "未连接"} warn={!live.imu?.connected} />
-        <Metric label="设备会话" value={live.device?.state ?? "—"} warn={["error", "reconnecting"].includes(live.device?.state)} />
+        <Metric label="BLE 连接" value={live.imu?.connected ? "已连接" : "未连接"} warn={!live.imu?.connected} />
+        <Metric label="设备状态" value={stateLabel(live.device?.state ?? "—")} warn={["error", "reconnecting"].includes(live.device?.state)} />
         <Metric label="解析/回调丢弃" value={`${live.imu?.parse_errors ?? 0} / ${live.imu?.callback_drops ?? 0}`} warn={(live.imu?.parse_errors ?? 0) > 0 || (live.imu?.callback_drops ?? 0) > 0} />
         <Metric label="剩余磁盘" value={`${(live.free_disk_gib ?? 0).toFixed(1)} GiB`} />
       </section>
@@ -888,8 +906,8 @@ function CapturePage(props: any) {
         </div>
       </section>
       {live.recording?.issues?.length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{live.recording.issues.map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
-      {live.preview_error && <div className="issues"><div>{live.preview_error}</div></div>}
-      {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.join("；")}</div>}
+      {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div></div>}
+      {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
       {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0} / 3 次自动重连。</div>}
     </main>
   );
@@ -961,12 +979,10 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   const [timeline, setTimeline] = useState<{ time_s: number[]; values: number[][]; unit: string } | null>(null);
   const [frameTimes, setFrameTimes] = useState<FrameTimes | null>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
-  const [experiment, setExperiment] = useState<SyncExperimentDocument | null>(null);
   const [experimentWindow, setExperimentWindow] = useState<SyncWindow | null>(null);
   const [experimentImuSample, setExperimentImuSample] = useState<number | null>(null);
-  const [experimentLabel, setExperimentLabel] = useState("tap_01");
   const [experimentBusy, setExperimentBusy] = useState(false);
-  const [recommendationOffsetSource, setRecommendationOffsetSource] = useState<"formal_anchor" | "recording_affine" | "recording_offset" | "global_offset" | "none">("none");
+  const [recommendationOffsetSource, setRecommendationOffsetSource] = useState<"formal_anchor" | "none">("none");
   const [annotationKind, setAnnotationKind] = useState<"fall" | "non_fall" | "exclude">("non_fall");
   const [activity, setActivity] = useState(taxonomy.non_fall[0].code);
   const [exclusionReason, setExclusionReason] = useState<Exclusion["reason"]>("other");
@@ -998,7 +1014,6 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     setDoc(null);
     setTimeline(null);
     setSync(null);
-    setExperiment(null);
     setReview(null);
     setStatus(null);
     setFrameTimes(null);
@@ -1026,15 +1041,6 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     }).catch((e) => {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     });
-    api<SyncExperimentDocument>(`/api/v1/sync-experiments/${SYNC_EXPERIMENT_ID}`, { signal: controller.signal })
-      .then((experimentDocument) => {
-        setExperiment(experimentDocument);
-        const count = experimentDocument.observations.filter((item) => item.recording_id === selected).length;
-        setExperimentLabel(`tap_${String(count + 1).padStart(2, "0")}`);
-      })
-      .catch((e) => {
-        if ((e as Error).name !== "AbortError") setExperiment(null);
-      });
     return () => controller.abort();
   }, [selected]);
 
@@ -1076,14 +1082,10 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     if (!selected || !frameTimes) return;
     setExperimentBusy(true);
     try {
-      const confirmedFormalAnchor = sync?.anchors.find((item) => item.role !== syncRole && item.role !== "legacy");
+      const confirmedFormalAnchor = sync?.anchors.find((item) => item.role !== syncRole);
       const prior = confirmedFormalAnchor
         ? { value: confirmedFormalAnchor.video_time_ns - confirmedFormalAnchor.imu_time_ns, source: "formal_anchor" as const }
-        : recommendOffset(
-          experiment?.observations ?? [],
-          selected,
-          frameTimes.time_ns[currentFrame]
-        );
+        : { value: null, source: "none" as const };
       const query = new URLSearchParams({ frame_index: String(currentFrame), radius_seconds: "1.5" });
       if (prior.value !== null) query.set("expected_video_minus_imu_ns", String(Math.round(prior.value)));
       const window = await api<SyncWindow>(`/api/v1/recordings/${selected}/sync-window?${query.toString()}`);
@@ -1095,59 +1097,6 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     } finally {
       setExperimentBusy(false);
     }
-  };
-
-  const persistExperiment = async (observations: SyncObservation[]) => {
-    if (!experiment) return;
-    setExperimentBusy(true);
-    try {
-      const saved = await api<SyncExperimentDocument>(`/api/v1/sync-experiments/${SYNC_EXPERIMENT_ID}`, {
-        method: "PUT",
-        body: JSON.stringify({ ...experiment, observations })
-      });
-      setExperiment(saved);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setExperimentBusy(false);
-    }
-  };
-
-  const saveExperimentObservation = async () => {
-    if (!selected || !experiment || !experimentWindow || experimentImuSample === null) return;
-    const localIndex = experimentWindow.sample_index.indexOf(experimentImuSample);
-    if (localIndex < 0) return;
-    const selectedCandidate = experimentWindow.candidate_peaks.find((item) => item.sample_index === experimentImuSample);
-    if (!selectedCandidate) return;
-    const existingIds = new Set(experiment.observations.map((item) => item.observation_id));
-    let ordinal = 1;
-    let observationId = `${selected}_tap_${String(ordinal).padStart(2, "0")}`;
-    while (existingIds.has(observationId)) {
-      ordinal += 1;
-      observationId = `${selected}_tap_${String(ordinal).padStart(2, "0")}`;
-    }
-    const observation: SyncObservation = {
-      observation_id: observationId,
-      recording_id: selected,
-      video_frame_index: experimentWindow.video_frame_index,
-      video_time_ns: experimentWindow.video_time_ns,
-      imu_sample_index: experimentImuSample,
-      imu_time_ns: experimentWindow.time_ns[localIndex],
-      label: experimentLabel || `tap_${String(ordinal).padStart(2, "0")}`,
-      reviewer_id: annotator,
-      notes: "",
-      selection_mode: experimentImuSample === experimentWindow.recommendation.sample_index ? "auto_recommended" : "manual_candidate",
-      recommendation_algorithm: experimentWindow.recommendation.algorithm,
-      recommended_sample_index: experimentWindow.recommendation.sample_index,
-      recommendation_confidence: experimentWindow.recommendation.confidence,
-      candidate_strength_rank: selectedCandidate.strength_rank,
-      candidate_score: selectedCandidate.recommendation_score,
-      expected_video_minus_imu_ns: experimentWindow.recommendation.expected_video_minus_imu_ns
-    };
-    await persistExperiment([...experiment.observations, observation]);
-    setExperimentLabel(`tap_${String(ordinal + 1).padStart(2, "0")}`);
-    setExperimentWindow(null);
-    setExperimentImuSample(null);
   };
 
   const confirmFormalAnchor = () => {
@@ -1167,7 +1116,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     };
     const anchors = [
       ...sync.anchors.filter(
-        (item) => item.role !== syncRole && item.role !== "legacy"
+        (item) => item.role !== syncRole
       ),
       anchor
     ]
@@ -1304,7 +1253,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   };
 
   const changeWorkflow = async (
-    action: "assign" | "submit" | "accept" | "reject" | "reopen"
+    action: "assign" | "reopen"
   ) => {
     if (!selected || !review) return;
     if (
@@ -1313,10 +1262,6 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       && review.workflow.annotator_id !== annotator
       && !window.confirm(`该任务当前由 ${review.workflow.annotator_id} 领取。确认接管吗？`)
     ) return;
-    const comment = action === "reject" || action === "reopen"
-      ? window.prompt(action === "reject" ? "请输入驳回原因" : "请输入重开原因") ?? ""
-      : "";
-    if ((action === "reject" || action === "reopen") && !comment.trim()) return;
     setError("");
     try {
       const saved = await api<ReviewDocument>(`/api/v1/recordings/${selected}/workflow`, {
@@ -1324,7 +1269,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
         body: JSON.stringify({
           action,
           expected_revision: review.revision,
-          comment
+          comment: ""
         })
       });
       setReview(saved);
@@ -1334,15 +1279,28 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     }
   };
 
-  const exportAligned30 = async () => {
-    if (!selected || !review) return;
+  const finalizeAndComplete = async () => {
+    if (!selected || !review || !doc || !canEdit) return;
     setError("");
     try {
-      await api(`/api/v1/recordings/${selected}/aligned30`, {
-        method: "POST",
-        body: JSON.stringify({ expected_revision: review.revision })
+      const annotations = await api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expected_revision: review.revision,
+          document: { ...doc, revision: doc.revision + 1, finalized: true }
+        })
       });
-      setReview(await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`));
+      setDoc(annotations);
+      const finalizedReview = await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`);
+      const completed = await api<ReviewDocument>(`/api/v1/recordings/${selected}/workflow`, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "complete",
+          expected_revision: finalizedReview.revision,
+          comment: ""
+        })
+      });
+      setReview(completed);
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
     } catch (e) {
       setError((e as Error).message);
@@ -1489,7 +1447,6 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       }]
       : [])
   ];
-  const recordingObservations = experiment?.observations.filter((item) => item.recording_id === selected) ?? [];
   const selectedRecording = recordings.find((item) => item.recording_id === selected);
   const durationNs = selectedRecording?.duration_ns ?? 0;
   const coverageIntervals = doc ? [
@@ -1515,22 +1472,47 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   const canClaim = review?.workflow.state === "unassigned";
   const canTakeOver = review?.workflow.state === "in_progress"
     && review.workflow.annotator_id !== annotator;
+  const canReopen = review?.workflow.state === "completed"
+    && (review.workflow.annotator_id === annotator || session.is_admin);
+  const editDisabledReason = !review
+    ? "正在读取任务状态"
+    : review.workflow.state === "unassigned"
+      ? "请先领取任务，领取后即可标记轻拍和动作区间"
+      : review.workflow.state === "completed"
+        ? "该任务已经完成；负责人或管理员重开后才能修改"
+        : review.workflow.annotator_id !== annotator
+          ? `任务当前由 ${review.workflow.annotator_id} 负责；接管后才能修改`
+          : "";
 
   return (
     <main className="annotation-layout">
       <aside className="panel recording-list">
         <div className="panel-title">选择录制</div>
         <div className="recording-list-actions">
-          {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在扫描…" : "立即扫描 Bucket"}</button>}
+          {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在刷新…" : "刷新录制列表"}</button>}
           <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? "已复制" : "复制当前 ID"}</button>
         </div>
         {selected && <code className="selected-recording-id" title="可以直接框选复制">{selected}</code>}
         {indexMessage && <span className="index-message">{indexMessage}</span>}
-        {recordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} onClick={() => setSelected(recording.recording_id)}><strong>{recording.participant_id}</strong><span>{recording.recording_id}</span></button>)}
+        {recordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} onClick={() => setSelected(recording.recording_id)}><strong>{recording.participant_id} · {tierLabel(recording.data_tier)}</strong><span>{recording.recording_id}</span></button>)}
       </aside>
       <section className="annotation-workspace">
         {error && <div className="error-banner">{error}</div>}
         {!selected ? <div className="panel placeholder">从左侧选择一段录制</div> : <>
+          {review && <div className={`panel task-gate ${canEdit ? "task-gate-ready" : ""}`}>
+            <div>
+              <div className="panel-title">任务状态 · {review.workflow.state === "unassigned" ? "未领取" : review.workflow.state === "in_progress" ? "标注中" : "已完成"}</div>
+              <strong>{canEdit ? "你正在负责此任务，可以进行同步和标注。" : editDisabledReason}</strong>
+              <details>
+                <summary>技术详情</summary>
+                <p className="stage-help">review revision {review.revision} · 当前负责人 {review.workflow.annotator_id ?? "无"} · 最后编辑者 {review.workflow.last_editor_id ?? "无"}</p>
+              </details>
+            </div>
+            <div className="save-row">
+              {(canClaim || canTakeOver) && <button className="primary" onClick={() => changeWorkflow("assign")}>{canTakeOver ? `接管 ${review.workflow.annotator_id} 的任务` : "领取并开始标注"}</button>}
+              {canReopen && <button onClick={() => changeWorkflow("reopen")}>重开并继续修改</button>}
+            </div>
+          </div>}
           <div className="panel video-review">
             <video
               ref={video}
@@ -1557,13 +1539,13 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
               <span>录制时间 {frameTimes ? (frameTimes.time_ns[currentFrame] / 1e9).toFixed(9) : "—"} s</span>
               <span>媒体 PTS {frameTimes ? (frameTimes.media_time_ns[currentFrame] / 1e9).toFixed(9) : "—"} s</span>
               <button onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>下一帧</button>
-              <button className="primary" onClick={loadExperimentWindow} disabled={!canEdit || !frameTimes || experimentBusy}>此帧是{syncRole === "start_tap" ? "开始" : "结束"}轻拍首次接触</button>
+              <button className="primary" title={editDisabledReason} onClick={loadExperimentWindow} disabled={!canEdit || !frameTimes || experimentBusy}>此帧是{syncRole === "start_tap" ? "开始" : "结束"}轻拍首次接触</button>
             </div>
-            <p className="stage-help">页面默认从约 0.2 秒处开始预览，以避开摄像头刚启动时的自动白平衡过渡；原始第 0 帧仍完整保留，可用“上一帧”逐帧返回。同步和标注均使用真实逐帧时间戳。</p>
-            <p className="stage-help">先暂停到手首次接触 IMU 的画面，再逐帧确认。键盘 ←/→ 或 ,/. 可逐帧移动；帧号从 0 开始。</p>
+            {!canEdit && <p className="stage-help warning-text">{editDisabledReason}</p>}
+            <details><summary>视频与快捷键说明</summary><p className="stage-help">页面从约 0.2 秒处开始预览以避开摄像头启动过渡；原始第 0 帧仍完整保留。暂停到手首次接触 IMU 的画面后，可用键盘 ←/→ 或 ,/. 逐帧移动；帧号从 0 开始，所有同步和标注均使用真实逐帧时间戳。</p></details>
           </div>
 
-          <div className="panel sync-experiment-panel">
+          <div className="panel sync-panel">
             <div className="panel-title">第 1 步 · 开始/结束轻拍同步复核</div>
             <div className="sync-inputs">
               <label>当前锚点<select value={syncRole} onChange={(event) => setSyncRole(event.target.value as "start_tap" | "end_tap")}><option value="start_tap">开始轻拍</option><option value="end_tap">结束轻拍</option></select></label>
@@ -1578,7 +1560,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
               <div className={`recommendation-card confidence-${experimentWindow.recommendation.confidence}`}>
                 <strong>自动推荐：{experimentWindow.recommendation.sample_index === null ? "无候选" : `样本 ${experimentWindow.recommendation.sample_index}`}</strong>
                 <span>置信度：{experimentWindow.recommendation.confidence === "high" ? "高" : experimentWindow.recommendation.confidence === "medium" ? "中" : "低"}</span>
-                <span>{recommendationOffsetSource === "formal_anchor" ? "额外时间先验：本条已确认的另一端锚点" : recommendationOffsetSource === "recording_affine" ? "额外时间先验：历史实验本条线性拟合" : recommendationOffsetSource === "recording_offset" ? "额外时间先验：历史实验本条固定偏移" : recommendationOffsetSource === "global_offset" ? "额外时间先验：历史实验跨录制偏移" : "额外时间先验：无；基线：共同主机时钟 0 ms"}</span>
+                <span>{recommendationOffsetSource === "formal_anchor" ? "时间先验：本条已确认的另一端锚点" : "时间先验：共同主机时钟 0 ms"}</span>
                 <span>实体响应 {experimentWindow.recommendation.distinct_response_count} 个 · 显著性 {experimentWindow.recommendation.event_robust_z?.toFixed(1) ?? "—"} · 时间残差 {experimentWindow.recommendation.timing_residual_ms?.toFixed(1) ?? "—"} ms · 区分比 {experimentWindow.recommendation.score_margin_ratio?.toFixed(2) ?? "唯一响应"}</span>
                 <span>{experimentWindow.recommendation.reason}</span>
               </div>
@@ -1612,17 +1594,11 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
               {experimentWindow.recommendation.confidence === "low" && <p className="stage-help warning-text">自动推荐置信度低，请逐个比较候选；程序不会自动保存。</p>}
             </>}
             <div className="anchor-list">
-              {sync?.anchors.filter((item) => item.role !== "legacy").map((anchor) => <div key={anchor.role}>
+              {sync?.anchors.map((anchor) => <div key={anchor.role}>
                 <span>{anchor.role === "start_tap" ? "开始轻拍" : "结束轻拍"} · 帧 {anchor.source_video_frame ?? "—"} ({seconds(anchor.video_time_ns)}) ↔ 样本 {anchor.source_imu_sample ?? "—"} ({seconds(anchor.imu_time_ns)})</span>
                 <button disabled={!canEdit} onClick={() => setSync({ ...sync, anchors: sync.anchors.filter((item) => item.role !== anchor.role), quality: "draft", recommendation: "none", decision: "host_only" })}>删除</button>
               </div>)}
             </div>
-            <details>
-              <summary>高级信息 · 历史同步实验观察</summary>
-              <div className="observation-list">
-                {recordingObservations.length === 0 ? <span className="muted">本条没有历史实验观察</span> : recordingObservations.map((observation) => <div key={observation.observation_id}><span>{observation.label} · 帧 {observation.video_frame_index} ↔ 样本 {observation.imu_sample_index}</span></div>)}
-              </div>
-            </details>
           </div>
 
           <div className="panel"><div className="panel-title">完整录制 IMU · {timeline?.unit} · {timeline?.time_s.length ?? 0} 个显示点 · 正式标注与同步复核</div>{timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} height={250} onSelectTime={setSelectedImuTime} />}</div>
@@ -1654,7 +1630,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             <div className="status-grid"><span>当前标注者 {annotator}</span><span>身份由登录会话验证，不可在页面切换</span></div>
             <div className="mark-buttons"><button disabled={!canEdit} onClick={() => mark("start")}>标记区间开始（I）</button><button disabled={!canEdit} onClick={() => mark("end")}>标记区间结束（O）</button><button disabled={!canEdit || annotationKind !== "fall"} onClick={() => mark("impact")}>标记撞击时刻（2）</button></div>
             <div className="marks"><span>区间开始／跌倒起始 {seconds(marks.start)}</span><span>区间结束 {seconds(marks.end)}</span><span>撞击时刻 {seconds(marks.impact)}</span></div>
-            <div className="segment-form"><select disabled={!canEdit} value={annotationKind} onChange={(e) => setAnnotationKind(e.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 进入训练</option><option value="fall">跌倒 · 进入训练</option><option value="exclude">明确排除 · 不训练</option></select>{annotationKind === "exclude" ? <select disabled={!canEdit} value={exclusionReason} onChange={(e) => setExclusionReason(e.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canEdit} value={activity} onChange={(e) => setActivity(e.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" disabled={!canEdit} onClick={addAnnotationInterval}>添加区间</button></div>
+          <div className="segment-form"><select disabled={!canEdit} value={annotationKind} onChange={(e) => setAnnotationKind(e.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 进入训练</option><option value="fall">跌倒 · 进入训练</option><option value="exclude">明确排除 · 不训练</option></select>{annotationKind === "exclude" ? <select disabled={!canEdit} value={exclusionReason} onChange={(e) => setExclusionReason(e.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canEdit} value={activity} onChange={(e) => setActivity(e.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{isEnglish ? item.display_name_en : item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" disabled={!canEdit} onClick={addAnnotationInterval}>添加区间</button></div>
             {annotationKind === "fall" && <p className="stage-help">fall 从首次明确失衡开始，经过撞击，到落地后身体大动作停止并稳定。跌倒起始由区间起点自动派生；每个跌倒区间必须各自标记一个撞击时刻。准备阶段和稳定后的自然状态另标 non_fall。</p>}
           </div>
           {doc && <div className="panel segment-table">
@@ -1684,36 +1660,22 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             <div className="panel-title subheading">明确排除区间</div>
             {doc.exclusions.map((item) => <div className="segment-row" key={item.exclusion_id}><span>{item.exclusion_id}</span><strong>排除</strong><span>{exclusionLabels[item.reason]}</span><span>{seconds(item.start_ns)} → {seconds(item.end_ns)}</span><button disabled={!canEdit} onClick={() => setDoc({ ...doc, exclusions: doc.exclusions.filter((candidate) => candidate.exclusion_id !== item.exclusion_id) })}>删除</button></div>)}
             {fallWithoutImpactCount > 0 && <div className="coverage-summary warning-text">仍有 {fallWithoutImpactCount} 个跌倒区间没有撞击时刻；草稿允许，完成时禁止。</div>}
-            <div className="save-row"><button disabled={!canEdit} onClick={() => save(false)}>保存草稿（Ctrl+S）</button><button className="primary" disabled={!canEdit || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={() => save(true)}>完成并验证标注</button><span>修订 {doc.revision} · {doc.finalized ? "已定稿" : "草稿"} · 同步 {sync?.quality ?? "missing"}</span></div>
+            <div className="save-row"><button disabled={!canEdit} onClick={() => save(false)}>保存草稿（Ctrl+S）</button><button className="primary" disabled={!canEdit || selectedRecording?.data_tier !== "prod" || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={finalizeAndComplete}>完成标注并生成训练 H5</button><span>{doc.finalized ? "标注已定稿" : "草稿"} · {sync?.quality === "verified" ? "同步已验证" : "同步待验证"}</span></div>
+            {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据可以保存草稿和下载原始 H5，但不会完成为训练数据。</p>}
           </div>}
           {review && <div className="panel workflow-panel">
-            <div className="panel-title">第 4 步 · {review.workflow.review_policy === "single_user" ? "完成标注" : "提交与异人审核"}</div>
-            <p>当前状态：<strong>{review.workflow.state}</strong> · review revision {review.revision} · 标注者 {review.workflow.annotator_id ?? "未分配"} · 审核者 {review.workflow.reviewer_id ?? "未分配"}</p>
-            {canTakeOver && <p className="stage-help warning-text">当前页面只读。接管后你会成为最新领取者，原领取者的旧页面将无法继续保存。</p>}
-            {review.workflow.review_comment && <p className="stage-help">审核意见：{review.workflow.review_comment}</p>}
-            <div className="save-row">
-              <button disabled={!canClaim && !canTakeOver} onClick={() => changeWorkflow("assign")}>{canTakeOver ? `接管 ${review.workflow.annotator_id} 的任务` : canEdit ? "当前已领取" : "领取任务"}</button>
-              <button className="primary" disabled={review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || !doc?.finalized} onClick={() => changeWorkflow("submit")}>{review.workflow.review_policy === "single_user" ? "完成标注" : "提交审核"}</button>
-              {review.workflow.review_policy === "two_person" && <button className="primary" disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("accept")}>审核通过</button>}
-              {review.workflow.review_policy === "two_person" && <button disabled={review.workflow.state !== "submitted" || review.workflow.annotator_id === annotator} onClick={() => changeWorkflow("reject")}>驳回</button>}
-              <button disabled={!['accepted', 'exported'].includes(review.workflow.state)} onClick={() => changeWorkflow("reopen")}>成员重开</button>
-            </div>
-          </div>}
-          {review && <div className="panel workflow-panel">
-            <div className="panel-title">第 5 步 · 下载原始数据、标注快照与训练制品</div>
-            <p className="stage-help">capture.h5 是带来源哈希的不可变原始采集数据；review.json 是当前可审计的标注与同步快照。只有通过门禁的 prod 录制才能生成统一 30 Hz 的 aligned30.h5。</p>
-            <div className="status-grid"><span>数据级别 {recordings.find((item) => item.recording_id === selected)?.data_tier ?? "—"}</span><span>校准 {status?.calibration ?? "—"}</span><span>导出 {status?.export ?? "—"}</span></div>
+            <div className="panel-title">第 4 步 · 下载数据</div>
+            <p className="stage-help">原始 H5 和当前标注快照始终可以下载；正式数据完成后自动生成统一 30 Hz 的训练 H5。</p>
+            <details><summary>技术状态</summary><div className="status-grid"><span>数据级别 {selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div></details>
             <div className="save-row">
               <a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>下载原始 capture.h5</a>
               <a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>下载 review.json</a>
-              {selectedRecording?.data_tier === "prod" && status?.export === "exported"
-                ? <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>下载 aligned30.h5</a>
-                : <button className="primary" disabled={recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" || review.workflow.state !== "accepted" || status?.calibration !== "verified"} onClick={exportAligned30}>生成 aligned30.h5</button>}
+              {selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>下载 aligned30.h5</a>}
             </div>
-            {recordings.find((item) => item.recording_id === selected)?.data_tier !== "prod" && <p className="stage-help warning-text">当前是 test 数据：可以下载原始 capture.h5 和 review.json，用于联调与结构展示；永久禁止生成训练 H5、进入训练发布或同步到 SOFT3888 raw。</p>}
+            {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">当前是测试数据：可以下载原始 capture.h5 和 review.json，用于联调和结构展示，但不会生成训练 H5 或进入训练快照。</p>}
             <div className="danger-zone">
               <strong>永久删除整条录制</strong>
-              <p className="stage-help">仅允许删除尚未进入有效训练发布 TAR 的录制。平台会立即隐藏并删除原始 H5、MKV、预览视频、标注、导出、缓存和同步实验引用；GCS 仍按存储桶策略提供 7 天软删除恢复窗口。</p>
+              <p className="stage-help">删除会立即从标注列表隐藏，并清除这条录制的原始文件、预览、标注和当前导出。已经生成的自包含训练快照不受影响；对象存储仍按存储桶策略提供 7 天软删除恢复窗口。</p>
               {!deleteArmed
                 ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始永久删除</button>
                 : <>
@@ -1731,29 +1693,29 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   );
 }
 
-function TrainingReleasesPage({ session }: { session: Session }) {
-  const [releases, setReleases] = useState<TrainingRelease[]>([]);
+function TrainingSnapshotsPage({ session }: { session: Session }) {
+  const [snapshots, setSnapshots] = useState<TrainingSnapshot[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
   const refresh = async () => {
-    setReleases(await api<TrainingRelease[]>("/api/v1/training-releases"));
+    setSnapshots(await api<TrainingSnapshot[]>("/api/v1/training-snapshots"));
   };
 
   useEffect(() => {
     refresh().catch((value) => setError((value as Error).message));
   }, []);
 
-  const createRelease = async () => {
+  const createSnapshot = async () => {
     setBusy(true);
     setError("");
     setMessage("");
     try {
-      const result = await api<TrainingRelease>("/api/v1/training-releases", { method: "POST" });
+      const result = await api<TrainingSnapshot>("/api/v1/training-snapshots", { method: "POST" });
       setMessage(result.created
-        ? `已创建训练发布 ${result.release_id}`
-        : `内容没有变化，继续使用已有发布 ${result.release_id}`);
+        ? `已创建训练快照 ${result.snapshot_id}`
+        : `内容没有变化，继续使用已有快照 ${result.snapshot_id}`);
       await refresh();
     } catch (value) {
       setError((value as Error).message);
@@ -1762,20 +1724,18 @@ function TrainingReleasesPage({ session }: { session: Session }) {
     }
   };
 
-  const revokeRelease = async (releaseId: string) => {
-    const confirmation = window.prompt(`撤销后将立即停止展示和下载。请输入：\nREVOKE ${releaseId}`);
+  const deleteSnapshot = async (snapshotId: string) => {
+    const confirmation = window.prompt(`清理后需要重新构建才能下载。请输入：\nDELETE ${snapshotId}`);
     if (confirmation === null) return;
-    const reason = window.prompt("请输入撤销原因；该原因会保留在轻量墓碑记录中：");
-    if (reason === null || !reason.trim()) return;
     setBusy(true);
     setError("");
     setMessage("");
     try {
-      await api(`/api/v1/training-releases/${releaseId}/revoke`, {
-        method: "POST",
-        body: JSON.stringify({ confirmation, reason })
+      await api(`/api/v1/training-snapshots/${snapshotId}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation })
       });
-      setMessage(`已撤销并隐藏训练发布 ${releaseId}`);
+      setMessage(`已清理训练快照 ${snapshotId}`);
       await refresh();
     } catch (value) {
       setError((value as Error).message);
@@ -1788,26 +1748,36 @@ function TrainingReleasesPage({ session }: { session: Session }) {
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
-      <div className="panel-title">训练发布</div>
-      <p className="stage-help">发布只包含已通过审核、校准和导出门禁的 prod 录制。相同内容不会重复创建；test 数据永远不会进入 TAR。</p>
+      <div className="panel-title">训练快照</div>
+      <p className="stage-help">点击时冻结当前所有已完成的正式数据。相同内容复用同一个 TAR；构建期间的后续标注变化不会改变本次快照。</p>
       <div className="save-row">
-        <button className="primary" disabled={busy} onClick={createRelease}>{busy ? "正在处理…" : "创建当前训练发布"}</button>
+        <button className="primary" disabled={busy} onClick={createSnapshot}>{busy ? "正在处理…" : "生成当前训练快照"}</button>
         <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>刷新列表</button>
-        <span>当前操作者 {session.unikey} · 所有白名单成员均可创建、下载与撤销</span>
+        <span>当前操作者 {session.unikey} · 所有成员可生成和下载，管理员可清理历史快照</span>
       </div>
-      {releases.length === 0 ? <span className="muted">目前没有有效训练发布。</span> : releases.map((release) => <article key={release.release_id}>
-        <div>
-          <strong>{release.release_id}</strong>
-          <span>{release.recording_count} 条录制 · {(release.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · 创建者 {release.created_by ?? "未知"}</span>
-          <span>SHA-256 {release.archive_sha256}</span>
-        </div>
-        <div className="save-row">
-          <a className="button-link primary" href={`/api/v1/training-releases/${release.release_id}/download`} download>下载 TAR</a>
-          <button className="danger" disabled={busy} onClick={() => revokeRelease(release.release_id)}>撤销</button>
-        </div>
-      </article>)}
+      {snapshots.length === 0 ? <span className="muted">目前还没有训练快照。</span> : <>
+        <SnapshotRow snapshot={snapshots[0]} current session={session} busy={busy} onDelete={deleteSnapshot} />
+        {snapshots.length > 1 && <details className="snapshot-history">
+          <summary>历史快照（{snapshots.length - 1}）</summary>
+          {snapshots.slice(1).map((snapshot) => <SnapshotRow key={snapshot.snapshot_id} snapshot={snapshot} session={session} busy={busy} onDelete={deleteSnapshot} />)}
+        </details>}
+      </>}
     </section>
   </main>;
+}
+
+function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void }) {
+  return <article className={current ? "current-snapshot" : ""}>
+    <div>
+      <strong>{current ? "当前训练快照" : "历史训练快照"} · {snapshot.snapshot_id}</strong>
+      <span>{snapshot.recording_count} 条录制 · {(snapshot.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · 创建者 {snapshot.created_by ?? "未知"}</span>
+      <details><summary>校验信息</summary><span>SHA-256 {snapshot.archive_sha256}</span></details>
+    </div>
+    <div className="save-row">
+      <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>下载 TAR</a>
+      {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
+    </div>
+  </article>;
 }
 
 function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; onChanged: () => void }) {
@@ -1856,7 +1826,7 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
   };
 
   const deleteRecording = async (recordingId: string) => {
-    const confirmation = window.prompt(`永久删除不可恢复。请输入完整 recording_id：\n${recordingId}`);
+    const confirmation = window.prompt(`这只删除本机副本；已经发布到云端的录制不会被删除。请输入完整 recording_id：\n${recordingId}`);
     if (confirmation === null) return;
     setError("");
     try {
@@ -1900,11 +1870,11 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
       <div className="panel-title">本地录制与手动发布</div>
-      <p className="stage-help">这里只负责确认采集结果并交给标注存储；同步、标注、审核和训练导出全部在独立标注平台完成。</p>
+      <p className="stage-help">这里只负责确认采集结果并交给标注存储；同步、标注和训练快照在独立标注平台完成。</p>
       {recordings.map((recording) => <article key={recording.recording_id}>
-        <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {recording.data_tier} · {seconds(recording.duration_ns)}</span></div>
+        <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {tierLabel(recording.data_tier)} · {seconds(recording.duration_ns)}</span></div>
         <div className="status-grid">
-          <span>采集 {recording.state}</span>
+          <span>采集 {stateLabel(recording.state)}</span>
           <span>{["uploaded", "published"].includes(recording.upload_state) ? "已上传 Bucket" : `上传 ${recording.upload_state}`}</span>
           {recording.index_state === "indexed" && <span>标注端已接收</span>}
           {recording.index_state === "pending" && <span>等待标注端接收</span>}
@@ -1912,7 +1882,7 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
         </div>
         {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{recording.index_message}</p>}
         <div className="save-row">
-          <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id || ["uploaded", "published"].includes(recording.upload_state)} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : ["uploaded", "published"].includes(recording.upload_state) ? "已上传 Bucket" : "估算并发布"}</button>
+          <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : ["uploaded", "published"].includes(recording.upload_state) ? "重新校验发布" : "估算并发布"}</button>
           <button className="danger" disabled={Boolean(busy)} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>
         {recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
@@ -1921,135 +1891,6 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
     <section className="panel library">
       <div className="panel-title">本地维护</div>
       <div className="save-row"><button onClick={scanIncomplete}>扫描不完整文件</button><button onClick={rebuild}>从目录重建索引</button></div>
-      {incomplete.length === 0 ? <span className="muted">尚未扫描，或未发现不完整文件。</span> : incomplete.map((item) => <article key={item.relative_path}><div><strong>{item.relative_path}</strong><span>{item.reason} · {(item.size_bytes / 1024 ** 2).toFixed(2)} MiB</span></div><button onClick={() => quarantine(item.relative_path)}>隔离</button></article>)}
-    </section>
-  </main>;
-}
-
-function Library({ recordings, onChanged }: { recordings: Recording[]; onChanged: () => void }) {
-  const [statuses, setStatuses] = useState<Record<string, RecordingStatus>>({});
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-  const [incomplete, setIncomplete] = useState<{ relative_path: string; size_bytes: number; reason: string }[]>([]);
-
-  const refreshStatuses = async () => {
-    const entries = await Promise.all(recordings.map(async (recording) => [
-      recording.recording_id,
-      await api<RecordingStatus>(`/api/v1/recordings/${recording.recording_id}/status`)
-    ] as const));
-    setStatuses(Object.fromEntries(entries));
-  };
-
-  useEffect(() => {
-    let active = true;
-    refreshStatuses().catch((e) => { if (active) setError(e.message); });
-    return () => { active = false; };
-  }, [recordings]);
-
-  const createPackage = async (recordingId: string) => {
-    setError("");
-    setMessage("");
-    try {
-      const estimate = await api<{ estimated_bytes: number }>(`/api/v1/recordings/${recordingId}/capture-package/estimate`);
-      const gib = estimate.estimated_bytes / 1024 ** 3;
-      if (!window.confirm(`预计需要 ${gib.toFixed(2)} GiB 额外空间，继续生成无压缩源包？`)) return;
-      const result = await api<{ path: string }>(`/api/v1/recordings/${recordingId}/capture-package`, { method: "POST" });
-      setMessage(`源包已生成：${result.path}`);
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  const exportAligned = async (recordingId: string) => {
-    const status = statuses[recordingId];
-    if (!status) return;
-    setError("");
-    setMessage("");
-    try {
-      const result = await api<{ path: string }>(`/api/v1/recordings/${recordingId}/aligned30`, {
-        method: "POST",
-        body: JSON.stringify({ expected_revision: status.review_revision })
-      });
-      setMessage(`30 Hz 训练文件已生成：${result.path}`);
-      await refreshStatuses();
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  const deleteRecording = async (recordingId: string) => {
-    const confirmation = window.prompt(`永久删除不可恢复。请输入完整 recording_id：\n${recordingId}`);
-    if (confirmation === null) return;
-    setError("");
-    try {
-      await api(`/api/v1/recordings/${recordingId}`, {
-        method: "DELETE",
-        body: JSON.stringify({ confirmation })
-      });
-      setMessage(`已永久删除本地录制：${recordingId}`);
-      onChanged();
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  const scanIncomplete = async () => {
-    setError("");
-    try {
-      setIncomplete(await api("/api/v1/maintenance/incomplete"));
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  const quarantine = async (relativePath: string) => {
-    setError("");
-    try {
-      await api("/api/v1/maintenance/quarantine", {
-        method: "POST",
-        body: JSON.stringify({ relative_path: relativePath })
-      });
-      await scanIncomplete();
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  const rebuild = async () => {
-    setError("");
-    try {
-      const result = await api<{ imported: number; skipped: number }>("/api/v1/maintenance/rebuild-catalog", { method: "POST" });
-      setMessage(`目录重建完成：导入 ${result.imported}，跳过 ${result.skipped}`);
-      onChanged();
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  const createRelease = async () => {
-    setError("");
-    try {
-      const result = await api<{ path: string }>("/api/v1/training-releases", { method: "POST" });
-      setMessage(`不可变训练发布已生成：${result.path}`);
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  return <main>
-    {error && <div className="error-banner">{error}</div>}
-    {message && <div className="success-banner">{message}</div>}
-    <section className="panel library">
-      <div className="panel-title">本地录制与独立状态</div>
-      {recordings.map((recording) => {
-        const status = statuses[recording.recording_id];
-        return <article key={recording.recording_id}>
-          <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {recording.data_tier} · {seconds(recording.duration_ns)}</span></div>
-          <div className="status-grid">
-            <span>采集 {status?.capture ?? recording.state}</span>
-            <span>同步 {status?.sync ?? "—"}</span>
-            <span>标注 {status?.annotation ?? "—"}</span>
-            <span>校准 {status?.calibration ?? "—"}</span>
-            <span>导出 {status?.export ?? "—"}</span>
-          </div>
-          <div className="save-row">
-            <button onClick={() => createPackage(recording.recording_id)}>估算并生成源包</button>
-            <button onClick={() => exportAligned(recording.recording_id)}>导出 aligned30.h5</button>
-            <button className="danger" onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
-          </div>
-          {recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
-        </article>;
-      })}
-    </section>
-    <section className="panel library">
-      <div className="panel-title">本地维护</div>
-      <div className="save-row"><button onClick={scanIncomplete}>扫描不完整文件</button><button onClick={rebuild}>从目录重建索引</button><button onClick={createRelease}>生成训练发布 TAR</button></div>
       {incomplete.length === 0 ? <span className="muted">尚未扫描，或未发现不完整文件。</span> : incomplete.map((item) => <article key={item.relative_path}><div><strong>{item.relative_path}</strong><span>{item.reason} · {(item.size_bytes / 1024 ** 2).toFixed(2)} MiB</span></div><button onClick={() => quarantine(item.relative_path)}>隔离</button></article>)}
     </section>
   </main>;

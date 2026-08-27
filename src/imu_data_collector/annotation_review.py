@@ -8,7 +8,6 @@ from imu_data_collector.models import (
     AnnotationDocument,
     CaptureManifestV2,
     ReviewDocument,
-    ReviewPolicy,
     ReviewWorkflow,
     SourceArtifact,
     SyncDocument,
@@ -22,11 +21,9 @@ class AnnotationReviewStore:
         self,
         store: ObjectStore,
         taxonomy: dict,
-        review_policy: ReviewPolicy,
     ) -> None:
         self.store = store
         self.taxonomy = taxonomy
-        self.review_policy = review_policy
 
     @staticmethod
     def key(recording_id: str) -> str:
@@ -55,7 +52,7 @@ class AnnotationReviewStore:
                 taxonomy_id=str(self.taxonomy["taxonomy_id"]),
                 taxonomy_version=str(self.taxonomy["version"]),
             ),
-            workflow=ReviewWorkflow(review_policy=self.review_policy),
+            workflow=ReviewWorkflow(),
         )
 
     def load(self, manifest: CaptureManifestV2) -> tuple[ReviewDocument, int]:

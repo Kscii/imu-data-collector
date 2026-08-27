@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from imu_data_collector.api_errors import structured_http_error_handler
 from imu_data_collector.ble import CW12EUBleSource
 from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
@@ -60,6 +61,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         await coordinator.shutdown()
 
     app = FastAPI(title="IMU 数据采集端", version="0.2.0", lifespan=lifespan)
+    app.add_exception_handler(HTTPException, structured_http_error_handler)
     app.state.coordinator = coordinator
 
     @app.middleware("http")

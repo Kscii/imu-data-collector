@@ -1,4 +1,4 @@
-"""独立标注、同步、审核和训练导出 API；不初始化采集硬件。"""
+"""独立同步、标注和训练快照 API；不初始化采集硬件。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from imu_data_collector.annotation_service import AnnotationService
+from imu_data_collector.api_errors import error_detail, structured_http_error_handler
 from imu_data_collector.auth import (
     Actor,
     AuthenticationError,
@@ -28,10 +29,8 @@ from imu_data_collector.models import (
     AnnotationRecordingDeleteRequest,
     AnnotationReviewWorkflowRequest,
     AnnotationSaveRequest,
-    RevisionRequest,
-    SyncExperimentDocument,
     SyncSaveRequest,
-    TrainingReleaseRevokeRequest,
+    TrainingSnapshotDeleteRequest,
 )
 from imu_data_collector.review import ReviewConflictError
 from imu_data_collector.storage import (
@@ -91,6 +90,7 @@ def create_annotation_app(
                 refresh_thread.join(timeout=2.0)
 
     app = FastAPI(title="IMU 标注平台", version="0.2.0", lifespan=lifespan)
+    app.add_exception_handler(HTTPException, structured_http_error_handler)
     app.state.annotation_service = service
     app.state.authenticator = authenticator
 
@@ -102,9 +102,15 @@ def create_annotation_app(
                     request.headers.get("x-goog-iap-jwt-assertion")
                 )
             except AuthenticationError as error:
-                return JSONResponse(status_code=401, content={"detail": str(error)})
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": error_detail("authentication_failed", str(error))},
+                )
             except AuthorizationError as error:
-                return JSONResponse(status_code=403, content={"detail": str(error)})
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": error_detail("authorization_failed", str(error))},
+                )
         response = await call_next(request)
         if request.url.path.startswith("/assets/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
@@ -148,7 +154,6 @@ def create_annotation_app(
             "local_actor_id": active.auth.local_actor_id,
             "auth_mode": active.auth.mode,
             "current_unikey": actor.unikey,
-            "review_policy": service.review_policy.value,
             "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "storage": {
                 "backend": active.storage.backend,
@@ -177,33 +182,86 @@ def create_annotation_app(
     def calibration_evidence() -> dict[str, Any]:
         return service.calibration_evidence_summary()
 
+    @app.get("/api/v1/calibration-evidence/{recording_id}/video")
+    def calibration_evidence_video(
+        recording_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> StreamingResponse:
+        try:
+            artifact, info = service.calibration_evidence_artifact(
+                recording_id, "preview_mp4"
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该校准证据") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        start, end, status_code = 0, info.size_bytes - 1, 200
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
+            if not match:
+                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else end
+            if start > end or end >= info.size_bytes:
+                raise HTTPException(status_code=416, detail="视频 Range 越界")
+            status_code = 206
+
+        def stream():
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(
+                    str(artifact["object_key"]), cursor, chunk_end
+                )
+                cursor = chunk_end + 1
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+            "Cache-Control": "private, max-age=3600",
+        }
+        if status_code == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{info.size_bytes}"
+        return StreamingResponse(
+            stream(), status_code=status_code, media_type="video/mp4", headers=headers
+        )
+
+    @app.get("/api/v1/calibration-evidence/{recording_id}/capture-h5/download")
+    def calibration_evidence_h5(recording_id: str) -> StreamingResponse:
+        try:
+            artifact, info = service.calibration_evidence_artifact(
+                recording_id, "capture_h5"
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该校准证据") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        def stream():
+            cursor = 0
+            while cursor < info.size_bytes:
+                chunk_end = min(info.size_bytes - 1, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(
+                    str(artifact["object_key"]), cursor, chunk_end
+                )
+                cursor = chunk_end + 1
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/x-hdf5",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{recording_id}.capture.h5"'
+                ),
+                "Content-Length": str(info.size_bytes),
+                "Cache-Control": "private, no-store",
+            },
+        )
+
     @app.get("/api/v1/recordings/{recording_id}")
     def recording(recording_id: str) -> dict[str, Any]:
         return service.recording_summary(required(recording_id))
 
-    @app.get("/api/v1/sync-experiments/{experiment_id}")
-    def sync_experiment(experiment_id: str) -> dict[str, Any]:
-        try:
-            return service.sync_experiment(experiment_id).model_dump(mode="json")
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-
-    @app.put("/api/v1/sync-experiments/{experiment_id}")
-    def save_sync_experiment(
-        experiment_id: str,
-        document: SyncExperimentDocument,
-        request: Request,
-    ) -> dict[str, Any]:
-        try:
-            return service.save_sync_experiment(
-                experiment_id,
-                document,
-                current_actor(request).unikey,
-            ).model_dump(mode="json")
-        except ReviewConflictError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/v1/recordings/{recording_id}/status")
     def status(recording_id: str) -> dict[str, Any]:
@@ -354,24 +412,6 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.post("/api/v1/recordings/{recording_id}/aligned30")
-    def aligned30(
-        recording_id: str, request: RevisionRequest
-    ) -> dict[str, Any]:
-        required(recording_id)
-        try:
-            exported = service.export_training(
-                recording_id, request.expected_revision
-            )
-            return {
-                "status": "exported",
-                **exported.model_dump(mode="json"),
-            }
-        except ReviewConflictError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-
     @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
     def aligned30_download(recording_id: str) -> StreamingResponse:
         manifest = required(recording_id)
@@ -429,37 +469,26 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/training-releases")
-    def releases() -> list[dict[str, Any]]:
-        return service.list_releases()
+    @app.get("/api/v1/training-snapshots")
+    def training_snapshots() -> list[dict[str, Any]]:
+        return service.list_training_snapshots()
 
-    @app.post("/api/v1/training-releases")
-    def release(request: Request) -> dict[str, Any]:
+    @app.post("/api/v1/training-snapshots")
+    def create_training_snapshot(request: Request) -> dict[str, Any]:
         try:
-            return service.create_release(current_actor(request).unikey)
+            return service.create_training_snapshot(current_actor(request).unikey)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/training-releases/{release_id}/status")
-    def release_status(release_id: str) -> dict[str, Any]:
-        try:
-            return service.release_status(release_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail="找不到该训练发布") from error
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-
-    @app.get("/api/v1/training-releases/{release_id}/download")
-    def release_download(
-        release_id: str,
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/download")
+    def training_snapshot_download(
+        snapshot_id: str,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> StreamingResponse:
         try:
-            payload, archive = service.release_download(release_id)
+            payload, archive = service.training_snapshot_download(snapshot_id)
         except KeyError as error:
-            raise HTTPException(status_code=404, detail="找不到该训练发布") from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=410, detail=str(error)) from error
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         start = 0
@@ -472,7 +501,7 @@ def create_annotation_app(
             start = int(match.group(1))
             end = int(match.group(2)) if match.group(2) else end
             if start > end or end >= archive.size_bytes:
-                raise HTTPException(status_code=416, detail="训练发布 Range 越界")
+                raise HTTPException(status_code=416, detail="训练快照 Range 越界")
             status_code = 206
 
         def stream():
@@ -487,7 +516,7 @@ def create_annotation_app(
             "Content-Length": str(end - start + 1),
             "Cache-Control": "private, no-store",
             "Content-Disposition": (
-                f'attachment; filename="cw12eu_{payload["release_id"]}.tar"'
+                f'attachment; filename="cw12eu_{payload["snapshot_id"]}.tar"'
             ),
         }
         if status_code == 206:
@@ -499,23 +528,23 @@ def create_annotation_app(
             headers=headers,
         )
 
-    @app.post("/api/v1/training-releases/{release_id}/revoke")
-    def revoke_release(
-        release_id: str,
-        body: TrainingReleaseRevokeRequest,
+    @app.delete("/api/v1/training-snapshots/{snapshot_id}")
+    def delete_training_snapshot(
+        snapshot_id: str,
+        body: TrainingSnapshotDeleteRequest,
         request: Request,
     ) -> dict[str, Any]:
         try:
-            return service.revoke_release(
-                release_id,
+            admin_actor(request)
+            return service.delete_training_snapshot(
+                snapshot_id,
                 actor_id=current_actor(request).unikey,
                 confirmation=body.confirmation,
-                reason=body.reason,
             )
         except KeyError as error:
-            raise HTTPException(status_code=404, detail="找不到该训练发布") from error
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except ObjectConflictError as error:
-            raise HTTPException(status_code=409, detail="撤销期间对象已更新，请重试") from error
+            raise HTTPException(status_code=409, detail="清理期间对象已更新，请重试") from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 

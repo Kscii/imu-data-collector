@@ -1,0 +1,471 @@
+import { useEffect } from "react";
+
+export type UiLanguage = "zh-CN" | "en";
+
+function resolveLanguage(): UiLanguage {
+  const override = new URLSearchParams(window.location.search).get("lang");
+  if (override === "zh-CN" || override === "en") return override;
+  const browserLanguage = navigator.languages?.[0] ?? navigator.language ?? "en";
+  return browserLanguage.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+
+export const uiLanguage = resolveLanguage();
+export const isEnglish = uiLanguage === "en";
+
+export function tr(chinese: string, english: string): string {
+  return isEnglish ? english : chinese;
+}
+
+export function localizedField<T extends Record<string, unknown>>(
+  value: T,
+  field: string,
+): string {
+  const localized = value[`${field}_${isEnglish ? "en" : "zh"}`];
+  return typeof localized === "string" ? localized : "";
+}
+
+const translations: Record<string, string> = {
+  "采集页面与后端 API 版本不一致": "The capture page and backend API versions do not match",
+  "页面": "page",
+  "后端": "backend",
+  "源码更新后请在项目根目录运行": "After updating the source, run this command from the project root:",
+  "普通的 systemctl 重启不会重新构建页面": "A normal systemctl restart does not rebuild the page",
+  "旧版未报告": "not reported by the old backend",
+  "另一个标签页正在控制本机采集设备。本页保持只读；关闭另一个页面后最多等待 6 秒即可接管。": "Another tab is controlling the local capture devices. This page is read-only; close the other tab and wait up to 6 seconds to take control.",
+  "本页只用于理解设备坐标、物理尺度与证据来源，不进入动作标注队列，也不生成训练样本。": "This page documents the device axes, physical scale, and evidence provenance. It does not enter the annotation queue or create training samples.",
+  "页面从约 0.2 秒处开始预览以避开摄像头启动过渡；原始第 0 帧仍完整保留。暂停到手首次接触 IMU 的画面后，可用键盘 ←/→ 或 ,/. 逐帧移动；帧号从 0 开始，所有同步和标注均使用真实逐帧时间戳。": "Preview starts at about 0.2 seconds to avoid the camera startup transition; original frame 0 is retained. Pause at the first frame where the hand touches the IMU, then use ←/→ or ,/. to step frame by frame. Frame indices start at 0, and synchronization and annotation use actual per-frame timestamps.",
+  "视频人工选择首次接触帧；程序推荐 IMU 首次响应，仍需人工确认。": "Select the first contact frame in the video. The program suggests the first IMU response, but a person must confirm it.",
+  "时间比例固定为 1.0；只有估计偏移至少 0.1 秒且首尾差不超过 0.1 秒时，才建议平移 IMU。原始主机时间永不覆盖。": "The time scale is fixed at 1.0. An IMU shift is suggested only when the estimated offset is at least 0.1 s and the start/end disagreement is at most 0.1 s. Original host timestamps are never overwritten.",
+  "fall 从首次明确失衡开始，经过撞击，到落地后身体大动作停止并稳定。跌倒起始由区间起点自动派生；每个跌倒区间必须各自标记一个撞击时刻。准备阶段和稳定后的自然状态另标 non_fall。": "A fall starts at the first clear loss of balance, includes impact, and ends when large body motion stops after landing. Onset is derived from the interval start; every fall interval must have its own impact event. Mark preparation and the stable state afterwards as non_fall.",
+  "删除会立即从标注列表隐藏，并清除这条录制的原始文件、预览、标注和当前导出。已经生成的自包含训练快照不受影响；对象存储仍按存储桶策略提供 7 天软删除恢复窗口。": "Deletion immediately hides the recording and removes its source files, preview, annotations, and active export. Existing self-contained training snapshots are unaffected. Object storage retains a 7-day soft-delete recovery window according to bucket policy.",
+  "原始 H5 和当前标注快照始终可以下载；正式数据完成后自动生成统一 30 Hz 的训练 H5。": "The source H5 and current review snapshot are always downloadable. Completing a production recording automatically creates a uniform 30 Hz training H5.",
+  "点击时冻结当前所有已完成的正式数据。相同内容复用同一个 TAR；构建期间的后续标注变化不会改变本次快照。": "This freezes all currently completed production recordings. Identical content reuses the same TAR; later annotation changes during the build do not alter this snapshot.",
+  "这里只负责确认采集结果并交给标注存储；同步、标注和训练快照在独立标注平台完成。": "This page verifies capture results and sends them to annotation storage. Synchronization, annotation, and training snapshots are handled by the separate annotation platform.",
+  "设备坐标系与结论边界": "Device coordinate system and evidence limits",
+  "+X 指向佩戴者右侧，+Y 指向头部/挂绳端，+Z 指向身体外侧/按键面。这里保存原始数据并生成候选报告；不会把未验证比例写入 SI，也不会进入训练集。": "+X points to the wearer's right, +Y to the head/lanyard end, and +Z away from the body/button face. This tool saves raw data and produces candidate reports; unverified scaling is not written as SI and never enters training.",
+  "设备专属工程校准档案": "Device-specific engineering calibration profile",
+  "目标右手坐标系": "Target right-handed coordinate system",
+  "证据录制": "Evidence recordings",
+  "已确认实验语义": "Verified experiment semantics",
+  "正在读取校准证据": "Loading calibration evidence",
+  "加速度尺度": "Accelerometer scale",
+  "角速度尺度": "Gyroscope scale",
+  "原始加速度零偏": "Raw accelerometer bias",
+  "原始角速度零偏": "Raw gyroscope bias",
+  "六面静态": "Six-face static",
+  "360° 旋转": "360° rotation",
+  "动态校验": "Dynamic check",
+  "证据可用": "Evidence available",
+  "制品缺失": "Artifact missing",
+  "实验：": "Setup:",
+  "预期：": "Expected:",
+  "观测：": "Observed:",
+  "复制录制 ID": "Copy recording ID",
+  "下载原始 H5": "Download source H5",
+  "CW12EU-T · 独立标注": "CW12EU-T · Annotation",
+  "CW12EU-T · 本机采集": "CW12EU-T · Local capture",
+  "IMU 数据标注平台": "IMU Annotation Platform",
+  "IMU 数采平台": "IMU Data Collector",
+  "当前登录": "Signed in as",
+  "正在验证身份": "Verifying identity",
+  "设备预览": "Device preview",
+  "标注与同步": "Annotation & sync",
+  "设备校准证据": "Calibration evidence",
+  "训练快照": "Training snapshots",
+  "记录与发布": "Records & publishing",
+  "IMU 诊断": "IMU diagnostics",
+  "采集": "Capture",
+  "采集场次 ID（自动）": "Collection ID (automatic)",
+  "下一个采集场次": "Next collection",
+  "参与者 UniKey": "Participant UniKey",
+  "数据级别": "Data tier",
+  "测试数据（不进入训练）": "Test data (never used for training)",
+  "正式数据（需通过质量门禁）": "Production data (quality gates required)",
+  "摄像头": "Camera",
+  "外接": "external",
+  "推荐": "recommended",
+  "不兼容": "incompatible",
+  "重新扫描摄像头": "Rescan cameras",
+  "正在释放": "Releasing",
+  "正在连接": "Connecting",
+  "释放预览设备": "Release preview devices",
+  "连接预览设备": "Connect preview devices",
+  "重试失败设备": "Retry failed device",
+  "正在准备": "Preparing",
+  "开始录制": "Start recording",
+  "正在结束": "Stopping",
+  "结束录制": "Stop recording",
+  "摄像头输入实时 FPS": "Camera input FPS",
+  "浏览器预览实时 FPS": "Browser preview FPS",
+  "上限": "limit",
+  "视频帧": "Video frames",
+  "IMU 通知包": "IMU notifications",
+  "IMU 样本": "IMU samples",
+  "IMU 估算频率": "Estimated IMU rate",
+  "最后一包": "Last packet",
+  "毫秒前": "ms ago",
+  " ms 前": " ms ago",
+  "BLE 连接": "BLE connection",
+  "已连接": "Connected",
+  "未连接": "Disconnected",
+  "设备状态": "Device state",
+  "解析/回调丢弃": "Parse/callback drops",
+  "剩余磁盘": "Free disk",
+  "实时画面 · 仅本机": "Live video · local only",
+  "预览不落盘": "preview is not recorded",
+  "摄像头正在切换，暂时保留最后一帧": "Switching cameras; retaining the last frame temporarily",
+  "浏览器预览流连续失败 3 次": "Browser preview stream failed 3 times",
+  "重试画面": "Retry video",
+  "连接预览设备后显示实时画面": "Connect preview devices to show live video",
+  "设备由另一个标签页预览": "Devices are previewed by another tab",
+  "摄像头实时预览": "Live camera preview",
+  "IMU 六轴实时曲线 · 最近 120 秒 · 当前为原始计数": "Live six-axis IMU chart · last 120 s · raw counts",
+  "上一次录制待办（不影响当前设备预览）": "Previous recording issues (current preview is unaffected)",
+  "摄像头固定曝光未完全生效": "Fixed camera exposure was not fully applied",
+  "预览设备已断开，正在进行第": "Preview devices disconnected; reconnect attempt",
+  "次自动重连": "of 3",
+  "空闲": "Idle",
+  "正在录制": "Recording",
+  "正在收尾": "Finalizing",
+  "可用": "Ready",
+  "需要检查": "Needs attention",
+  "失败": "Failed",
+  "正在重连": "Reconnecting",
+  "异常": "Error",
+  "正式数据": "Production data",
+  "测试数据": "Test data",
+  "同步锚点尚未验证": "Synchronization anchors are not verified",
+  "IMU 尺度校准尚未验证": "IMU scale calibration is not verified",
+  "分阶段物理实验": "Staged physical experiments",
+  "实验阶段": "Experiment stage",
+  "阶段备注": "Stage notes",
+  "夹具、摆放或异常说明": "Fixture, placement, or anomaly notes",
+  "开始该阶段": "Start stage",
+  "结束该阶段": "End stage",
+  "六轴实时原始计数 · 最近 120 秒": "Live six-axis raw counts · last 120 s",
+  "历史表征报告": "Characterization history",
+  "尚无完整报告": "No completed reports",
+  "仅诊断": "Diagnostics only",
+  "操作者 UniKey": "Operator UniKey",
+  "开始 IMU-only 表征": "Start IMU-only characterization",
+  "结束并生成报告": "Stop and generate report",
+  "通知包": "Notifications",
+  "候选样本": "Candidate samples",
+  "回调丢弃": "Callback drops",
+  "当前阶段": "Current stage",
+  "未开始": "Not started",
+  "训练资格": "Training eligibility",
+  "禁止": "Blocked",
+  "链路冒烟（姿态未控制）": "Pipeline smoke test (uncontrolled pose)",
+  "仅验证连接、落盘和报告；不参与任何尺度或方向候选": "Validates connection, persistence, and reporting only; not used for scale or axis candidates",
+  "长时静止（按键面朝上）": "Long static run (button face up)",
+  "建议 30 分钟；用于频率、间隙、零偏和噪声": "30 minutes recommended; used for rate, gaps, bias, and noise",
+  "按键面朝上（+Z）": "Button face up (+Z)",
+  "建议 60 秒，稳定平放": "60 seconds recommended on a stable flat surface",
+  "按键面朝下（-Z）": "Button face down (-Z)",
+  "接口面朝上（-X）": "Interface face up (-X)",
+  "接口反面朝上（+X）": "Opposite interface face up (+X)",
+  "挂绳端朝上（+Y，探索）": "Lanyard end up (+Y, exploratory)",
+  "外壳不稳，仅作探索，手持 30 秒": "The enclosure is unstable; exploratory hand-held run for 30 seconds only",
+  "挂绳端朝下（-Y，探索）": "Lanyard end down (-Y, exploratory)",
+  "绕 +X 正向旋转": "Positive rotation about +X",
+  "绕 +X 反向旋转": "Reverse rotation about +X",
+  "绕 +Y 正向旋转": "Positive rotation about +Y",
+  "绕 +Y 反向旋转": "Reverse rotation about +Y",
+  "绕 +Z 正向旋转": "Positive rotation about +Z",
+  "绕 +Z 反向旋转": "Reverse rotation about +Z",
+  "手动匀速转动；只能验证响应与符号候选": "Rotate manually at a steady speed; validates only response and sign candidates",
+  "与上一阶段成对": "Paired with the preceding stage",
+  "选择录制": "Select recording",
+  "撞击时刻必须严格位于该跌倒区间内": "The impact must be strictly inside its fall interval",
+  "区间结束必须晚于区间开始": "The interval end must be later than its start",
+  "该任务当前由": "This task is currently claimed by",
+  "领取。确认接管吗？": "Do you want to take it over?",
+  "扫描完成：新增或更新": "Scan complete: added or updated",
+  "条，未变化": ", unchanged",
+  "条，跳过异常": ", invalid skipped",
+  "浏览器未允许写入剪贴板；可以直接选中上方录制 ID 复制": "Clipboard access was denied; select the recording ID above to copy it manually",
+  "开始轻拍及录制设置保护区": "Start-tap and recording-setup guard interval",
+  "结束轻拍及停止录制保护区": "End-tap and recording-stop guard interval",
+  "当前选择＝自动推荐": "Current selection = automatic suggestion",
+  "当前选择": "Current selection",
+  "正在读取任务状态": "Loading task status",
+  "请先领取任务，领取后即可标记轻拍和动作区间": "Claim the task before marking taps and activity intervals",
+  "该任务已经完成；负责人或管理员重开后才能修改": "This task is completed and must be reopened by the owner or an administrator before editing",
+  "任务当前由": "This task is owned by",
+  "负责；接管后才能修改": "take it over before editing",
+  "可以直接框选复制": "Select this text to copy it",
+  "你正在负责此任务，可以进行同步和标注。": "You own this task and can synchronize and annotate it.",
+  "接管": "Take over",
+  "的任务": "task",
+  "立即扫描 Bucket": "Scan bucket now",
+  "刷新录制列表": "Refresh recording list",
+  "正在刷新": "Refreshing",
+  "复制当前 ID": "Copy current ID",
+  "已复制": "Copied",
+  "从左侧选择一段录制": "Select a recording from the left",
+  "任务状态": "Task status",
+  "未领取": "Unassigned",
+  "标注中": "In progress",
+  "已完成": "Completed",
+  "技术详情": "Technical details",
+  "当前负责人": "Current owner",
+  "最后编辑者": "Last editor",
+  "领取并开始标注": "Claim and start annotation",
+  "重开并继续修改": "Reopen and continue editing",
+  "上一帧": "Previous frame",
+  "下一帧": "Next frame",
+  "零基帧": "Zero-based frame",
+  "录制时间": "Recording time",
+  "媒体 PTS": "Media PTS",
+  "此帧是": "This frame is the first contact of the",
+  "开始轻拍首次接触": "start tap",
+  "结束轻拍首次接触": "end tap",
+  "视频与快捷键说明": "Video and keyboard shortcuts",
+  "第 1 步 · 开始/结束轻拍同步复核": "Step 1 · Review start/end tap synchronization",
+  "当前锚点": "Current anchor",
+  "开始轻拍": "Start tap",
+  "结束轻拍": "End tap",
+  "逐帧停在轻拍首次接触画面，再点击上方按钮加载附近 IMU 样本": "Stop on the first tap-contact frame, then use the button above to load nearby IMU samples",
+  "未选择": "Not selected",
+  "样本": "Sample",
+  "自动推荐": "Automatic suggestion",
+  "无候选": "No candidate",
+  "置信度": "Confidence",
+  "置信度：高": "Confidence: High",
+  "置信度：中": "Confidence: Medium",
+  "置信度：低": "Confidence: Low",
+  "高": "High",
+  "中": "Medium",
+  "低": "Low",
+  "开始": "Start",
+  "结束": "End",
+  "无": "None",
+  "唯一响应": "single response",
+  "独立响应排名": "independent response rank",
+  "同一响应簇": "secondary peak in response cluster",
+  "的辅助峰": "",
+  "事件首个明显响应": "first clear event response",
+  "时间模型代表样本": "time-model representative sample",
+  "局部突变峰": "local change peak",
+  "时间先验：本条已确认的另一端锚点": "Time prior: the confirmed opposite anchor in this recording",
+  "时间先验：共同主机时钟 0 ms": "Time prior: shared host clock at 0 ms",
+  "轻拍响应候选": "Tap-response candidates",
+  "首响应": "first response",
+  "局部峰": "local peak",
+  "时间投影": "time projection",
+  "强度": "strength",
+  "偏移": "offset",
+  "确认为": "Confirm as",
+  "取消": "Cancel",
+  "当前候选": "Current candidate",
+  "事件显著性": "event salience",
+  "本样本突变": "sample change",
+  "推荐分数": "suggestion score",
+  "自动推荐置信度低，请逐个比较候选；程序不会自动保存。": "The automatic suggestion has low confidence. Compare candidates individually; the program will not save automatically.",
+  "当前选择不是加速度突变候选，请点击曲线主峰或上方候选按钮。": "The current selection is not an acceleration-change candidate. Select the main chart peak or a candidate button above.",
+  "完整录制 IMU": "Full-recording IMU",
+  "个显示点": "display points",
+  "正式标注与同步复核": "formal annotation and synchronization review",
+  "同步结论 · 条件式固定偏移": "Synchronization result · conditional fixed offset",
+  "同步已验证": "Synchronization verified",
+  "等待确认固定偏移": "Awaiting fixed-offset confirmation",
+  "需要重新检查锚点": "Anchors need review",
+  "同步已拒绝": "Synchronization rejected",
+  "尚未评估": "Not evaluated",
+  "估计偏移": "Estimated offset",
+  "个视频帧": "video frames",
+  "个 IMU 样本": "IMU samples",
+  "首尾差": "Start/end disagreement",
+  "已应用": "Applied",
+  "“+”表示把 IMU 时间轴向后移动；视频帧数按本条实际 FPS 估算。": "A plus sign shifts the IMU timeline later. Video-frame estimates use this recording's actual FPS.",
+  "评估并保存主机时间": "Evaluate and save host time",
+  "确认应用固定偏移": "Apply fixed offset",
+  "生成轻拍排除区": "Create tap exclusion intervals",
+  "高级同步数据": "Advanced synchronization data",
+  " 秒": " s",
+  "第 2 步 · 区间与跌倒事件标注": "Step 2 · Interval and fall-event annotation",
+  "当前标注者": "Current annotator",
+  "身份由登录会话验证，不可在页面切换": "Identity is verified by the login session and cannot be changed here",
+  "标记区间开始（I）": "Mark interval start (I)",
+  "标记区间结束（O）": "Mark interval end (O)",
+  "标记撞击时刻（2）": "Mark impact (2)",
+  "区间开始／跌倒起始": "Interval start / fall onset",
+  "区间结束": "Interval end",
+  "撞击时刻": "Impact",
+  "非跌倒 · 进入训练": "Non-fall · include in training",
+  "跌倒 · 进入训练": "Fall · include in training",
+  "明确排除 · 不训练": "Exclude · do not train",
+  "添加区间": "Add interval",
+  "第 3 步 · 全时间轴覆盖与完成检查": "Step 3 · Full-timeline coverage and completion checks",
+  "标注覆盖时间轴": "Annotation coverage timeline",
+  "仍有": "Remaining:",
+  "秒未标注；草稿允许，完成时禁止。": "s unannotated. Drafts allow gaps; completion does not.",
+  "全程已由 fall、non_fall 或 exclude 覆盖。": "The full recording is covered by fall, non_fall, or exclude.",
+  "训练区间": "Training intervals",
+  "非跌倒": "Non-fall",
+  "跌倒": "Fall",
+  "撞击": "Impact",
+  "跳转撞击帧": "Go to impact frame",
+  "当前帧重设撞击": "Reset impact to current frame",
+  "当前帧设为撞击": "Set current frame as impact",
+  "清除撞击": "Clear impact",
+  "删除区间": "Delete interval",
+  "明确排除区间": "Explicit exclusions",
+  "排除": "Exclude",
+  "删除": "Delete",
+  "保存草稿（Ctrl+S）": "Save draft (Ctrl+S)",
+  "完成标注并生成训练 H5": "Complete annotation and generate training H5",
+  "标注已定稿": "Annotation finalized",
+  "草稿": "Draft",
+  "同步待验证": "Synchronization pending",
+  "测试数据可以保存草稿和下载原始 H5，但不会完成为训练数据。": "Test data can save drafts and download the source H5, but cannot be completed as training data.",
+  "当前是测试数据：可以下载原始 capture.h5 和 review.json，用于联调和结构展示，但不会生成训练 H5 或进入训练快照。": "This is test data: source capture.h5 and review.json are available for integration testing and schema demonstrations, but no training H5 or training snapshot will be created.",
+  "第 4 步 · 下载数据": "Step 4 · Download data",
+  "技术状态": "Technical status",
+  "校准": "Calibration",
+  "已验证": "Verified",
+  "未验证": "Not verified",
+  "导出": "Export",
+  "已生成": "Generated",
+  "未生成": "Not generated",
+  "下载原始 capture.h5": "Download source capture.h5",
+  "下载 review.json": "Download review.json",
+  "下载 aligned30.h5": "Download aligned30.h5",
+  "永久删除整条录制": "Permanently delete recording",
+  "开始永久删除": "Start permanent deletion",
+  "二次确认：请输入": "Second confirmation: enter",
+  "确认删除并立即隐藏": "Confirm deletion and hide immediately",
+  "生成当前训练快照": "Create current training snapshot",
+  "已创建训练快照": "Created training snapshot",
+  "内容没有变化，继续使用已有快照": "Content is unchanged; reusing existing snapshot",
+  "清理后需要重新构建才能下载。请输入": "After deletion, the snapshot must be rebuilt before downloading. Enter:",
+  "已清理训练快照": "Deleted training snapshot",
+  "正在处理": "Processing",
+  "刷新列表": "Refresh list",
+  "目前还没有训练快照。": "No training snapshots yet.",
+  "历史快照": "Historical snapshots",
+  "当前训练快照": "Current training snapshot",
+  "历史训练快照": "Historical training snapshot",
+  "条录制": "recordings",
+  " 条": " items",
+  "创建者": "created by",
+  "未知": "unknown",
+  "校验信息": "Verification details",
+  "下载 TAR": "Download TAR",
+  "清理快照": "Delete snapshot",
+  "本地录制与手动发布": "Local recordings and manual publishing",
+  "将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。": "A browser proxy will be generated and the H5, source MKV, proxy MP4, and manifest will be published.",
+  "预计读取或上传约": "Estimated read or upload volume:",
+  "继续吗？": "Continue?",
+  "已上传 Bucket，正在等待标注端接收": "Uploaded to the bucket; waiting for the annotation service",
+  "这只删除本机副本；已经发布到云端的录制不会被删除。请输入完整 recording_id": "This deletes only the local copy; a recording already published to the cloud will not be deleted. Enter the full recording_id",
+  "已永久删除本地录制": "Permanently deleted local recording",
+  "目录重建完成：导入": "Directory rebuild complete: imported",
+  "，跳过": ", skipped",
+  "上传": "Upload",
+  "已上传 Bucket": "Uploaded to bucket",
+  "标注端已接收": "Received by annotation service",
+  "等待标注端接收": "Waiting for annotation service",
+  "标注端拒绝": "Rejected by annotation service",
+  "正在发布": "Publishing",
+  "估算并发布": "Estimate and publish",
+  "重新校验发布": "Revalidate publishing",
+  "永久删除": "Permanently delete",
+  "本地维护": "Local maintenance",
+  "扫描不完整文件": "Scan incomplete files",
+  "从目录重建索引": "Rebuild index from directory",
+  "尚未扫描，或未发现不完整文件。": "Not scanned yet, or no incomplete files found.",
+  "隔离": "Quarantine",
+  "同步轻拍": "Synchronization tap",
+  "录制设置": "Recording setup",
+  "佩戴调整": "Sensor adjustment",
+  "摘下设备": "Sensor removed",
+  "数据质量异常": "Data quality issue",
+  "无法确认": "Ambiguous",
+  "隐私排除": "Privacy exclusion",
+  "其他": "Other",
+};
+
+const orderedTranslations = Object.entries(translations).sort(
+  ([left], [right]) => right.length - left.length,
+);
+
+export function translateText(value: string): string {
+  if (!isEnglish || !value) return value;
+  const leading = value.match(/^\s*/)?.[0] ?? "";
+  const trailing = value.match(/\s*$/)?.[0] ?? "";
+  const trimmed = value.trim();
+  if (translations[trimmed]) return `${leading}${translations[trimmed]}${trailing}`;
+  let translated = value;
+  for (const [chinese, english] of orderedTranslations) {
+    if (chinese.length < 2) continue;
+    translated = translated.replaceAll(chinese, english);
+  }
+  return translated;
+}
+
+export function apiErrorMessage(detail: unknown, status: number, statusText: string): string {
+  if (detail && typeof detail === "object") {
+    const structured = detail as { code?: unknown; message?: unknown; hint?: unknown };
+    const raw = [structured.message, structured.hint]
+      .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+      .join("；");
+    if (raw) return translateText(raw);
+    if (typeof structured.code === "string") return tr("请求失败，请稍后重试", `Request failed (${structured.code})`);
+  }
+  if (typeof detail === "string" && detail.trim()) {
+    const translated = translateText(detail);
+    if (!isEnglish || !/[\u3400-\u9fff]/u.test(translated)) return translated;
+  }
+  return tr(`${status} ${statusText}`, `Request failed (${status} ${statusText})`);
+}
+
+export function userVisibleMessage(value: unknown): string {
+  const raw = typeof value === "string" ? value : String(value ?? "");
+  const translated = translateText(raw);
+  if (isEnglish && /[\u3400-\u9fff]/u.test(translated)) {
+    return "The operation failed. Check the server logs for technical details.";
+  }
+  return translated;
+}
+
+function localizeNode(root: Node): void {
+  if (!isEnglish) return;
+  if (root instanceof Text) {
+    const next = translateText(root.data);
+    if (next !== root.data) root.data = next;
+    return;
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+  for (const node of textNodes) {
+    const next = translateText(node.data);
+    if (next !== node.data) node.data = next;
+  }
+  if (root instanceof Element) {
+    for (const element of [root, ...root.querySelectorAll("[title], [placeholder], [aria-label], [alt]")]) {
+      for (const attribute of ["title", "placeholder", "aria-label", "alt"]) {
+        const current = element.getAttribute(attribute);
+        if (current) element.setAttribute(attribute, translateText(current));
+      }
+    }
+  }
+}
+
+export function useDocumentLocalization(): void {
+  useEffect(() => {
+    document.documentElement.lang = uiLanguage;
+    localizeNode(document.body);
+    if (!isEnglish) return;
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "characterData") localizeNode(mutation.target);
+        for (const node of mutation.addedNodes) localizeNode(node);
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, []);
+}
