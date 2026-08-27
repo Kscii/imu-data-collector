@@ -2,6 +2,7 @@ export type AnnotationShortcutAction =
   | { kind: "step"; delta: -5 | -1 | 1 | 5 }
   | { kind: "mark"; target: "start" | "end" | "impact" }
   | { kind: "select"; target: "fall" | "non_fall" | "exclude" }
+  | { kind: "jump_selected_end" }
   | { kind: "save" };
 
 export type AnnotationShortcutInput = {
@@ -38,8 +39,10 @@ export function resolveAnnotationShortcut(
   ) {
     return canEdit ? { kind: "save" } : null;
   }
-  if (input.ctrlKey || input.metaKey || input.altKey || !canEdit || input.repeat) return null;
+  if (input.ctrlKey || input.metaKey || input.altKey || input.repeat) return null;
   const key = input.key.toLowerCase();
+  if (key === "e") return { kind: "jump_selected_end" };
+  if (!canEdit) return null;
   if (key === "i") return { kind: "mark", target: "start" };
   if (key === "o") return { kind: "mark", target: "end" };
   if (key === "2" && fallSelected) return { kind: "mark", target: "impact" };

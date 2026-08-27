@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Plot from "./Plot";
+import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
 import { resolveAnnotationShortcut } from "./annotationShortcuts";
+import { intervalFollowAnchorIndex, intervalsAtTime } from "./annotationTimeline";
 import {
   apiErrorMessage,
   isEnglish,
@@ -15,8 +16,27 @@ document.title = __APP_KIND__ === "annotation"
   : tr("IMU 数采平台", "IMU Data Collector");
 
 type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library";
+type AnnotationTaskTab = "sync" | "annotate" | "review" | "data";
+type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
 const CAPTURE_FORM_KEY = "imu-capture-form-v1";
+const FALL_ACTIVITY_COLORS = ["#ef4444", "#f97316", "#e11d48", "#d946ef", "#a855f7", "#f59e0b", "#fb7185", "#c026d3"];
+const NON_FALL_ACTIVITY_COLORS = ["#22c55e", "#06b6d4", "#3b82f6", "#84cc16", "#14b8a6", "#0ea5e9", "#6366f1", "#10b981"];
+
+function colorWithAlpha(color: string, alpha: number) {
+  const red = Number.parseInt(color.slice(1, 3), 16);
+  const green = Number.parseInt(color.slice(3, 5), 16);
+  const blue = Number.parseInt(color.slice(5, 7), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function stableActivityColor(binaryLabel: "fall" | "non_fall", code: string, entries: TaxonomyEntry[]) {
+  const palette = binaryLabel === "fall" ? FALL_ACTIVITY_COLORS : NON_FALL_ACTIVITY_COLORS;
+  const taxonomyIndex = entries.findIndex((entry) => entry.code === code);
+  if (taxonomyIndex >= 0) return palette[taxonomyIndex % palette.length];
+  const hash = Array.from(code).reduce((value, character) => ((value * 31) + character.charCodeAt(0)) >>> 0, 0);
+  return palette[hash % palette.length];
+}
 
 function defaultCollectionId(participant: string) {
   const now = new Date();
@@ -157,6 +177,10 @@ type Exclusion = {
   annotator_id: string;
   notes: string;
 };
+
+type OrderedAnnotationInterval =
+  | { kind: "segment"; key: string; start_ns: number; end_ns: number; segment: Segment }
+  | { kind: "exclusion"; key: string; start_ns: number; end_ns: number; exclusion: Exclusion };
 
 type AnnotationDocument = {
   taxonomy_id: string;
@@ -369,6 +393,13 @@ const exclusionLabels: Record<Exclusion["reason"], string> = {
   other: "其他"
 };
 
+class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit, timeoutMs = 45_000): Promise<T> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -384,9 +415,9 @@ async function api<T>(path: string, init?: RequestInit, timeoutMs = 45_000): Pro
       const payload = await response.json().catch(() => ({}));
       const detail = payload.detail;
       if (detail && typeof detail === "object") {
-        throw new Error(apiErrorMessage(detail, response.status, response.statusText));
+        throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status);
       }
-      throw new Error(apiErrorMessage(detail, response.status, response.statusText));
+      throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status);
     }
     return response.json();
   } catch (error) {
@@ -804,15 +835,15 @@ export default function App() {
   };
 
   return (
-    <div className="app-shell">
-      <header>
+    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
+      <header className={annotationApplication && tab === "annotate" ? "workbench-header" : ""}>
         <div>
           <span className="eyebrow">{annotationApplication ? "CW12EU-T · 独立标注" : "CW12EU-T · 本机采集"}</span>
           <h1>{annotationApplication ? "IMU 数据标注平台" : "IMU 数采平台"}</h1>
         </div>
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
-      <nav>
+      <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
         {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button>{session?.is_admin && <button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button>}<button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button></> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
@@ -1179,13 +1210,22 @@ function TaxonomyAdminRow({ entry, busy, onSave, onDelete }: { entry: TaxonomyEn
     <div className="taxonomy-row-actions">
       <button disabled={busy || !changed || !nameZh.trim() || !nameEn.trim()} onClick={() => onSave(entry, { display_name_zh: nameZh.trim(), display_name_en: nameEn.trim() })}>保存名称</button>
       <button disabled={busy} onClick={() => onSave(entry, { active: !entry.active })}>{entry.active ? "停用" : "恢复"}</button>
-      {(entry.usage_count ?? 0) === 0 && <button className="danger" disabled={busy} onClick={() => onDelete(entry)}>永久删除</button>}
+      {(entry.usage_count ?? 0) === 0
+        ? <button className="danger" disabled={busy} onClick={() => onDelete(entry)}>永久删除</button>
+        : <span className="taxonomy-delete-rule" title={tr("已被历史标注引用，保留 code 才能继续解释旧数据", "Referenced by historical annotations; keep the code so old data remains interpretable")}>{tr("已使用，仅可停用", "In use; disable only")}</span>}
     </div>
   </div>;
 }
 
 function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; session: Session; onChanged: () => Promise<Recording[]> }) {
   const [selected, setSelected] = useState("");
+  const [recordingDrawerOpen, setRecordingDrawerOpen] = useState(false);
+  const [recordingQuery, setRecordingQuery] = useState("");
+  const [taskTab, setTaskTab] = useState<AnnotationTaskTab>("sync");
+  const [locatedIntervalKey, setLocatedIntervalKey] = useState("");
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [saveState, setSaveState] = useState<AnnotationSaveState>("idle");
+  const [saveMessage, setSaveMessage] = useState("");
   const [doc, setDoc] = useState<AnnotationDocument | null>(null);
   const [timeline, setTimeline] = useState<{ time_s: number[]; values: number[][]; unit: string } | null>(null);
   const [frameTimes, setFrameTimes] = useState<FrameTimes | null>(null);
@@ -1213,6 +1253,9 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   const [copiedRecordingId, setCopiedRecordingId] = useState("");
   const [error, setError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
+  const intervalListRef = useRef<HTMLDivElement>(null);
+  const retrySaveRef = useRef<(() => void) | null>(null);
+  const locateTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!selected && recordings.length) setSelected(recordings[0].recording_id);
@@ -1228,6 +1271,10 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     setReview(null);
     setStatus(null);
     setFrameTimes(null);
+    setLocatedIntervalKey("");
+    setSaveState("idle");
+    setSaveMessage("");
+    retrySaveRef.current = null;
     Promise.all([
       api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, { signal: controller.signal }),
       api<{ time_s: number[]; values: number[][]; unit: string }>(`/api/v1/recordings/${selected}/timeline`, { signal: controller.signal }),
@@ -1249,11 +1296,30 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       setRecommendationOffsetSource("none");
       setDeleteArmed(false);
       setDeleteConfirmation("");
+      setTaskTab(
+        reviewDocument.workflow.state === "completed"
+          ? "review"
+          : syncState.quality === "verified"
+            ? "annotate"
+            : "sync"
+      );
     }).catch((e) => {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     });
     return () => controller.abort();
-  }, [selected]);
+  }, [selected, reloadNonce]);
+
+  useEffect(() => {
+    const pending = saveState === "saving" || saveState === "error" || saveState === "conflict";
+    if (!pending) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [saveState]);
+
+  useEffect(() => () => {
+    if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!doc || doc.taxonomy_version === taxonomy.version) {
@@ -1327,7 +1393,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   };
 
   const confirmFormalAnchor = () => {
-    if (!canEdit || !sync || !experimentWindow || experimentImuSample === null || !frameTimes) return;
+    if (!canMutate || !sync || !experimentWindow || experimentImuSample === null || !frameTimes) return;
     const localIndex = experimentWindow.sample_index.indexOf(experimentImuSample);
     if (localIndex < 0) return;
     const anchor: SyncAnchor = {
@@ -1348,20 +1414,22 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       anchor
     ]
       .sort((a, b) => a.video_time_ns - b.video_time_ns);
-    setSync({
+    const nextSync = {
       ...sync,
       anchors,
       quality: "draft",
       recommendation: "none",
       decision: "host_only"
-    });
+    };
+    setSync(nextSync);
     setSyncRole(syncRole === "start_tap" ? "end_tap" : "start_tap");
     setExperimentWindow(null);
     setExperimentImuSample(null);
+    void persistSync(nextSync);
   };
 
   const mark = (name: "start" | "end" | "impact") => {
-    if (!canEdit) return;
+    if (!canMutate) return;
     setMarks((existing) => ({ ...existing, [name]: Math.round(currentTime * 1e9) }));
   };
 
@@ -1374,8 +1442,56 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     setCurrentTime(frameTimes.time_ns[frame] / 1e9);
   };
 
+  const registerSaveFailure = (value: unknown) => {
+    const requestError = value as Error;
+    const conflict = value instanceof ApiRequestError && value.status === 409;
+    setSaveState(conflict ? "conflict" : "error");
+    setSaveMessage(requestError.message);
+    setError(requestError.message);
+  };
+
+  const persistAnnotations = async (nextDocument: AnnotationDocument, finalized = false) => {
+    if (!selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || saveState === "saving") return false;
+    const pendingDocument = { ...nextDocument, finalized };
+    retrySaveRef.current = () => void persistAnnotations(pendingDocument, finalized);
+    setDoc(pendingDocument);
+    setSaveState("saving");
+    setSaveMessage("");
+    setError("");
+    try {
+      const saved = await api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expected_revision: review.revision,
+          document: { ...pendingDocument, revision: doc ? doc.revision + 1 : pendingDocument.revision + 1 }
+        })
+      });
+      const [updatedReview, updatedStatus] = await Promise.all([
+        api<ReviewDocument>(`/api/v1/recordings/${selected}/review`),
+        api<RecordingStatus>(`/api/v1/recordings/${selected}/status`)
+      ]);
+      setDoc(saved);
+      setReview(updatedReview);
+      setStatus(updatedStatus);
+      setSaveState("saved");
+      retrySaveRef.current = null;
+      return true;
+    } catch (value) {
+      registerSaveFailure(value);
+      return false;
+    }
+  };
+
+  const reloadCurrentRecording = () => {
+    setSaveState("idle");
+    setSaveMessage("");
+    setError("");
+    retrySaveRef.current = null;
+    setReloadNonce((value) => value + 1);
+  };
+
   const setSegmentImpact = (segment: Segment) => {
-    if (!canEdit || !doc) return;
+    if (!canMutate || !doc) return;
     const timeNs = Math.round(currentTime * 1e9);
     if (timeNs <= segment.start_ns || timeNs >= segment.end_ns) {
       setError("撞击时刻必须严格位于该跌倒区间内");
@@ -1384,7 +1500,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     const retained = doc.events.filter(
       (event) => !(event.segment_id === segment.segment_id && event.kind === "impact")
     );
-    setDoc({
+    const nextDocument = {
       ...doc,
       finalized: false,
       events: [
@@ -1398,12 +1514,13 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
           annotator_id: annotator
         }
       ].sort((a, b) => a.time_ns - b.time_ns)
-    });
+    };
+    void persistAnnotations(nextDocument);
     setError("");
   };
 
   const addAnnotationInterval = () => {
-    if (!canEdit || !doc || marks.start === undefined || marks.end === undefined) return;
+    if (!canMutate || !doc || marks.start === undefined || marks.end === undefined) return;
     if (marks.end <= marks.start) {
       setError("区间结束必须晚于区间开始");
       return;
@@ -1428,10 +1545,11 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
         annotator_id: annotator,
         notes: ""
       };
-      setDoc({
+      const nextDocument = {
         ...doc,
         exclusions: [...doc.exclusions, exclusion].sort((a, b) => a.start_ns - b.start_ns)
-      });
+      };
+      void persistAnnotations(nextDocument);
       setMarks({});
       return;
     }
@@ -1456,27 +1574,14 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
         events.push({ segment_id: segmentId, kind: "impact", time_ns: marks.impact, source_video_frame: null, source_imu_sample: null, annotator_id: annotator });
       }
     }
-    setDoc({ ...doc, segments: [...doc.segments, segment].sort((a, b) => a.start_ns - b.start_ns), events });
+    const nextDocument = { ...doc, segments: [...doc.segments, segment].sort((a, b) => a.start_ns - b.start_ns), events };
+    void persistAnnotations(nextDocument);
     setMarks({});
   };
 
   const save = async (finalized: boolean) => {
     if (!doc || !selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator) return;
-    setError("");
-    try {
-      const saved = await api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, {
-        method: "PUT",
-        body: JSON.stringify({
-          expected_revision: review.revision,
-          document: { ...doc, revision: doc.revision + 1, finalized }
-        })
-      });
-      setDoc(saved);
-      setReview(await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`));
-      setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    await persistAnnotations(doc, finalized);
   };
 
   const changeWorkflow = async (
@@ -1501,13 +1606,19 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       });
       setReview(saved);
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
+      setSaveState("idle");
+      setSaveMessage("");
+      if (action === "reopen") setTaskTab(sync?.quality === "verified" ? "annotate" : "sync");
     } catch (e) {
       setError((e as Error).message);
     }
   };
 
   const finalizeAndComplete = async () => {
-    if (!selected || !review || !doc || !canEdit) return;
+    if (!selected || !review || !doc || !canMutate) return;
+    setSaveState("saving");
+    setSaveMessage("");
+    retrySaveRef.current = () => void finalizeAndComplete();
     setError("");
     try {
       const annotations = await api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, {
@@ -1529,8 +1640,11 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       });
       setReview(completed);
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
-    } catch (e) {
-      setError((e as Error).message);
+      setSaveState("saved");
+      retrySaveRef.current = null;
+      setTaskTab("review");
+    } catch (value) {
+      registerSaveFailure(value);
     }
   };
 
@@ -1591,8 +1705,12 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   };
 
   const choices = annotationKind === "exclude" ? [] : taxonomy[annotationKind].filter((item) => item.active);
-  const saveSync = async (applyFixedOffset = false) => {
-    if (!sync || !selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator) return;
+  const persistSync = async (nextSync: SyncState, applyFixedOffset = false) => {
+    if (!selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || saveState === "saving") return false;
+    setSync(nextSync);
+    retrySaveRef.current = () => void persistSync(nextSync, applyFixedOffset);
+    setSaveState("saving");
+    setSaveMessage("");
     setError("");
     try {
       const model = await api<Omit<SyncState, "anchors">>(`/api/v1/recordings/${selected}/sync`, {
@@ -1600,7 +1718,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
         body: JSON.stringify({
           expected_revision: review.revision,
           document: {
-            anchors: sync.anchors,
+            anchors: nextSync.anchors,
             policy: "conditional_fixed_offset_v1",
             apply_fixed_offset: applyFixedOffset,
             reviewer_id: annotator
@@ -1608,14 +1726,28 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
         })
       });
       const timelineData = await api<{ time_s: number[]; values: number[][]; unit: string }>(`/api/v1/recordings/${selected}/timeline`);
-      setSync({ ...sync, ...model });
+      const savedSync = { ...nextSync, ...model };
+      setSync(savedSync);
       setTimeline(timelineData);
-      setReview(await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`));
-    } catch (e) { setError((e as Error).message); }
+      const updatedReview = await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`);
+      setReview(updatedReview);
+      setSaveState("saved");
+      retrySaveRef.current = null;
+      if (savedSync.quality === "verified") setTaskTab("annotate");
+      return true;
+    } catch (value) {
+      registerSaveFailure(value);
+      return false;
+    }
+  };
+
+  const saveSync = async (applyFixedOffset = false) => {
+    if (!sync) return;
+    await persistSync(sync, applyFixedOffset);
   };
 
   const proposeTapExclusions = () => {
-    if (!canEdit || !doc || !sync || !selected) return;
+    if (!canMutate || !doc || !sync || !selected) return;
     const duration = recordings.find((item) => item.recording_id === selected)?.duration_ns ?? 0;
     const start = sync.anchors.find((item) => item.role === "start_tap");
     const end = sync.anchors.find((item) => item.role === "end_tap");
@@ -1641,7 +1773,8 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     const retained = doc.exclusions.filter(
       (item) => item.exclusion_id !== "sync_start_guard" && item.exclusion_id !== "sync_end_guard"
     );
-    setDoc({ ...doc, exclusions: [...retained, ...proposed].sort((a, b) => a.start_ns - b.start_ns) });
+    const nextDocument = { ...doc, exclusions: [...retained, ...proposed].sort((a, b) => a.start_ns - b.start_ns) };
+    void persistAnnotations(nextDocument);
   };
 
   const selectedExperimentTime = experimentWindow && experimentImuSample !== null
@@ -1696,6 +1829,8 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     && sync.anchors.some((item) => item.role === "end_tap");
   const canEdit = review?.workflow.state === "in_progress"
     && review.workflow.annotator_id === annotator;
+  const saveLocked = saveState === "saving" || saveState === "error" || saveState === "conflict";
+  const canMutate = canEdit && !saveLocked;
   const canClaim = review?.workflow.state === "unassigned";
   const canTakeOver = review?.workflow.state === "in_progress"
     && review.workflow.annotator_id !== annotator;
@@ -1715,6 +1850,159 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     const entry = [...displayTaxonomy.fall, ...displayTaxonomy.non_fall].find((item) => item.code === code);
     if (!entry) return code;
     return `${isEnglish ? entry.display_name_en : entry.display_name_zh} · ${code}${entry.active ? "" : " · 已停用"}`;
+  };
+  const filteredRecordings = recordings.filter((recording) => {
+    const needle = recordingQuery.trim().toLowerCase();
+    if (!needle) return true;
+    return `${recording.recording_id} ${recording.participant_id}`.toLowerCase().includes(needle);
+  });
+  const orderedAnnotationIntervals: OrderedAnnotationInterval[] = doc ? [
+    ...doc.segments.map((segment) => ({
+      kind: "segment" as const,
+      key: `segment:${segment.segment_id}`,
+      start_ns: segment.start_ns,
+      end_ns: segment.end_ns,
+      segment,
+    })),
+    ...doc.exclusions.map((exclusion) => ({
+      kind: "exclusion" as const,
+      key: `exclusion:${exclusion.exclusion_id}`,
+      start_ns: exclusion.start_ns,
+      end_ns: exclusion.end_ns,
+      exclusion,
+    })),
+  ].sort((left, right) => left.start_ns - right.start_ns || left.end_ns - right.end_ns || left.key.localeCompare(right.key)) : [];
+  const currentTimeNs = Math.round(currentTime * 1e9);
+  const matchingAnnotationIntervals = intervalsAtTime(orderedAnnotationIntervals, currentTimeNs);
+  const activeAnnotationInterval = matchingAnnotationIntervals.length === 1 ? matchingAnnotationIntervals[0] : undefined;
+  const currentAnnotationLabels: PlotSelectionLabel[] = matchingAnnotationIntervals.length > 1
+    ? [{ key: "annotation-conflict", label: tr(`区间重叠错误 · ${matchingAnnotationIntervals.length}`, `Overlapping intervals · ${matchingAnnotationIntervals.length}`), color: "#ef4444" }]
+    : activeAnnotationInterval
+      ? [activeAnnotationInterval.kind === "segment"
+        ? {
+          key: activeAnnotationInterval.key,
+          label: `${activeAnnotationInterval.segment.binary_label === "fall" ? tr("跌倒", "Fall") : tr("非跌倒", "Non-fall")} · ${activityDisplay(activeAnnotationInterval.segment.activity_code)}`,
+          color: stableActivityColor(activeAnnotationInterval.segment.binary_label, activeAnnotationInterval.segment.activity_code, displayTaxonomy[activeAnnotationInterval.segment.binary_label]),
+        }
+        : {
+          key: activeAnnotationInterval.key,
+          label: `${tr("排除", "Excluded")} · ${exclusionLabels[activeAnnotationInterval.exclusion.reason]}`,
+          color: "#94a3b8",
+        }]
+      : [];
+  const timelineRegions: PlotRegion[] = doc ? [
+    ...doc.segments.map((segment) => {
+      const borderColor = stableActivityColor(segment.binary_label, segment.activity_code, displayTaxonomy[segment.binary_label]);
+      return {
+        start: segment.start_ns / 1e9,
+        end: segment.end_ns / 1e9,
+        color: colorWithAlpha(borderColor, 0.18),
+        borderColor,
+        label: activityDisplay(segment.activity_code),
+      };
+    }),
+    ...doc.exclusions.map((item) => ({
+      start: item.start_ns / 1e9,
+      end: item.end_ns / 1e9,
+      color: "rgba(148, 163, 184, 0.14)",
+      borderColor: "#94a3b8",
+      label: exclusionLabels[item.reason],
+    }))
+  ] : [];
+  const visibleActivityLegend = Array.from(new Map(
+    timelineRegions
+      .filter((region) => region.label && region.borderColor)
+      .map((region) => [region.label, { label: region.label as string, color: region.borderColor as string }])
+  ).values());
+  const timelineMarkers: PlotMarker[] = doc ? doc.events
+    .filter((event) => event.kind === "impact")
+    .map((event) => ({
+      time: event.time_ns / 1e9,
+      label: "撞击",
+      color: "#facc15",
+      dashed: true
+    })) : [];
+
+  const scrollIntervalIntoFollowPosition = (key: string, behavior: ScrollBehavior = "smooth") => {
+    const container = intervalListRef.current;
+    const anchorIndex = intervalFollowAnchorIndex(orderedAnnotationIntervals, key);
+    if (!container || anchorIndex < 0) return;
+    const anchorKey = orderedAnnotationIntervals[anchorIndex].key;
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const anchor = document.getElementById(`annotation-${anchorKey}`);
+      if (!anchor || !intervalListRef.current) return;
+      const listRect = intervalListRef.current.getBoundingClientRect();
+      const anchorRect = anchor.getBoundingClientRect();
+      intervalListRef.current.scrollTo({
+        top: Math.max(0, intervalListRef.current.scrollTop + anchorRect.top - listRect.top),
+        behavior,
+      });
+    }));
+  };
+
+  const selectAnnotationInterval = (item: OrderedAnnotationInterval, target: "start" | "end" = "start") => {
+    jumpToRecordingTime(target === "start" ? item.start_ns : item.end_ns);
+  };
+
+  const jumpToSelectedIntervalEnd = () => {
+    if (activeAnnotationInterval) selectAnnotationInterval(activeAnnotationInterval, "end");
+  };
+
+  const locateAnnotationInterval = (key: string) => {
+    if (key === "annotation-conflict") {
+      setTaskTab("review");
+      return;
+    }
+    setTaskTab("annotate");
+    setLocatedIntervalKey(key);
+    if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current);
+    scrollIntervalIntoFollowPosition(key);
+    locateTimerRef.current = window.setTimeout(() => setLocatedIntervalKey(""), 1200);
+  };
+
+  useEffect(() => {
+    if (taskTab !== "annotate" || !activeAnnotationInterval) return;
+    scrollIntervalIntoFollowPosition(activeAnnotationInterval.key);
+  }, [taskTab, activeAnnotationInterval?.key, orderedAnnotationIntervals.length]);
+
+  const removeSyncAnchor = (role: SyncAnchor["role"]) => {
+    if (!canMutate || !sync) return;
+    const nextSync = {
+      ...sync,
+      anchors: sync.anchors.filter((item) => item.role !== role),
+      quality: "draft" as const,
+      recommendation: "none" as const,
+      decision: "host_only" as const
+    };
+    void persistSync(nextSync);
+  };
+
+  const clearSegmentImpact = (segmentId: string) => {
+    if (!canMutate || !doc) return;
+    void persistAnnotations({
+      ...doc,
+      finalized: false,
+      events: doc.events.filter((event) => !(event.segment_id === segmentId && event.kind === "impact"))
+    });
+  };
+
+  const removeSegment = (segmentId: string) => {
+    if (!canMutate || !doc) return;
+    void persistAnnotations({
+      ...doc,
+      finalized: false,
+      segments: doc.segments.filter((item) => item.segment_id !== segmentId),
+      events: doc.events.filter((event) => event.segment_id !== segmentId)
+    });
+  };
+
+  const removeExclusion = (exclusionId: string) => {
+    if (!canMutate || !doc) return;
+    void persistAnnotations({
+      ...doc,
+      finalized: false,
+      exclusions: doc.exclusions.filter((item) => item.exclusion_id !== exclusionId)
+    });
   };
 
   useEffect(() => {
@@ -1737,223 +2025,191 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       if (!action) return;
       event.preventDefault();
       if (action.kind === "step") stepFrame(action.delta);
+      else if (action.kind === "jump_selected_end") jumpToSelectedIntervalEnd();
       else if (action.kind === "mark") mark(action.target);
       else if (action.kind === "select") setAnnotationKind(action.target);
-      else void save(false);
+      else if (saveState === "error") retrySaveRef.current?.();
+      else if (saveState !== "conflict") void save(false);
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [annotationKind, canEdit, currentFrame, currentTime, frameTimes, doc, review, selected]);
+  }, [annotationKind, canEdit, currentFrame, currentTime, frameTimes, doc, review, saveState, selected]);
 
   return (
-    <main className="annotation-layout">
-      <aside className="panel recording-list">
-        <div className="panel-title">选择录制</div>
-        <div className="recording-list-actions">
-          {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在刷新…" : "刷新录制列表"}</button>}
-          <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? "已复制" : "复制当前 ID"}</button>
+    <main className="annotation-workbench">
+      <section className="annotation-workbench-bar">
+        <button onClick={() => setRecordingDrawerOpen(true)}>录制列表</button>
+        <div className="annotation-recording-summary">
+          <strong>{selectedRecording ? `${selectedRecording.participant_id} · ${tierLabel(selectedRecording.data_tier)}` : "未选择录制"}</strong>
+          {selected && <code title={selected}>{selected}</code>}
         </div>
-        {selected && <code className="selected-recording-id" title="可以直接框选复制">{selected}</code>}
-        {indexMessage && <span className="index-message">{indexMessage}</span>}
-        {recordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} onClick={() => setSelected(recording.recording_id)}><strong>{recording.participant_id} · {tierLabel(recording.data_tier)}</strong><span>{recording.recording_id}</span></button>)}
-      </aside>
-      <section className="annotation-workspace">
-        {error && <div className="error-banner">{error}</div>}
-        {!selected ? <div className="panel placeholder">从左侧选择一段录制</div> : <>
-          {review && <div className={`panel task-gate ${canEdit ? "task-gate-ready" : ""}`}>
-            <div>
-              <div className="panel-title">任务状态 · {review.workflow.state === "unassigned" ? "未领取" : review.workflow.state === "in_progress" ? "标注中" : "已完成"}</div>
-              <strong>{canEdit ? "你正在负责此任务，可以进行同步和标注。" : editDisabledReason}</strong>
-              <details>
-                <summary>技术详情</summary>
-                <p className="stage-help">review revision {review.revision} · 当前负责人 {review.workflow.annotator_id ?? "无"} · 最后编辑者 {review.workflow.last_editor_id ?? "无"}</p>
-              </details>
-            </div>
-            <div className="save-row">
-              {(canClaim || canTakeOver) && <button className="primary" onClick={() => changeWorkflow("assign")}>{canTakeOver ? `接管 ${review.workflow.annotator_id} 的任务` : "领取并开始标注"}</button>}
-              {canReopen && <button onClick={() => changeWorkflow("reopen")}>重开并继续修改</button>}
-            </div>
-          </div>}
-          <div className="annotation-editor">
-          <section className="annotation-media-column">
-          <div className="panel video-review">
+        {review && <span className={`state state-${review.workflow.state === "completed" ? "ready" : review.workflow.state === "in_progress" ? "in_progress" : "needs_attention"}`}>
+          {review.workflow.state === "unassigned" ? "未领取" : review.workflow.state === "in_progress" ? `标注中 · ${review.workflow.annotator_id}` : "已完成"}
+        </span>}
+        <span className={`save-indicator save-${saveState}`}>
+          {saveState === "saving" ? "正在保存…" : saveState === "saved" ? "已保存" : saveState === "error" ? "保存失败" : saveState === "conflict" ? "版本冲突" : "无待保存修改"}
+        </span>
+        {(canClaim || canTakeOver) && <button className="primary" onClick={() => changeWorkflow("assign")}>{canTakeOver ? "接管任务" : "领取任务"}</button>}
+        {canReopen && <button onClick={() => changeWorkflow("reopen")}>重开任务</button>}
+        {(saveState === "error" || saveState === "conflict") && <button className="danger" onClick={saveState === "conflict" ? reloadCurrentRecording : () => retrySaveRef.current?.()}>{saveState === "conflict" ? "重新载入" : "重试保存"}</button>}
+      </section>
+
+      {recordingDrawerOpen && <>
+        <button className="recording-drawer-backdrop" aria-label="关闭录制列表" onClick={() => setRecordingDrawerOpen(false)} />
+        <aside className="recording-drawer">
+          <div className="recording-drawer-header"><strong>选择录制</strong><button onClick={() => setRecordingDrawerOpen(false)}>关闭</button></div>
+          <input autoFocus placeholder="搜索录制 ID 或参与者" value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
+          <div className="recording-list-actions">
+            {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在刷新…" : "刷新 Bucket"}</button>}
+            <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? "已复制" : "复制当前 ID"}</button>
+          </div>
+          {indexMessage && <span className="index-message">{indexMessage}</span>}
+          <div className="recording-drawer-list">
+            {filteredRecordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}><strong>{recording.participant_id} · {tierLabel(recording.data_tier)}</strong><span>{recording.recording_id}</span></button>)}
+          </div>
+        </aside>
+      </>}
+
+      {!selected ? <div className="panel placeholder">从“录制列表”选择一条录制</div> : <section className="annotation-workbench-body">
+        <section className="annotation-media-pane">
+          <div className="panel video-review workbench-video">
             <video
               ref={video}
               controls
               tabIndex={0}
-              aria-keyshortcuts=", . Shift+, Shift+. I O 2 F N X Control+S"
+              aria-keyshortcuts=", . Shift+, Shift+. I O 2 F N X E Control+S"
               src={`/api/v1/recordings/${selected}/video`}
               onTimeUpdate={(event) => updateVideoPosition(event.currentTarget.currentTime)}
               onSeeked={(event) => updateVideoPosition(event.currentTarget.currentTime)}
             />
-            <div className="frame-controls">
-              <button onClick={() => stepFrame(-5)} disabled={!frameTimes || currentFrame <= 0}>向前 5 帧</button>
-              <button onClick={() => stepFrame(-1)} disabled={!frameTimes || currentFrame <= 0}>向前 1 帧</button>
-              <span>零基帧 {currentFrame} / {frameTimes ? frameTimes.frame_count - 1 : "—"}</span>
-              <span>录制时间 {currentTime.toFixed(3)} s</span>
-              <button onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>向后 1 帧</button>
-              <button onClick={() => stepFrame(5)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>向后 5 帧</button>
-              <button className="primary" title={editDisabledReason} onClick={loadExperimentWindow} disabled={!canEdit || !frameTimes || experimentBusy}>此帧是{syncRole === "start_tap" ? "开始" : "结束"}轻拍首次接触</button>
-            </div>
-            {!canEdit && <p className="stage-help warning-text">{editDisabledReason}</p>}
-            <details><summary>视频与快捷键说明</summary><p className="stage-help">页面从约 0.2 秒处开始预览以避开摄像头启动过渡；原始第 0 帧仍完整保留。全局使用 ,/. 移动一帧，Shift+,/. 移动五帧；I/O/2 标记开始、结束和撞击，F/N/X 切换标注类型。输入控件聚焦时快捷键自动停用。</p><p className="stage-help">媒体 PTS {frameTimes ? (frameTimes.media_time_ns[currentFrame] / 1e9).toFixed(9) : "—"} s · 所有同步和标注使用真实逐帧录制时间戳。</p></details>
-          </div>
-
-          <div className="panel full-timeline-panel">
-            <div className="panel-title">完整录制 IMU · {timeline?.unit} · {timeline?.time_s.length ?? 0} 个显示点</div>
-            <div className="timeline-time-readout"><strong>当前视频 {currentTime.toFixed(3)} s</strong><span>零基帧 {currentFrame}</span></div>
-            {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} height={250} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} />}
-            <p className="stage-help compact-help">点击曲线可将视频跳转到最接近的真实帧。</p>
-          </div>
-          </section>
-
-          <section className="annotation-task-column">
-
-          <div className="panel sync-panel">
-            <div className="panel-title">第 1 步 · 开始/结束轻拍同步复核</div>
-            <div className="sync-inputs">
-              <label>当前锚点<select value={syncRole} onChange={(event) => setSyncRole(event.target.value as "start_tap" | "end_tap")}><option value="start_tap">开始轻拍</option><option value="end_tap">结束轻拍</option></select></label>
-              <span>视频人工选择首次接触帧；程序推荐 IMU 首次响应，仍需人工确认。</span>
-            </div>
-            {!experimentWindow ? <div className="placeholder compact">逐帧停在轻拍首次接触画面，再点击上方按钮加载附近 IMU 样本</div> : <>
-              <div className="sync-inputs">
-                <span>视频帧 {experimentWindow.video_frame_index}</span>
-                <span>视频 PTS {(experimentWindow.video_time_ns / 1e9).toFixed(9)} s</span>
-                <span>IMU {experimentImuSample === null ? "未选择" : `样本 ${experimentImuSample} · ${selectedExperimentTime?.toFixed(9)} s`}</span>
-              </div>
-              <div className={`recommendation-card confidence-${experimentWindow.recommendation.confidence}`}>
-                <strong>自动推荐：{experimentWindow.recommendation.sample_index === null ? "无候选" : `样本 ${experimentWindow.recommendation.sample_index}`}</strong>
-                <span>置信度：{experimentWindow.recommendation.confidence === "high" ? "高" : experimentWindow.recommendation.confidence === "medium" ? "中" : "低"}</span>
-                <span>{recommendationOffsetSource === "formal_anchor" ? "时间先验：本条已确认的另一端锚点" : "时间先验：共同主机时钟 0 ms"}</span>
-                <span>实体响应 {experimentWindow.recommendation.distinct_response_count} 个 · 显著性 {experimentWindow.recommendation.event_robust_z?.toFixed(1) ?? "—"} · 时间残差 {experimentWindow.recommendation.timing_residual_ms?.toFixed(1) ?? "—"} ms · 区分比 {experimentWindow.recommendation.score_margin_ratio?.toFixed(2) ?? "唯一响应"}</span>
-                <span>{experimentWindow.recommendation.reason}</span>
-              </div>
-              <Plot
-                time={experimentWindow.time_s}
-                values={experimentWindow.raw_counts}
-                cursorTime={selectedExperimentTime}
-                markers={experimentMarkers}
-                height={280}
-                onSelectTime={(time) => {
-                  const candidates = experimentWindow.candidate_sample_index;
-                  if (candidates.length) {
-                    const candidateTimes = candidates.map((sampleIndex) => {
-                      const localIndex = experimentWindow.sample_index.indexOf(sampleIndex);
-                      return experimentWindow.time_s[localIndex];
-                    });
-                    setExperimentImuSample(candidates[nearestIndex(candidateTimes, time)]);
-                  } else {
-                    const localIndex = nearestIndex(experimentWindow.time_s, time);
-                    setExperimentImuSample(experimentWindow.sample_index[localIndex]);
-                  }
-                }}
-              />
-              <div className="candidate-peaks"><span>轻拍响应候选：</span>{experimentWindow.candidate_peaks.map((candidate) => <button key={candidate.sample_index} className={experimentImuSample === candidate.sample_index ? "selected" : ""} onClick={() => setExperimentImuSample(candidate.sample_index)}>样本 {candidate.sample_index} · {candidate.time_s.toFixed(3)} s · {candidate.selection_basis === "event_onset" ? "首响应" : candidate.selection_basis === "local_peak" ? "局部峰" : "时间投影"} · 强度#{candidate.strength_rank} · 偏移 {candidate.video_minus_imu_ms.toFixed(1)} ms</button>)}</div>
-              <div className="save-row">
-                <button className="primary" disabled={!canEdit || experimentImuSample === null || !selectedExperimentIsCandidate || experimentBusy} onClick={confirmFormalAnchor}>确认为{syncRole === "start_tap" ? "开始" : "结束"}轻拍</button>
-                <button disabled={experimentBusy} onClick={() => { setExperimentWindow(null); setExperimentImuSample(null); }}>取消</button>
-              </div>
-              {selectedExperimentCandidate && <p className="stage-help">当前候选：事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)} · 本样本突变 {selectedExperimentCandidate.robust_z.toFixed(1)} · 推荐分数 {selectedExperimentCandidate.recommendation_score.toFixed(3)} · {selectedExperimentCandidate.recommendation_rank ? `独立响应排名 #${selectedExperimentCandidate.recommendation_rank}` : `同一响应簇 #${selectedExperimentCandidate.response_cluster_id ?? "—"} 的辅助峰`} · {selectedExperimentCandidate.selection_basis === "event_onset" ? "事件首个明显响应" : selectedExperimentCandidate.selection_basis === "timing_projection" ? "时间模型代表样本" : "局部突变峰"}</p>}
-              {experimentImuSample !== null && !selectedExperimentIsCandidate && <p className="stage-help warning-text">当前选择不是加速度突变候选，请点击曲线主峰或上方候选按钮。</p>}
-              {experimentWindow.recommendation.confidence === "low" && <p className="stage-help warning-text">自动推荐置信度低，请逐个比较候选；程序不会自动保存。</p>}
-            </>}
-            <div className="anchor-list">
-              {sync?.anchors.map((anchor) => <div key={anchor.role}>
-                <span>{anchor.role === "start_tap" ? "开始轻拍" : "结束轻拍"} · 帧 {anchor.source_video_frame ?? "—"} ({seconds(anchor.video_time_ns)}) ↔ 样本 {anchor.source_imu_sample ?? "—"} ({seconds(anchor.imu_time_ns)})</span>
-                <button disabled={!canEdit} onClick={() => setSync({ ...sync, anchors: sync.anchors.filter((item) => item.role !== anchor.role), quality: "draft", recommendation: "none", decision: "host_only" })}>删除</button>
-              </div>)}
+            <div className="frame-controls workbench-frame-controls">
+              <button title="Shift+," onClick={() => stepFrame(-5)} disabled={!frameTimes || currentFrame <= 0}>−5</button>
+              <button title="," onClick={() => stepFrame(-1)} disabled={!frameTimes || currentFrame <= 0}>−1</button>
+              <strong>{currentTime.toFixed(3)} s</strong>
+              <span>帧 {currentFrame} / {frameTimes ? frameTimes.frame_count - 1 : "—"}</span>
+              <button title="." onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>+1</button>
+              <button title="Shift+." onClick={() => stepFrame(5)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>+5</button>
+              {taskTab === "sync" && <button className="primary" title={editDisabledReason || "选择当前视频帧并分析附近 IMU 响应"} onClick={loadExperimentWindow} disabled={!canMutate || !frameTimes || experimentBusy}>设为{syncRole === "start_tap" ? "开始" : "结束"}轻拍接触帧</button>}
+              <details className="shortcut-help"><summary>快捷键</summary><span>{tr(",/. 一帧 · Shift+,/. 五帧 · I/O 区间 · 2 撞击 · F/N/X 类型 · E 所选区间结尾 · Ctrl+S 重试保存", ",/. one frame · Shift+,/. five frames · I/O interval · 2 impact · F/N/X type · E selected interval end · Ctrl+S retry save")}</span></details>
             </div>
           </div>
 
-          <div className="panel sync-panel">
-            <div className="panel-title">同步结论 · 条件式固定偏移</div>
-            <p className="stage-help">时间比例固定为 1.0；只有估计偏移至少 0.1 秒且首尾差不超过 0.1 秒时，才建议平移 IMU。原始主机时间永不覆盖。</p>
-            <div className={`recommendation-card confidence-${sync?.quality === "verified" ? "high" : "low"}`}>
-              <strong>{sync?.quality === "verified" ? "同步已验证" : sync?.quality === "awaiting_confirmation" ? "等待确认固定偏移" : sync?.quality === "needs_review" ? "需要重新检查锚点" : sync?.quality === "rejected" ? "同步已拒绝" : "尚未评估"}</strong>
-              <span>估计偏移：{sync ? `${sync.estimated_offset_seconds >= 0 ? "+" : ""}${sync.estimated_offset_seconds.toFixed(3)} 秒` : "—"}</span>
-              <span>约 {sync?.estimated_offset_video_frames == null ? "—" : `${sync.estimated_offset_video_frames >= 0 ? "+" : ""}${sync.estimated_offset_video_frames.toFixed(2)} 个视频帧`}</span>
-              <span>约 {sync?.estimated_offset_imu_samples == null ? "—" : `${sync.estimated_offset_imu_samples >= 0 ? "+" : ""}${sync.estimated_offset_imu_samples.toFixed(2)} 个 IMU 样本`}</span>
-              <span>首尾差：{sync ? `${(sync.anchor_disagreement_ns / 1e9).toFixed(3)} 秒` : "—"}</span>
-              <span>已应用：{sync ? `${sync.applied_offset_seconds >= 0 ? "+" : ""}${sync.applied_offset_seconds.toFixed(3)} 秒` : "—"}</span>
-              <span>“+”表示把 IMU 时间轴向后移动；视频帧数按本条实际 FPS 估算。</span>
-            </div>
-            <div className="save-row">
-              <button className="primary" disabled={!canEdit || !hasFormalAnchors} onClick={() => saveSync(false)}>评估并保存主机时间</button>
-              {sync?.recommendation === "apply_fixed_offset" && <button className="danger" disabled={!canEdit} onClick={() => saveSync(true)}>确认应用固定偏移</button>}
-              <button disabled={!canEdit || !hasFormalAnchors || !doc} onClick={proposeTapExclusions}>生成轻拍排除区</button>
-            </div>
-            <details>
-              <summary>高级同步数据</summary>
-              <p className="stage-help">开始偏移 {sync ? seconds(sync.start_offset_ns) : "—"}；结束偏移 {sync ? seconds(sync.end_offset_ns) : "—"}；残差 RMS {sync && Number.isFinite(sync.residual_rms_ns) ? `${(sync.residual_rms_ns / 1e6).toFixed(2)} ms` : "—"}；策略 {sync?.policy ?? "—"}。</p>
-            </details>
+          <div className="panel full-timeline-panel workbench-timeline">
+            <div className="timeline-heading"><div><span>完整录制 IMU</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} 个显示点</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{currentTime.toFixed(3)} s</strong></div></div>
+            {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} markers={timelineMarkers} regions={timelineRegions} selectionLabels={currentAnnotationLabels} controlledCursor showMarkerKey={false} height={190} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} onSelectLabel={locateAnnotationInterval} />}
           </div>
-          <div className="panel annotation-controls">
-            <div className="panel-title">第 2 步 · 区间与跌倒事件标注</div>
-            <div className="time-readout">当前 {currentTime.toFixed(3)} s · 帧 {currentFrame}</div>
-            <div className="status-grid"><span>当前标注者 {annotator}</span><span>身份由登录会话验证，不可在页面切换</span></div>
-            <div className="mark-buttons"><button disabled={!canEdit} onClick={() => mark("start")}>标记区间开始（I）</button><button disabled={!canEdit} onClick={() => mark("end")}>标记区间结束（O）</button><button disabled={!canEdit || annotationKind !== "fall"} onClick={() => mark("impact")}>标记撞击时刻（2）</button></div>
-            <div className="marks"><span>区间开始／跌倒起始 {seconds(marks.start)}</span><span>区间结束 {seconds(marks.end)}</span><span>撞击时刻 {seconds(marks.impact)}</span></div>
-          <div className="segment-form"><select disabled={!canEdit} value={annotationKind} onChange={(e) => setAnnotationKind(e.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 进入训练</option><option value="fall">跌倒 · 进入训练</option><option value="exclude">明确排除 · 不训练</option></select>{annotationKind === "exclude" ? <select disabled={!canEdit} value={exclusionReason} onChange={(e) => setExclusionReason(e.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canEdit} value={activity} onChange={(e) => setActivity(e.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{isEnglish ? item.display_name_en : item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" disabled={!canEdit} onClick={addAnnotationInterval}>添加区间</button></div>
-            {annotationKind === "fall" && <p className="stage-help">fall 从首次明确失衡开始，经过撞击，到落地后身体大动作停止并稳定。跌倒起始由区间起点自动派生；每个跌倒区间必须各自标记一个撞击时刻。准备阶段和稳定后的自然状态另标 non_fall。</p>}
-          </div>
-          {doc && <div className="panel segment-table">
-            <div className="panel-title">第 3 步 · 全时间轴覆盖与完成检查</div>
-            <div className="coverage-track" aria-label="标注覆盖时间轴">
-              {durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}
-              {durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}
-              {durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}
-            </div>
-            <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? `仍有 ${(uncoveredNs / 1e9).toFixed(3)} 秒未标注；草稿允许，完成时禁止。` : "全程已由 fall、non_fall 或 exclude 覆盖。"}</div>
-            {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.slice(0, 10).map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); if (video.current && frameTimes) video.current.currentTime = frameTimes.media_time_ns[nearestIndex(frameTimes.time_ns, gap.start)] / 1e9; }}>空白 {index + 1}：{seconds(gap.start)} → {seconds(gap.end)}</button>)}</div>}
-            <div className="panel-title subheading">训练区间</div>
-            {doc.segments.map((segment) => {
-              const impact = doc.events.find((event) => event.segment_id === segment.segment_id && event.kind === "impact");
-              return <div className="segment-row" key={segment.segment_id}>
-                <span>{segment.segment_id}</span>
-                <strong>{segment.binary_label === "fall" ? "跌倒" : "非跌倒"}</strong>
-                <span>{activityDisplay(segment.activity_code)}</span>
-                <span>{seconds(segment.start_ns)} → {seconds(segment.end_ns)}</span>
-                {segment.binary_label === "fall" && <span className={impact ? "success-text" : "warning-text"}>撞击 {seconds(impact?.time_ns)}</span>}
-                {segment.binary_label === "fall" && impact && <button onClick={() => jumpToRecordingTime(impact.time_ns)}>跳转撞击帧</button>}
-                {segment.binary_label === "fall" && <button disabled={!canEdit} onClick={() => setSegmentImpact(segment)}>{impact ? "当前帧重设撞击" : "当前帧设为撞击"}</button>}
-                {segment.binary_label === "fall" && impact && <button disabled={!canEdit} onClick={() => setDoc({ ...doc, finalized: false, events: doc.events.filter((event) => !(event.segment_id === segment.segment_id && event.kind === "impact")) })}>清除撞击</button>}
-                <button disabled={!canEdit} onClick={() => setDoc({ ...doc, segments: doc.segments.filter((item) => item.segment_id !== segment.segment_id), events: doc.events.filter((event) => event.segment_id !== segment.segment_id) })}>删除区间</button>
-              </div>;
-            })}
-            <div className="panel-title subheading">明确排除区间</div>
-            {doc.exclusions.map((item) => <div className="segment-row" key={item.exclusion_id}><span>{item.exclusion_id}</span><strong>排除</strong><span>{exclusionLabels[item.reason]}</span><span>{seconds(item.start_ns)} → {seconds(item.end_ns)}</span><button disabled={!canEdit} onClick={() => setDoc({ ...doc, exclusions: doc.exclusions.filter((candidate) => candidate.exclusion_id !== item.exclusion_id) })}>删除</button></div>)}
-            {fallWithoutImpactCount > 0 && <div className="coverage-summary warning-text">仍有 {fallWithoutImpactCount} 个跌倒区间没有撞击时刻；草稿允许，完成时禁止。</div>}
-            <div className="save-row"><button disabled={!canEdit} onClick={() => save(false)}>保存草稿（Ctrl+S）</button><button className="primary" disabled={!canEdit || selectedRecording?.data_tier !== "prod" || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={finalizeAndComplete}>完成标注并生成训练 H5</button><span>{doc.finalized ? "标注已定稿" : "草稿"} · {sync?.quality === "verified" ? "同步已验证" : "同步待验证"}</span></div>
-            {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据可以保存草稿和下载原始 H5，但不会完成为训练数据。</p>}
-          </div>}
-          {review && <div className="panel workflow-panel">
-            <div className="panel-title">第 4 步 · 下载数据</div>
-            <p className="stage-help">原始 H5 和当前标注快照始终可以下载；正式数据完成后自动生成统一 30 Hz 的训练 H5。</p>
-            <details><summary>技术状态</summary><div className="status-grid"><span>数据级别 {selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div></details>
-            <div className="save-row">
-              <a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>下载原始 capture.h5</a>
-              <a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>下载 review.json</a>
-              {selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>下载 aligned30.h5</a>}
-            </div>
-            {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">当前是测试数据：可以下载原始 capture.h5 和 review.json，用于联调和结构展示，但不会生成训练 H5 或进入训练快照。</p>}
-            <div className="danger-zone">
-              <strong>永久删除整条录制</strong>
-              <p className="stage-help">删除会立即从标注列表隐藏，并清除这条录制的原始文件、预览、标注和当前导出。已经生成的自包含训练快照不受影响；对象存储仍按存储桶策略提供 7 天软删除恢复窗口。</p>
-              {!deleteArmed
-                ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始永久删除</button>
-                : <>
-                  <label>二次确认：请输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label>
-                  <div className="save-row">
-                    <button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除并立即隐藏</button>
-                    <button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button>
+        </section>
+
+        <section className="annotation-tools-pane">
+          <nav className="annotation-task-tabs" aria-label="标注任务">
+            {(["sync", "annotate", "review", "data"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : item === "review" ? "3 检查" : "4 数据"}</button>)}
+          </nav>
+
+          <div className={`annotation-task-scroll ${taskTab === "annotate" ? "annotation-task-scroll-annotate" : ""}`}>
+            {error && <div className="error-banner">{error}</div>}
+            {saveMessage && saveState !== "saved" && <p className="stage-help warning-text">{saveMessage}</p>}
+            {review && !canEdit && <div className="task-notice"><strong>{editDisabledReason}</strong></div>}
+
+            {taskTab === "sync" && <>
+              <div className="panel compact-panel">
+                <div className="panel-title">轻拍同步复核</div>
+                <div className="sync-inputs">
+                  <label>当前锚点<select value={syncRole} onChange={(event) => setSyncRole(event.target.value as "start_tap" | "end_tap")}><option value="start_tap">开始轻拍</option><option value="end_tap">结束轻拍</option></select></label>
+                  <span>逐帧选择视频中的首次接触，再确认附近的 IMU 首次响应。</span>
+                </div>
+                {!experimentWindow ? <div className="placeholder compact">先在左侧逐帧定位，再点击“设为轻拍接触帧”</div> : <>
+                  <div className={`recommendation-card confidence-${experimentWindow.recommendation.confidence}`}>
+                    <strong>推荐样本 {experimentWindow.recommendation.sample_index ?? "—"} · 置信度 {experimentWindow.recommendation.confidence === "high" ? "高" : experimentWindow.recommendation.confidence === "medium" ? "中" : "低"}</strong>
+                    <span>视频帧 {experimentWindow.video_frame_index} · IMU {experimentImuSample ?? "未选择"}</span>
+                    <span>{experimentWindow.recommendation.reason}</span>
                   </div>
+                  <Plot time={experimentWindow.time_s} values={experimentWindow.raw_counts} cursorTime={selectedExperimentTime} markers={experimentMarkers} height={220} onSelectTime={(time) => {
+                    const candidates = experimentWindow.candidate_sample_index;
+                    if (candidates.length) {
+                      const candidateTimes = candidates.map((sampleIndex) => experimentWindow.time_s[experimentWindow.sample_index.indexOf(sampleIndex)]);
+                      setExperimentImuSample(candidates[nearestIndex(candidateTimes, time)]);
+                    } else {
+                      setExperimentImuSample(experimentWindow.sample_index[nearestIndex(experimentWindow.time_s, time)]);
+                    }
+                  }} />
+                  <div className="candidate-peaks">{experimentWindow.candidate_peaks.map((candidate) => <button key={candidate.sample_index} className={experimentImuSample === candidate.sample_index ? "selected" : ""} onClick={() => setExperimentImuSample(candidate.sample_index)}>#{candidate.sample_index} · {candidate.time_s.toFixed(3)} s · 强度 {candidate.strength_rank}</button>)}</div>
+                  <div className="save-row"><button className="primary" disabled={!canMutate || experimentImuSample === null || !selectedExperimentIsCandidate || experimentBusy} onClick={confirmFormalAnchor}>确认{syncRole === "start_tap" ? "开始" : "结束"}锚点</button><button onClick={() => { setExperimentWindow(null); setExperimentImuSample(null); }}>取消</button></div>
+                  {selectedExperimentCandidate && <details><summary>候选技术数据</summary><p className="stage-help">事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)} · 样本突变 {selectedExperimentCandidate.robust_z.toFixed(1)} · 推荐分数 {selectedExperimentCandidate.recommendation_score.toFixed(3)} · 时间先验 {recommendationOffsetSource === "formal_anchor" ? "已确认锚点" : "共同主机时钟"}</p></details>}
                 </>}
-            </div>
-          </div>}
-          </section>
+                <div className="anchor-list">{sync?.anchors.map((anchor) => <div key={anchor.role}><button onClick={() => jumpToRecordingTime(anchor.video_time_ns)}>{anchor.role === "start_tap" ? "开始" : "结束"} · 帧 {anchor.source_video_frame ?? "—"} · {seconds(anchor.video_time_ns)}</button><button disabled={!canMutate} onClick={() => removeSyncAnchor(anchor.role)}>删除</button></div>)}</div>
+              </div>
+              <div className="panel compact-panel">
+                <div className="panel-title">同步结论</div>
+                <div className={`recommendation-card confidence-${sync?.quality === "verified" ? "high" : "low"}`}>
+                  <strong>{sync?.quality === "verified" ? "同步已验证" : sync?.quality === "awaiting_confirmation" ? "等待确认固定偏移" : sync?.quality === "needs_review" ? "需要重新检查锚点" : "尚未评估"}</strong>
+                  <span>估计偏移 {sync ? `${sync.estimated_offset_seconds >= 0 ? "+" : ""}${sync.estimated_offset_seconds.toFixed(3)} s` : "—"} · 首尾差 {sync ? `${(sync.anchor_disagreement_ns / 1e9).toFixed(3)} s` : "—"}</span>
+                </div>
+                <div className="save-row"><button className="primary" disabled={!canMutate || !hasFormalAnchors} onClick={() => saveSync(false)}>评估并保存</button>{sync?.recommendation === "apply_fixed_offset" && <button className="danger" disabled={!canMutate} onClick={() => saveSync(true)}>应用固定偏移</button>}<button disabled={!canMutate || !hasFormalAnchors || !doc} onClick={proposeTapExclusions}>生成轻拍排除区</button></div>
+                <details><summary>同步规则与技术数据</summary><p className="stage-help">原始主机时间永不覆盖。时间比例固定为 1.0；仅当偏移明显且首尾一致时才建议固定平移。开始 {sync ? seconds(sync.start_offset_ns) : "—"} · 结束 {sync ? seconds(sync.end_offset_ns) : "—"} · RMS {sync && Number.isFinite(sync.residual_rms_ns) ? `${(sync.residual_rms_ns / 1e6).toFixed(2)} ms` : "—"}。</p></details>
+              </div>
+            </>}
+
+            {taskTab === "annotate" && <div className="annotation-tab-layout">
+              <div className="panel compact-panel annotation-controls">
+                <div className="panel-title">创建区间</div>
+                <div className="time-readout">{currentTime.toFixed(3)} s · 帧 {currentFrame}</div>
+                <div className="mark-buttons"><button disabled={!canMutate} onClick={() => mark("start")}>起点 I</button><button disabled={!canMutate} onClick={() => mark("end")}>终点 O</button><button disabled={!canMutate || annotationKind !== "fall"} onClick={() => mark("impact")}>撞击 2</button></div>
+                <div className="marks"><span>起 {seconds(marks.start)}</span><span>止 {seconds(marks.end)}</span><span>撞击 {seconds(marks.impact)}</span></div>
+                <div className="segment-form"><select disabled={!canMutate} value={annotationKind} onChange={(event) => setAnnotationKind(event.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 训练</option><option value="fall">跌倒 · 训练</option><option value="exclude">明确排除</option></select>{annotationKind === "exclude" ? <select disabled={!canMutate} value={exclusionReason} onChange={(event) => setExclusionReason(event.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canMutate} value={activity} onChange={(event) => setActivity(event.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{isEnglish ? item.display_name_en : item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" disabled={!canMutate || marks.start === undefined || marks.end === undefined} onClick={addAnnotationInterval}>添加并保存</button></div>
+                <details><summary>标注规范</summary><p className="stage-help">跌倒区间从首次明确失衡开始，到落地后身体大动作停止并稳定。区间起点同时表示 onset；每个跌倒区间必须有且仅有一个撞击时刻。准备阶段和稳定后的自然状态标为 non_fall。</p></details>
+              </div>
+              {doc && <section className="panel compact-panel interval-list-panel">
+                <header className="interval-list-summary"><span>{tr("已标区间", "Annotated intervals")} · {orderedAnnotationIntervals.length}</span><small>{tr("按时间排序", "Chronological")}</small></header>
+                <div className="interval-list-body" ref={intervalListRef}>
+                  {orderedAnnotationIntervals.map((item) => {
+                    if (item.kind === "exclusion") {
+                      const exclusion = item.exclusion;
+                      return <article id={`annotation-${item.key}`} className={`interval-card interval-exclude ${activeAnnotationInterval?.key === item.key ? "interval-selected" : ""} ${locatedIntervalKey === item.key ? "interval-located" : ""}`} key={item.key}>
+                        <button className="interval-jump" onClick={() => selectAnnotationInterval(item)}><strong>{tr("排除", "Excluded")} · {exclusionLabels[exclusion.reason]}</strong><span>{seconds(exclusion.start_ns)} → {seconds(exclusion.end_ns)}</span></button>
+                        <div className="interval-actions"><button onClick={() => selectAnnotationInterval(item, "start")}>{tr("到开头", "Go to start")}</button><button onClick={() => selectAnnotationInterval(item, "end")}>{tr("到结尾", "Go to end")} E</button><button disabled={!canMutate} onClick={() => removeExclusion(exclusion.exclusion_id)}>{tr("删除标注", "Delete annotation")}</button></div>
+                      </article>;
+                    }
+                    const segment = item.segment;
+                    const impact = doc.events.find((event) => event.segment_id === segment.segment_id && event.kind === "impact");
+                    const intervalColor = stableActivityColor(segment.binary_label, segment.activity_code, displayTaxonomy[segment.binary_label]);
+                    return <article id={`annotation-${item.key}`} className={`interval-card interval-${segment.binary_label} ${activeAnnotationInterval?.key === item.key ? "interval-selected" : ""} ${locatedIntervalKey === item.key ? "interval-located" : ""}`} style={{ borderLeftColor: intervalColor }} key={item.key}>
+                      <button className="interval-jump" onClick={() => selectAnnotationInterval(item)}><strong>{segment.binary_label === "fall" ? tr("跌倒", "Fall") : tr("非跌倒", "Non-fall")} · {activityDisplay(segment.activity_code)}</strong><span>{seconds(segment.start_ns)} → {seconds(segment.end_ns)}</span></button>
+                      {segment.binary_label === "fall" && <span className={impact ? "success-text" : "warning-text"}>{tr("撞击", "Impact")} {seconds(impact?.time_ns)}</span>}
+                      <div className="interval-actions"><button onClick={() => selectAnnotationInterval(item, "start")}>{tr("到开头", "Go to start")}</button><button onClick={() => selectAnnotationInterval(item, "end")}>{tr("到结尾", "Go to end")} E</button>{segment.binary_label === "fall" && impact && <button onClick={() => jumpToRecordingTime(impact.time_ns)}>{tr("查看撞击", "View impact")}</button>}{segment.binary_label === "fall" && <button disabled={!canMutate} onClick={() => setSegmentImpact(segment)}>{impact ? tr("重设撞击", "Reset impact") : tr("设为撞击", "Set impact")}</button>}{segment.binary_label === "fall" && impact && <button disabled={!canMutate} onClick={() => clearSegmentImpact(segment.segment_id)}>{tr("清除撞击", "Clear impact")}</button>}<button disabled={!canMutate} onClick={() => removeSegment(segment.segment_id)}>{tr("删除标注", "Delete annotation")}</button></div>
+                    </article>;
+                  })}
+                  <div className="interval-list-tail" aria-hidden="true" />
+                </div>
+              </section>}
+            </div>}
+
+            {taskTab === "review" && doc && <div className="panel compact-panel review-panel">
+              <div className="panel-title">完整性检查</div>
+              <div className="coverage-track" aria-label="标注覆盖时间轴">{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}</div>
+              <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? `未覆盖 ${(uncoveredNs / 1e9).toFixed(3)} s` : "全时间轴已覆盖"} · {fallWithoutImpactCount > 0 ? `${fallWithoutImpactCount} 个跌倒缺少撞击` : "所有跌倒均有撞击"} · {sync?.quality === "verified" ? "同步已验证" : "同步未验证"}</div>
+              {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); jumpToRecordingTime(gap.start); setTaskTab("annotate"); }}>空白 {index + 1} · {seconds(gap.start)}–{seconds(gap.end)}</button>)}</div>}
+              {review?.workflow.state === "completed"
+                ? <div className="success-banner compact-banner">任务已完成；可在“数据”中下载当前导出，重开后才能修改。</div>
+                : <div className="save-row"><button className="primary" disabled={!canMutate || selectedRecording?.data_tier !== "prod" || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={finalizeAndComplete}>完成标注并生成训练 H5</button></div>}
+              {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据允许保存和下载，但不会完成为训练数据。</p>}
+              <details><summary>任务技术详情</summary><p className="stage-help">review revision {review?.revision ?? "—"} · 负责人 {review?.workflow.annotator_id ?? "无"} · 最后编辑者 {review?.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>
+            </div>}
+
+            {taskTab === "data" && review && <div className="panel compact-panel workflow-panel">
+              <div className="panel-title">下载与录制管理</div>
+              <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
+              <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>训练 aligned30.h5</a>}</div>
+              <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
+            </div>}
           </div>
-        </>}
-      </section>
+
+          <footer className="annotation-save-bar">
+            <span>{canEdit ? "结构化修改会立即保存" : editDisabledReason}</span>
+            <span>{doc?.finalized ? "已定稿" : "草稿"} · {sync?.quality === "verified" ? "同步已验证" : "同步待验证"}</span>
+            <button disabled={!canEdit || saveState === "saving" || saveState === "conflict"} onClick={() => saveState === "error" ? retrySaveRef.current?.() : void save(false)}>保存 / 重试（Ctrl+S）</button>
+          </footer>
+        </section>
+      </section>}
     </main>
   );
 }
