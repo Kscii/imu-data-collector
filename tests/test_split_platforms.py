@@ -314,10 +314,20 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         assert aligned_download.status_code == 403
         assert "test 数据永久禁止" in aligned_download.json()["detail"]["message"]
 
-        assert client.post(
-            f"/api/v1/recordings/{recording_id}/aligned30",
+        aligned30_write_path = f"/api/v1/recordings/{recording_id}/aligned30"
+        assert not any(
+            route.path == "/api/v1/recordings/{recording_id}/aligned30"
+            and "POST" in (getattr(route, "methods", None) or set())
+            for route in app.routes
+        )
+        removed_write = client.post(
+            aligned30_write_path,
             json={"expected_revision": 0},
-        ).status_code == 405
+        )
+        # 未构建静态前端时没有匹配路由，返回 404；生产包带有仅 GET 的
+        # SPA catch-all，Starlette 对同一路径的 POST 返回 405。两者都证明
+        # 标注服务没有重新暴露 aligned30 写接口。
+        assert removed_write.status_code in {404, 405}
 
 
 def test_annotation_rejects_manifest_2_0_and_publishes_current_capability(
