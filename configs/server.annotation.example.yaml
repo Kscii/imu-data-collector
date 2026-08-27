@@ -1,5 +1,6 @@
 # 云端标注服务结构化配置示例；部署时复制到 /etc/imu-annotation/config.yaml。
 activity_taxonomy_path: "/opt/imu-annotation/current/configs/activities.yaml"
+calibration_evidence_path: "/opt/imu-annotation/current/configs/calibration-evidence.yaml"
 
 identity:
   allowed_unikeys:
@@ -29,6 +30,22 @@ annotation:
   server_port: 8766
   catalog_path: "/var/lib/imu-annotation/catalog.sqlite3"
   review_policy: "single_user"
+  # 后台每 10 秒发现一次新的完整 manifest；管理员仍可从页面立即强制刷新。
+  catalog_refresh_interval_s: 10
+
+# 正式导出会把这些参数与服务器证据文件、manifest 和 H5 冻结属性交叉核对。
+# calibration_evidence_sha256 设为 null 时，启动时从上方证据文件计算；不要填写猜测值。
+imu:
+  calibration_profile_id: "cw12eu_t_83fc90141ea4_v1_20260827"
+  calibration_verified: true
+  accel_counts_per_g: 4096.0
+  gyro_counts_per_dps: 32.8
+  accel_bias_counts: [30.0, 48.0, -40.0]
+  gyro_bias_counts: [-17.0, 0.0, 10.0]
+  raw_axis_order: [0, 1, 2]
+  axis_signs: [1, -1, 1]
+  calibration_method: "six_face_static_and_multi_axis_360deg_engineering_v1"
+  calibration_evidence_sha256: null
 
 storage:
   backend: "gcs"

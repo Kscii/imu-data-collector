@@ -38,6 +38,27 @@ def test_unverified_scales_produce_nan_instead_of_guessed_units() -> None:
     assert np.isnan(values).all()
 
 
+def test_calibration_applies_raw_bias_axis_direction_and_si_units() -> None:
+    raw = np.asarray([[130, 2048, 4056, 15, 328, -646]], dtype=np.int16)
+
+    values = calibrate_counts(
+        raw,
+        4096.0,
+        32.8,
+        accel_bias_counts=(30.0, 48.0, -40.0),
+        gyro_bias_counts=(-17.0, 0.0, 10.0),
+        raw_axis_order=(0, 1, 2),
+        axis_signs=(1, -1, 1),
+    )
+
+    assert values[0, 0] == pytest.approx(100 / 4096 * 9.80665)
+    assert values[0, 1] == pytest.approx(-2000 / 4096 * 9.80665)
+    assert values[0, 2] == pytest.approx(4096 / 4096 * 9.80665)
+    assert values[0, 3] == pytest.approx(np.deg2rad(32 / 32.8))
+    assert values[0, 4] == pytest.approx(np.deg2rad(-328 / 32.8))
+    assert values[0, 5] == pytest.approx(np.deg2rad(-656 / 32.8))
+
+
 def test_packet_end_fit_reconstructs_monotonic_sample_clock() -> None:
     packet_counts = np.asarray([2, 2, 2, 2], dtype=np.int64)
     expected_times = 1_000_000_000 + np.arange(8) * 33_333_333

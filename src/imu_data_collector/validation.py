@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,18 @@ def validate_capture_h5(
         metrics["training_eligible"] = str(training_eligible).lower()
         if schema_version == CAPTURE_SCHEMA_VERSION and "data_tier" not in handle.attrs:
             issues.append("missing data_tier for current schema")
+        if schema_version == CAPTURE_SCHEMA_VERSION:
+            if "calibration_profile_id" not in handle.attrs:
+                issues.append("missing calibration_profile_id for current schema")
+            if "imu" in handle:
+                for name in (
+                    "accel_bias_counts_json",
+                    "gyro_bias_counts_json",
+                    "raw_axis_order_json",
+                    "axis_signs_json",
+                ):
+                    if name not in handle["imu"].attrs:
+                        issues.append(f"missing IMU calibration attribute {name}")
         if data_tier not in {"test", "prod", "legacy_unclassified"}:
             issues.append(f"invalid data_tier: {data_tier}")
         if training_eligible and data_tier != "prod":
@@ -311,6 +324,16 @@ def validate_capture_h5(
             issues.append("values_si must have shape (N, 6)")
         calibrated = bool(handle.attrs.get("calibration_verified", False))
         metrics["calibration_verified"] = str(calibrated).lower()
+        if calibrated and sample_count and not np.isfinite(values_si[:]).all():
+            issues.append("verified calibration produced non-finite values_si")
+        if calibrated and schema_version == CAPTURE_SCHEMA_VERSION:
+            try:
+                order = json.loads(str(handle["imu"].attrs["raw_axis_order_json"]))
+                signs = json.loads(str(handle["imu"].attrs["axis_signs_json"]))
+                if sorted(order) != [0, 1, 2] or any(item not in (-1, 1) for item in signs):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                issues.append("invalid verified calibration axis transform")
         if require_calibration and not calibrated:
             issues.append("device calibration is not verified")
 
@@ -337,6 +360,31 @@ def validate_capture_h5(
                     if len(video_pts) > 1 and video_pts[-1] > video_pts[0]
                     else 0.0
                 )
+                if (
+                    schema_version == CAPTURE_SCHEMA_VERSION
+                    and data_tier == "prod"
+                    and float(metrics["video_actual_span_fps"]) < 27.0
+                ):
+                    issues.append("prod video actual span FPS is below 27")
+                if schema_version == CAPTURE_SCHEMA_VERSION and data_tier == "prod":
+                    try:
+                        requested_controls = json.loads(
+                            str(handle["video"].attrs["camera_controls_requested_json"])
+                        )
+                        effective_controls = json.loads(
+                            str(handle["video"].attrs["camera_controls_effective_json"])
+                        )
+                        control_errors = json.loads(
+                            str(handle["video"].attrs["camera_control_errors_json"])
+                        )
+                        if (
+                            not requested_controls
+                            or requested_controls != effective_controls
+                            or control_errors
+                        ):
+                            issues.append("prod video fixed camera controls are not verified")
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        issues.append("prod video fixed camera controls are missing or invalid")
                 metrics["video_max_frame_gap_ms"] = (
                     float(np.max(pts_deltas) / 1e6) if len(pts_deltas) else 0.0
                 )

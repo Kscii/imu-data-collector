@@ -40,6 +40,11 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .metric.warn strong { color: #fbbf24; }
 .capture-grid { display: grid; grid-template-columns: minmax(500px, 1fr) minmax(500px, 1.15fr); gap: 16px; }
 .camera-panel img, .video-review video { display: block; width: 100%; max-height: 520px; object-fit: contain; background: black; border-radius: 7px; }
+.preview-stage { position: relative; min-height: 280px; display: grid; place-items: center; background: #020617; border-radius: 7px; overflow: hidden; }
+.preview-stage img { width: 100%; }
+.preview-overlay { position: absolute; inset: auto 12px 12px 12px; padding: 10px 14px; border: 1px solid #334155; border-radius: 8px; background: rgb(2 6 23 / 82%); color: #dbeafe; text-align: center; }
+.preview-overlay-error { display: flex; gap: .75rem; align-items: center; justify-content: center; pointer-events: auto; }
+.preview-overlay-error button { width: auto; }
 .frame-controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
 .frame-controls span { color: #c7d2e4; font: 12px ui-monospace, monospace; background: #0b1525; padding: 8px 10px; border-radius: 6px; }
 .placeholder { min-height: 280px; display: grid; place-items: center; color: #64748b; }
@@ -51,6 +56,8 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .plot-marker-key i { display: inline-block; width: 18px; height: 3px; border-radius: 99px; }
 .uplot { font-family: inherit; }
 .error-banner, .issues { background: #431b22; border: 1px solid #873344; color: #fecdd3; padding: 12px 15px; border-radius: 9px; margin-bottom: 14px; }
+.warning-banner { background: #422006; border: 1px solid #a16207; color: #fde68a; padding: 12px 15px; border-radius: 9px; margin-bottom: 14px; }
+.error-banner code, .warning-banner code { font: 12px ui-monospace, monospace; user-select: all; }
 .success-banner { background: #052e16; border: 1px solid #166534; color: #bbf7d0; padding: 12px 15px; border-radius: 9px; margin-bottom: 14px; }
 .status-grid { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0; }
 .status-grid span { border: 1px solid #334155; border-radius: 999px; color: #cbd5e1; padding: 5px 9px; font-size: 12px; }
@@ -59,6 +66,11 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .recording-list button { display: grid; gap: 4px; text-align: left; }
 .recording-list button span { color: #8193ac; font-size: 10px; overflow-wrap: anywhere; }
 .recording-list button.selected { border-color: #3b82f6; background: #17305b; }
+.recording-list-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.recording-list-actions button { display: block; text-align: center; padding: 8px; font-size: 11px; }
+.selected-recording-id { display: block; color: #bfdbfe; background: #0b1525; border: 1px solid #263957; border-radius: 7px; padding: 8px; font-size: 10px; overflow-wrap: anywhere; user-select: all; }
+.index-message { color: #86efac; font-size: 10px; line-height: 1.45; }
+.recording-list > button span { user-select: text; }
 .annotation-workspace { display: grid; gap: 16px; }
 .annotation-controls { display: grid; gap: 12px; }
 .time-readout { font-size: 22px; font-variant-numeric: tabular-nums; }
@@ -109,3 +121,4 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .gap-list { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 14px; }
 .gap-list button { padding: 6px 9px; color: #fcd34d; font: 11px ui-monospace, monospace; }
 .panel-title.subheading { margin-top: 18px; margin-bottom: 6px; }
+.calibration-video video { display: block; width: 100%; max-height: 65vh; background: #000; }

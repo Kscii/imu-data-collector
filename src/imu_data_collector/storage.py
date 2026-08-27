@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -110,7 +111,9 @@ class LocalFilesystemStore:
             if if_absent:
                 raise ObjectConflictError(f"对象已存在：{key}")
             target.unlink()
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.partial")
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
+        )
         temporary.unlink(missing_ok=True)
         try:
             try:
@@ -138,9 +141,14 @@ class LocalFilesystemStore:
         if not source.is_file():
             raise FileNotFoundError(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.partial")
-        shutil.copy2(source, temporary)
-        temporary.replace(destination)
+        temporary = destination.with_name(
+            f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
+        )
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         return self._info(key, source)
 
     def read_bytes(
@@ -168,12 +176,17 @@ class LocalFilesystemStore:
         current = path.stat().st_mtime_ns if path.exists() else 0
         if if_generation_match is not None and current != if_generation_match:
             raise ObjectConflictError("对象 generation 已更新")
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.partial")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
         )
-        temporary.replace(path)
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return self._info(key, path)
 
     def stat(self, key: str) -> ObjectInfo | None:
@@ -262,7 +275,9 @@ class GcsObjectStore:
 
     def download_file(self, key: str, destination: Path) -> ObjectInfo:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.partial")
+        temporary = destination.with_name(
+            f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
+        )
         blob = self.bucket.blob(key)
         try:
             blob.download_to_filename(temporary, timeout=900)

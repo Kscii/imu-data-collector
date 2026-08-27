@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -130,8 +131,46 @@ async def publish_recording(
         _descriptor(summary.recording_id, "preview_mp4", proxy_path, "video/mp4"),
     ]
     with h5py.File(h5_path, "r") as handle:
-        source_schema = str(handle.attrs.get("schema_version", "unknown"))
+        source_schema = str(handle.attrs.get("capture_schema_version", "unknown"))
         body_location = str(handle.attrs.get("body_location", "chest"))
+        imu_attrs = handle["imu"].attrs
+        calibration = CalibrationProfile(
+            profile_id=str(
+                imu_attrs.get(
+                    "calibration_profile_id",
+                    handle.attrs.get("calibration_profile_id", "unverified"),
+                )
+            ),
+            verified=bool(handle.attrs.get("calibration_verified", False)),
+            accel_counts_per_g=(
+                float(imu_attrs["accel_counts_per_g"])
+                if "accel_counts_per_g" in imu_attrs
+                else None
+            ),
+            gyro_counts_per_dps=(
+                float(imu_attrs["gyro_counts_per_dps"])
+                if "gyro_counts_per_dps" in imu_attrs
+                else None
+            ),
+            accel_bias_counts=tuple(
+                json.loads(str(imu_attrs.get("accel_bias_counts_json", "[0, 0, 0]")))
+            ),
+            gyro_bias_counts=tuple(
+                json.loads(str(imu_attrs.get("gyro_bias_counts_json", "[0, 0, 0]")))
+            ),
+            raw_axis_order=tuple(
+                json.loads(str(imu_attrs.get("raw_axis_order_json", "[0, 1, 2]")))
+            ),
+            axis_signs=tuple(
+                json.loads(str(imu_attrs.get("axis_signs_json", "[1, 1, 1]")))
+            ),
+            method=str(imu_attrs.get("calibration_method", "unverified")),
+            evidence_sha256=(
+                str(imu_attrs["calibration_evidence_sha256"])
+                if "calibration_evidence_sha256" in imu_attrs
+                else None
+            ),
+        )
     manifest = CaptureManifestV2(
         recording_id=summary.recording_id,
         collection_id=summary.collection_id,
@@ -142,18 +181,7 @@ async def publish_recording(
         duration_ns=int(summary.duration_ns or 0),
         source_h5_schema_version=source_schema,
         software_revision=os.environ.get("IMU_PLATFORM_REVISION", "working-tree"),
-        calibration=CalibrationProfile(
-            profile_id=(
-                "configured-v1"
-                if settings.imu.accel_counts_per_g and settings.imu.gyro_counts_per_dps
-                else "unverified"
-            ),
-            verified=bool(
-                settings.imu.accel_counts_per_g and settings.imu.gyro_counts_per_dps
-            ),
-            accel_counts_per_g=settings.imu.accel_counts_per_g,
-            gyro_counts_per_dps=settings.imu.gyro_counts_per_dps,
-        ),
+        calibration=calibration,
         artifacts=artifacts,
     )
     for artifact in artifacts:

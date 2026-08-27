@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import h5py
@@ -45,6 +46,27 @@ def taxonomy() -> dict:
     }
 
 
+def test_capture_h5_file_descriptor_is_not_inheritable(tmp_path: Path) -> None:
+    writer = CaptureH5Writer(
+        tmp_path / "descriptor.h5",
+        RecordingStartRequest(
+            collection_id="descriptor_check",
+            participant_id="xfan0282",
+        ),
+        "descriptor-recording",
+        1_000_000_000,
+        ImuSettings(),
+        taxonomy(),
+    )
+    try:
+        descriptor = writer.handle.id.get_vfd_handle()
+        if not isinstance(descriptor, int):
+            pytest.skip("当前 HDF5 VFD 不暴露普通 POSIX 文件描述符")
+        assert not os.get_inheritable(descriptor)
+    finally:
+        writer.abort_close()
+
+
 def formal_anchor(
     role: str,
     imu_time_ns: int,
@@ -75,14 +97,24 @@ def formal_anchor(
     )
 
 
-def build_capture(tmp_path: Path) -> Path:
+def build_capture(
+    tmp_path: Path,
+    *,
+    data_tier: DataTier = DataTier.TEST,
+    video_interval_ns: int = 33_333_333,
+    camera_controls_verified: bool = False,
+) -> Path:
     start_ns = 1_000_000_000
     path = tmp_path / "capture.h5"
     video = tmp_path / "capture.mkv"
     video.write_bytes("用于测试的伪 MKV 数据".encode())
     writer = CaptureH5Writer(
         path,
-        RecordingStartRequest(collection_id="pilot", participant_id="xfan0282"),
+        RecordingStartRequest(
+            collection_id="pilot",
+            participant_id="xfan0282",
+            data_tier=data_tier,
+        ),
         "recording-1",
         start_ns,
         ImuSettings(),
@@ -106,8 +138,9 @@ def build_capture(tmp_path: Path) -> Path:
     assert rate == pytest.approx(25.0, rel=0.02)
     writer.write_video_frames(
         pts_monotonic_ns=start_ns
-        + np.asarray([50_000_000, 83_333_333, 116_666_666, 149_999_999]),
-        duration_ns=np.full(4, 33_333_333, dtype=np.int64),
+        + 50_000_000
+        + np.arange(4, dtype=np.int64) * video_interval_ns,
+        duration_ns=np.full(4, video_interval_ns, dtype=np.int64),
         key_frame=np.asarray([True, False, False, False]),
         video_path=video,
         codec="h264",
@@ -115,6 +148,17 @@ def build_capture(tmp_path: Path) -> Path:
         height=1080,
         requested_fps=30.0,
         ffmpeg_diagnostics=["[mjpeg] overread 8"],
+        camera_controls_requested=(
+            {"auto_exposure": 1, "exposure_time_absolute": 200}
+            if camera_controls_verified
+            else None
+        ),
+        camera_controls_effective=(
+            {"auto_exposure": 1, "exposure_time_absolute": 200}
+            if camera_controls_verified
+            else None
+        ),
+        camera_control_errors=[] if camera_controls_verified else None,
     )
     writer.write_sync([])
     writer.finish()
@@ -215,6 +259,72 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
     stored = read_annotations(path)
     assert stored == document
     assert validate_capture_h5(path, taxonomy()).ready
+
+
+def test_prod_capture_requires_verified_fixed_camera_controls(tmp_path: Path) -> None:
+    path = build_capture(tmp_path, data_tier=DataTier.PROD)
+
+    report = validate_capture_h5(path, taxonomy())
+
+    assert not report.ready
+    assert "prod video fixed camera controls are not verified" in report.issues
+
+
+def test_prod_capture_rejects_low_actual_span_fps(tmp_path: Path) -> None:
+    path = build_capture(
+        tmp_path,
+        data_tier=DataTier.PROD,
+        video_interval_ns=66_666_667,
+        camera_controls_verified=True,
+    )
+
+    report = validate_capture_h5(path, taxonomy())
+
+    assert not report.ready
+    assert "prod video actual span FPS is below 27" in report.issues
+
+
+def test_verified_calibration_is_frozen_and_values_si_use_target_axes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "calibrated.h5"
+    settings = ImuSettings(
+        calibration_profile_id="device-v1",
+        calibration_verified=True,
+        accel_counts_per_g=4096.0,
+        gyro_counts_per_dps=32.8,
+        accel_bias_counts=(30.0, 48.0, -40.0),
+        gyro_bias_counts=(-17.0, 0.0, 10.0),
+        axis_signs=(1, -1, 1),
+        calibration_method="fixture",
+        calibration_evidence_sha256="a" * 64,
+    )
+    writer = CaptureH5Writer(
+        path,
+        RecordingStartRequest(collection_id="pilot", participant_id="xfan0282"),
+        "calibrated",
+        1_000_000_000,
+        settings,
+        taxonomy(),
+    )
+    writer.append_notification(
+        pack_test_frame((30, -4048, 4056, -17, 328, 10), b"\x00\x00\x00\x00"),
+        1_040_000_000,
+    )
+
+    assert bool(writer.handle.attrs["calibration_verified"])
+    assert writer.handle["imu"].attrs["calibration_profile_id"] == "device-v1"
+    assert writer.handle["imu"].attrs["calibration_evidence_sha256"] == "a" * 64
+    assert writer.handle["imu"].attrs["byte_order"] == "big_endian_verified_current_device"
+    assert (
+        writer.handle["imu"].attrs["frame_layout_status"]
+        == "six_axis_int16_verified_trailer_unknown"
+    )
+    values = writer.handle["imu/samples/values_si"][0]
+    assert values[1] == pytest.approx(9.80665)
+    assert values[2] == pytest.approx(9.80665)
+    assert values[4] == pytest.approx(-np.deg2rad(10.0))
+    writer.abort_close()
 
 
 def test_test_tier_is_default_and_can_never_be_marked_training_eligible(

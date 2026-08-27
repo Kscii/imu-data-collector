@@ -328,7 +328,15 @@ async def _probe_video(
             "nonpositive_pts_delta_count": int((pts_deltas <= 0).sum()),
             "duplicate_pts_count": int((pts_deltas == 0).sum()),
             "output_bytes": path.stat().st_size,
+            "source_input_fps": recorder.source_fps,
+            "browser_preview_fps": recorder.preview_fps,
             "ffmpeg_progress_fps": recorder.progress.fps,
+            "camera_controls": {
+                "ready": recorder.control_state.ready,
+                "requested": recorder.control_state.requested,
+                "effective": recorder.control_state.effective,
+                "errors": recorder.control_state.errors,
+            },
             "ffmpeg_errors": recorder.progress.errors,
         }
 
@@ -381,6 +389,9 @@ def main() -> None:
             create_capture_app(settings),
             host=settings.server_host,
             port=settings.server_port,
+            # 浏览器会长期保持 WebSocket/MJPEG。关机时不能无限等待这些客户端，
+            # 否则 systemd 最终 SIGKILL，应用 lifespan 来不及释放 BLE 与 FFmpeg。
+            timeout_graceful_shutdown=5,
         )
     elif args.command == "validate":
         with h5py.File(args.path, "r") as handle:

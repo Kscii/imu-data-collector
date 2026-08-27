@@ -1,0 +1,16 @@
+[Unit]
+Description=CW12EU-T 本机 IMU 数据采集平台
+After=bluetooth.service graphical-session.target
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Codes/imu-data-collector
+ExecStart=/usr/bin/uv run imu-collector --config %h/.config/imu-data-collector/gcs.yaml serve
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=25
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

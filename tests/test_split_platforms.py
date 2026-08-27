@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from imu_data_collector.models import (
     ReviewWorkflowState,
     SyncExperimentDocument,
     SyncObservation,
+    TrainingExportReference,
 )
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 
@@ -67,6 +69,7 @@ def _settings(tmp_path: Path) -> Settings:
         annotation=AnnotationSettings(
             catalog_path=tmp_path / "annotation.sqlite3",
             review_policy="single_user",
+            catalog_refresh_interval_s=0,
         ),
     )
 
@@ -132,6 +135,50 @@ def _publish_fixture(
         if_generation_match=0,
     )
     return recording_id
+
+
+def _install_exported_review(app, store, tmp_path: Path, recording_id: str) -> None:
+    aligned = tmp_path / f"{recording_id}.aligned.h5"
+    aligned.write_bytes(b"aligned")
+    digest = sha256_file(aligned)
+    logical_digest = "b" * 64
+    key = f"exports/{recording_id}/review-0/aligned30-{logical_digest[:16]}.h5"
+    info = store.put_file(
+        aligned,
+        key,
+        content_type="application/x-hdf5",
+        metadata={
+            "sha256": digest,
+            "logical_content_sha256": logical_digest,
+            "recording_id": recording_id,
+            "source_review_revision": "0",
+        },
+    )
+    service = app.state.annotation_service
+    manifest = service.required_manifest(recording_id)
+    review, generation = service.reviews.load(manifest)
+    exported = review.model_copy(
+        update={
+            "workflow": review.workflow.model_copy(
+                update={"state": ReviewWorkflowState.EXPORTED}
+            ),
+            "active_export": TrainingExportReference(
+                source_review_revision=0,
+                object_key=key,
+                sha256=digest,
+                logical_content_sha256=logical_digest,
+                size_bytes=info.size_bytes,
+                calibration_profile_id="fixture",
+                calibration_evidence_sha256="c" * 64,
+                created_at_utc="2026-08-26T00:00:00+00:00",
+            ),
+        }
+    )
+    store.write_json(
+        f"reviews/{recording_id}/review.json",
+        exported.model_dump(mode="json"),
+        if_generation_match=generation,
+    )
 
 
 def test_capture_app_does_not_expose_annotation_or_export_routes(
@@ -250,6 +297,45 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         )
         assert forbidden.status_code == 422
         assert "test 数据永久禁止" in forbidden.json()["detail"]
+
+
+def test_annotation_background_refresh_discovers_new_manifest(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.annotation.catalog_refresh_interval_s = 0.02
+    store = LocalFilesystemStore(settings.storage.root)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/recordings").json() == []
+        recording_id = _publish_fixture(store, tmp_path)
+        deadline = time.monotonic() + 1.0
+        recordings: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            recordings = client.get("/api/v1/recordings").json()
+            if recordings:
+                break
+            time.sleep(0.02)
+
+    assert [item["recording_id"] for item in recordings] == [recording_id]
+
+
+def test_annotation_refresh_skips_unchanged_manifest_generation(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    _publish_fixture(store, tmp_path)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/index/refresh").json() == {
+            "imported": 1,
+            "skipped": 0,
+        }
+        assert client.post("/api/v1/index/refresh").json() == {
+            "imported": 0,
+            "skipped": 0,
+        }
 
 
 def test_iap_identity_is_required_mapped_and_cannot_claim_admin(
@@ -464,32 +550,11 @@ def test_training_release_writes_queryable_sidecar_manifest(tmp_path: Path) -> N
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
-    aligned = tmp_path / "aligned.h5"
-    aligned.write_bytes(b"aligned")
-    store.put_file(
-        aligned,
-        f"exports/{recording_id}/aligned30.h5",
-        content_type="application/x-hdf5",
-    )
     app = create_annotation_app(settings, store)
 
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        service = app.state.annotation_service
-        manifest = service.required_manifest(recording_id)
-        review, generation = service.reviews.load(manifest)
-        exported = review.model_copy(
-            update={
-                "workflow": review.workflow.model_copy(
-                    update={"state": ReviewWorkflowState.EXPORTED}
-                )
-            }
-        )
-        store.write_json(
-            f"reviews/{recording_id}/review.json",
-            exported.model_dump(mode="json"),
-            if_generation_match=generation,
-        )
+        _install_exported_review(app, store, tmp_path, recording_id)
         released = client.post("/api/v1/training-releases")
         repeated = client.post("/api/v1/training-releases")
         listed = client.get("/api/v1/training-releases")
@@ -512,31 +577,11 @@ def test_training_release_range_download_and_revoke(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
-    aligned = tmp_path / "aligned.h5"
-    aligned.write_bytes(b"aligned")
-    store.put_file(
-        aligned,
-        f"exports/{recording_id}/aligned30.h5",
-        content_type="application/x-hdf5",
-    )
     app = create_annotation_app(settings, store)
 
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        service = app.state.annotation_service
-        manifest = service.required_manifest(recording_id)
-        review, generation = service.reviews.load(manifest)
-        store.write_json(
-            f"reviews/{recording_id}/review.json",
-            review.model_copy(
-                update={
-                    "workflow": review.workflow.model_copy(
-                        update={"state": ReviewWorkflowState.EXPORTED}
-                    )
-                }
-            ).model_dump(mode="json"),
-            if_generation_match=generation,
-        )
+        _install_exported_review(app, store, tmp_path, recording_id)
         release = client.post("/api/v1/training-releases").json()
         release_id = release["release_id"]
         partial = client.get(
@@ -582,30 +627,10 @@ def test_training_release_revoke_retries_after_partial_delete(tmp_path: Path) ->
     settings = _settings(tmp_path)
     store = FailOnceReleaseDeleteStore(settings.storage.root)
     recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
-    aligned = tmp_path / "aligned.h5"
-    aligned.write_bytes(b"aligned")
-    store.put_file(
-        aligned,
-        f"exports/{recording_id}/aligned30.h5",
-        content_type="application/x-hdf5",
-    )
     app = create_annotation_app(settings, store)
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        service = app.state.annotation_service
-        manifest = service.required_manifest(recording_id)
-        review, generation = service.reviews.load(manifest)
-        store.write_json(
-            f"reviews/{recording_id}/review.json",
-            review.model_copy(
-                update={
-                    "workflow": review.workflow.model_copy(
-                        update={"state": ReviewWorkflowState.EXPORTED}
-                    )
-                }
-            ).model_dump(mode="json"),
-            if_generation_match=generation,
-        )
+        _install_exported_review(app, store, tmp_path, recording_id)
         release_id = client.post("/api/v1/training-releases").json()["release_id"]
         body = {
             "confirmation": f"REVOKE {release_id}",

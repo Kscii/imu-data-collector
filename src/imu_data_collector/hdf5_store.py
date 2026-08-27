@@ -91,10 +91,23 @@ class CaptureH5Writer:
         self.video_status = video_status
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = h5py.File(path, "w", libver="latest")
+        self._disable_file_descriptor_inheritance()
         self.packet_count = 0
         self.sample_count = 0
         self.parse_errors: list[str] = []
         self._initialize()
+
+    def _disable_file_descriptor_inheritance(self) -> None:
+        """阻止后续启动的 FFmpeg 等子进程继承 H5 写锁。"""
+
+        try:
+            descriptor = self.handle.id.get_vfd_handle()
+            if isinstance(descriptor, int):
+                os.set_inheritable(descriptor, False)
+        except (AttributeError, OSError, TypeError, ValueError):
+            # 某些非 sec2 HDF5 驱动不暴露普通 POSIX 文件描述符；此时仍由
+            # 子进程的 close_fds=True 提供第二层隔离。
+            return
 
     def _initialize(self) -> None:
         handle = self.handle
@@ -113,8 +126,10 @@ class CaptureH5Writer:
                 "clock_domain": "linux_clock_monotonic",
                 "feature_columns": json.dumps(FEATURE_COLUMNS),
                 "feature_units": json.dumps(FEATURE_UNITS),
+                "calibration_profile_id": self.imu_settings.calibration_profile_id,
                 "calibration_verified": bool(
-                    self.imu_settings.accel_counts_per_g
+                    self.imu_settings.calibration_verified
+                    and self.imu_settings.accel_counts_per_g
                     and self.imu_settings.gyro_counts_per_dps
                 ),
                 "state": "recording",
@@ -133,10 +148,36 @@ class CaptureH5Writer:
                 "expected_rate_status": self.imu_settings.expected_rate_status,
                 "frame_size_bytes": self.imu_settings.frame_size_bytes,
                 "callback_drops": 0,
-                "byte_order": "big_endian_hypothesis",
-                "frame_layout_status": "hypothesis_pending_characterization",
+                "byte_order": (
+                    "big_endian_verified_current_device"
+                    if self.imu_settings.calibration_verified
+                    else "big_endian_hypothesis"
+                ),
+                "frame_layout_status": (
+                    "six_axis_int16_verified_trailer_unknown"
+                    if self.imu_settings.calibration_verified
+                    else "hypothesis_pending_characterization"
+                ),
+                "calibration_profile_id": self.imu_settings.calibration_profile_id,
+                "calibration_method": self.imu_settings.calibration_method,
+                "accel_bias_counts_json": json.dumps(
+                    self.imu_settings.accel_bias_counts
+                ),
+                "gyro_bias_counts_json": json.dumps(
+                    self.imu_settings.gyro_bias_counts
+                ),
+                "raw_axis_order_json": json.dumps(self.imu_settings.raw_axis_order),
+                "axis_signs_json": json.dumps(self.imu_settings.axis_signs),
+                "target_coordinate_system": (
+                    "+X wearer-right/interface-opposite; "
+                    "+Y head/pendant; +Z body-outside/button"
+                ),
             }
         )
+        if self.imu_settings.calibration_evidence_sha256:
+            imu.attrs["calibration_evidence_sha256"] = (
+                self.imu_settings.calibration_evidence_sha256
+            )
         if self.imu_settings.accel_counts_per_g:
             imu.attrs["accel_counts_per_g"] = self.imu_settings.accel_counts_per_g
         if self.imu_settings.gyro_counts_per_dps:
@@ -217,7 +258,14 @@ class CaptureH5Writer:
             {
                 "columns": json.dumps(FEATURE_COLUMNS),
                 "units": json.dumps(FEATURE_UNITS),
-                "unverified_semantics": "NaN until both device scales are verified",
+                "coordinate_system": (
+                    "+X wearer-right/interface-opposite; "
+                    "+Y head/pendant; +Z body-outside/button"
+                ),
+                "calibration_profile_id": self.imu_settings.calibration_profile_id,
+                "unverified_semantics": (
+                    "NaN until the device-specific calibration profile is verified"
+                ),
             }
         )
         for name, dtype in (
@@ -366,6 +414,10 @@ class CaptureH5Writer:
                 parsed.raw_counts,
                 self.imu_settings.accel_counts_per_g,
                 self.imu_settings.gyro_counts_per_dps,
+                accel_bias_counts=self.imu_settings.accel_bias_counts,
+                gyro_bias_counts=self.imu_settings.gyro_bias_counts,
+                raw_axis_order=self.imu_settings.raw_axis_order,
+                axis_signs=self.imu_settings.axis_signs,
             ),
         )
         _resize_append(
@@ -451,6 +503,9 @@ class CaptureH5Writer:
         height: int,
         requested_fps: float,
         ffmpeg_diagnostics: list[str] | None = None,
+        camera_controls_requested: dict[str, int] | None = None,
+        camera_controls_effective: dict[str, int] | None = None,
+        camera_control_errors: list[str] | None = None,
     ) -> None:
         video = self.handle["video"]
         frames = video["frames"]
@@ -477,6 +532,11 @@ class CaptureH5Writer:
         )
         deltas = np.diff(pts)
         actual_fps = float(1e9 / np.median(deltas)) if len(deltas) else 0.0
+        actual_span_fps = (
+            float((len(pts) - 1) * 1e9 / (pts[-1] - pts[0]))
+            if len(pts) > 1 and pts[-1] > pts[0]
+            else 0.0
+        )
         video.attrs.update(
             {
                 "path": video_path.name,
@@ -486,12 +546,22 @@ class CaptureH5Writer:
                 "height": height,
                 "requested_fps": requested_fps,
                 "actual_median_fps": actual_fps,
+                "actual_span_fps": actual_span_fps,
                 "frame_count": len(pts),
                 "media_timeline_origin": "first_encoded_frame",
                 "source_pts_origin_monotonic_ns": int(pts[0]) if len(pts) else -1,
                 "ffmpeg_diagnostic_count": len(ffmpeg_diagnostics or []),
                 "ffmpeg_diagnostics_json": json.dumps(
                     ffmpeg_diagnostics or [], ensure_ascii=False
+                ),
+                "camera_controls_requested_json": json.dumps(
+                    camera_controls_requested or {}, ensure_ascii=False, sort_keys=True
+                ),
+                "camera_controls_effective_json": json.dumps(
+                    camera_controls_effective or {}, ensure_ascii=False, sort_keys=True
+                ),
+                "camera_control_errors_json": json.dumps(
+                    camera_control_errors or [], ensure_ascii=False
                 ),
             }
         )

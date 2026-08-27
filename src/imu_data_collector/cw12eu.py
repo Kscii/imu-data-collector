@@ -39,17 +39,44 @@ def calibrate_counts(
     raw_counts: np.ndarray,
     accel_counts_per_g: float | None,
     gyro_counts_per_dps: float | None,
+    *,
+    accel_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    gyro_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    raw_axis_order: tuple[int, int, int] = (0, 1, 2),
+    axis_signs: tuple[int, int, int] = (1, 1, 1),
 ) -> np.ndarray:
+    """把设备原始计数转换到项目坐标系和 SI 单位。
+
+    偏置定义在设备原始轴空间；先减偏置，再按目标 X/Y/Z 的来源轴重排并
+    应用方向符号。原始 ``raw_counts`` 不会被修改。
+    """
+
+    raw = np.asarray(raw_counts)
+    if raw.ndim != 2 or raw.shape[1] != 6:
+        raise ValueError("raw_counts 必须是 N x 6 数组")
+    if sorted(raw_axis_order) != [0, 1, 2]:
+        raise ValueError("raw_axis_order 必须是 0、1、2 的排列")
+    if any(sign not in (-1, 1) for sign in axis_signs):
+        raise ValueError("axis_signs 只能包含 -1 或 1")
     values = np.full(raw_counts.shape, np.nan, dtype=np.float32)
+    order = np.asarray(raw_axis_order, dtype=np.intp)
+    signs = np.asarray(axis_signs, dtype=np.float64)
     if accel_counts_per_g and math.isfinite(accel_counts_per_g) and accel_counts_per_g > 0:
+        corrected = raw[:, :3].astype(np.float64) - np.asarray(
+            accel_bias_counts, dtype=np.float64
+        )
         values[:, :3] = (
-            raw_counts[:, :3].astype(np.float64)
+            corrected[:, order]
+            * signs
             / accel_counts_per_g
             * STANDARD_GRAVITY_MPS2
         )
     if gyro_counts_per_dps and math.isfinite(gyro_counts_per_dps) and gyro_counts_per_dps > 0:
+        corrected = raw[:, 3:].astype(np.float64) - np.asarray(
+            gyro_bias_counts, dtype=np.float64
+        )
         values[:, 3:] = np.deg2rad(
-            raw_counts[:, 3:].astype(np.float64) / gyro_counts_per_dps
+            corrected[:, order] * signs / gyro_counts_per_dps
         )
     return values
 

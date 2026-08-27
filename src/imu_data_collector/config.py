@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,8 +19,16 @@ class ImuSettings:
     expected_rate_hz: float = 25.0
     expected_rate_status: str = "short_probe_observed_2026-08-25_pending_long_run"
     frame_size_bytes: int = 16
+    calibration_profile_id: str = "unverified"
+    calibration_verified: bool = False
     accel_counts_per_g: float | None = None
     gyro_counts_per_dps: float | None = None
+    accel_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gyro_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    raw_axis_order: tuple[int, int, int] = (0, 1, 2)
+    axis_signs: tuple[int, int, int] = (1, 1, 1)
+    calibration_method: str = "unverified"
+    calibration_evidence_sha256: str | None = None
 
 
 @dataclass(slots=True)
@@ -35,6 +44,15 @@ class VideoSettings:
     preview_width: int = 640
     preview_fps: int = 10
     vaapi_device: str | None = "/dev/dri/renderD128"
+    manual_controls_enabled: bool = False
+    auto_exposure: int = 1
+    exposure_time_absolute: int = 200
+    gain: int = 192
+    exposure_dynamic_framerate: int = 0
+    power_line_frequency: int = 1
+    source_fps_window_seconds: float = 5.0
+    prod_min_source_fps: float = 29.0
+    prod_min_span_fps: float = 27.0
 
 
 @dataclass(slots=True)
@@ -66,6 +84,7 @@ class AnnotationSettings:
     server_port: int = 8766
     catalog_path: Path = Path("~/.local/share/imu-annotation/catalog.sqlite3")
     review_policy: str = "single_user"
+    catalog_refresh_interval_s: float = 10.0
 
 
 @dataclass(slots=True)
@@ -90,6 +109,7 @@ class Settings:
     data_root: Path = Path("~/IMUData")
     catalog_path: Path = Path("~/.local/share/imu-data-collector/catalog.sqlite3")
     activity_taxonomy_path: Path = Path("configs/activities.yaml")
+    calibration_evidence_path: Path = Path("configs/calibration-evidence.yaml")
     server_host: str = "127.0.0.1"
     server_port: int = 8765
     minimum_free_gib: int = 20
@@ -107,15 +127,33 @@ class Settings:
         self.storage.root = self.storage.root.expanduser().resolve()
         self.storage.cache_root = self.storage.cache_root.expanduser().resolve()
         self.annotation.catalog_path = self.annotation.catalog_path.expanduser().resolve()
-        taxonomy = self.activity_taxonomy_path.expanduser()
-        if not taxonomy.is_absolute():
-            taxonomy = project_root / taxonomy
-        self.activity_taxonomy_path = taxonomy.resolve()
+        for name in ("activity_taxonomy_path", "calibration_evidence_path"):
+            path = getattr(self, name).expanduser()
+            if not path.is_absolute():
+                path = project_root / path
+            setattr(self, name, path.resolve())
+        if (
+            self.imu.calibration_verified
+            and self.imu.calibration_evidence_sha256 is None
+            and self.calibration_evidence_path.is_file()
+        ):
+            self.imu.calibration_evidence_sha256 = hashlib.sha256(
+                self.calibration_evidence_path.read_bytes()
+            ).hexdigest()
 
 
 def _construct_settings(payload: dict[str, Any]) -> Settings:
     values = dict(payload)
-    imu = ImuSettings(**values.pop("imu", {}))
+    imu_values = values.pop("imu", {})
+    for tuple_key in (
+        "accel_bias_counts",
+        "gyro_bias_counts",
+        "raw_axis_order",
+        "axis_signs",
+    ):
+        if tuple_key in imu_values:
+            imu_values[tuple_key] = tuple(imu_values[tuple_key])
+    imu = ImuSettings(**imu_values)
     video = VideoSettings(**values.pop("video", {}))
     upload = UploadSettings(**values.pop("upload", {}))
     storage_values = values.pop("storage", {})
@@ -139,7 +177,12 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
             for email, unikey in identity_values["email_to_unikey"].items()
         }
     identity = IdentitySettings(**identity_values)
-    for key in ("data_root", "catalog_path", "activity_taxonomy_path"):
+    for key in (
+        "data_root",
+        "catalog_path",
+        "activity_taxonomy_path",
+        "calibration_evidence_path",
+    ):
         if key in values:
             values[key] = Path(values[key])
     return Settings(
@@ -183,4 +226,24 @@ def load_activity_taxonomy(path: Path) -> dict[str, Any]:
             if not code or code in codes:
                 raise ValueError(f"Invalid or duplicate activity code: {code!r}")
             codes.add(code)
+    return payload
+
+
+def load_calibration_evidence(path: Path) -> dict[str, Any]:
+    """读取设备校准证据登记；不存在时允许旧部署继续启动。"""
+
+    if not path.is_file():
+        return {"schema_version": "1.0.0", "profile_id": "unverified", "evidence": []}
+    with path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if payload.get("schema_version") != "1.0.0" or not payload.get("profile_id"):
+        raise ValueError("校准证据清单缺少有效 schema_version 或 profile_id")
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list):
+        raise ValueError("校准证据清单 evidence 必须是列表")
+    recording_ids = [str(item.get("recording_id", "")) for item in evidence]
+    if any(not item for item in recording_ids) or len(set(recording_ids)) != len(
+        recording_ids
+    ):
+        raise ValueError("校准证据 recording_id 必须存在且唯一")
     return payload

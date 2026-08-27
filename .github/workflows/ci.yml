@@ -27,6 +27,8 @@ jobs:
         run: uv sync --frozen --dev
       - name: Ruff
         run: uv run ruff check src tests scripts/verify-soft3888-compatibility.py
+      - name: 本机更新脚本语法
+        run: bash -n scripts/update-local-capture.sh scripts/install-user-service.sh
       - name: Pytest
         run: uv run pytest -q
       - name: SOFT3888 temporal v3 合同

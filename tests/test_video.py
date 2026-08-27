@@ -1,13 +1,49 @@
+import asyncio
+
 import pytest
 
 import imu_data_collector.video as video_module
 from imu_data_collector.config import VideoSettings
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
+    PreviewFrameHub,
+    apply_video_controls,
     discover_video_devices,
     normalize_video_timeline,
     select_video_device,
 )
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_hub_keeps_one_session_across_video_process_swaps() -> None:
+    hub = PreviewFrameHub()
+
+    session_id = hub.activate()
+    assert hub.activate() == session_id
+    initial = hub.snapshot()
+    waiter = asyncio.create_task(
+        hub.wait_for_change(session_id, initial.generation, timeout=1.0)
+    )
+
+    # 第一段 FFmpeg 进程留下最后一帧；替换进程期间浏览器通道仍保持活动。
+    first_frame = b"\xff\xd8first\xff\xd9"
+    hub.publish(first_frame)
+    changed = await waiter
+    assert changed.session_id == session_id
+    assert changed.jpeg == first_frame
+    assert changed.active
+
+    # 第二段 FFmpeg 继续向同一通道发布，不产生新的浏览器 URL。
+    second_frame = b"\xff\xd8second\xff\xd9"
+    hub.publish(second_frame)
+    swapped = hub.snapshot()
+    assert swapped.session_id == session_id
+    assert swapped.jpeg == second_frame
+
+    hub.deactivate()
+    closed = hub.snapshot()
+    assert not closed.active
+    assert closed.jpeg is None
 
 
 def cameras() -> list[dict]:
@@ -78,6 +114,37 @@ def test_preview_only_recorder_has_no_file_output(tmp_path) -> None:
     assert "libx264" not in command
     assert command[-1] == "pipe:1"
     assert "image2pipe" in command
+    assert "-stats_enc_pre" in command
+    assert "source {n} {pts} {tb}" in command
+
+
+@pytest.mark.asyncio
+async def test_manual_camera_controls_are_applied_and_read_back(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, timeout_seconds: float = 10.0):
+        del timeout_seconds
+        calls.append(args)
+        if any(item.startswith("--get-ctrl=") for item in args):
+            return (
+                0,
+                "auto_exposure: 1 (Manual Mode)\n"
+                "exposure_time_absolute: 200\n"
+                "gain: 192\n"
+                "exposure_dynamic_framerate: 0\n"
+                "power_line_frequency: 1 (50 Hz)\n",
+                "",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr(video_module, "_run_capture", fake_run)
+    state = await apply_video_controls(
+        VideoSettings(manual_controls_enabled=True), "/dev/video4"
+    )
+
+    assert state.ready
+    assert state.effective["auto_exposure"] == 1
+    assert "--set-ctrl=auto_exposure=1" in calls[0]
 
 
 @pytest.mark.asyncio

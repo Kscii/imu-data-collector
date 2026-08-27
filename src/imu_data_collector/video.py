@@ -7,6 +7,8 @@ import glob
 import json
 import re
 import signal
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ async def _run_capture(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        close_fds=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -157,6 +160,82 @@ class VideoProgress:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class CameraControlState:
+    requested: dict[str, int] = field(default_factory=dict)
+    effective: dict[str, int] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return not self.errors and self.requested == self.effective
+
+
+def _parse_controls(text: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        match = re.match(r"\s*([a-zA-Z0-9_]+)\s*:\s*(-?\d+)", line)
+        if match:
+            values[match.group(1)] = int(match.group(2))
+    return values
+
+
+async def apply_video_controls(
+    settings: VideoSettings, device: str
+) -> CameraControlState:
+    """按确定顺序锁定曝光并读回有效值；不支持的设备保留明确诊断。"""
+
+    state = CameraControlState()
+    if not settings.manual_controls_enabled:
+        return state
+    state.requested = {
+        "auto_exposure": settings.auto_exposure,
+        "exposure_time_absolute": settings.exposure_time_absolute,
+        "gain": settings.gain,
+        "exposure_dynamic_framerate": settings.exposure_dynamic_framerate,
+        "power_line_frequency": settings.power_line_frequency,
+    }
+    # 先退出自动曝光，随后设置的曝光时间和增益才不会被驱动忽略。
+    commands = [
+        f"auto_exposure={settings.auto_exposure}",
+        ",".join(
+            f"{name}={value}"
+            for name, value in state.requested.items()
+            if name != "auto_exposure"
+        ),
+    ]
+    for controls in commands:
+        code, _stdout, stderr = await _run_capture(
+            "v4l2-ctl",
+            "-d",
+            device,
+            f"--set-ctrl={controls}",
+            timeout_seconds=3.0,
+        )
+        if code:
+            state.errors.append(stderr.strip() or f"设置摄像头控制失败：{controls}")
+    names = ",".join(state.requested)
+    code, stdout, stderr = await _run_capture(
+        "v4l2-ctl",
+        "-d",
+        device,
+        f"--get-ctrl={names}",
+        timeout_seconds=3.0,
+    )
+    if code:
+        state.errors.append(stderr.strip() or "无法读回摄像头控制")
+    else:
+        state.effective = _parse_controls(stdout)
+        mismatched = {
+            name: (wanted, state.effective.get(name))
+            for name, wanted in state.requested.items()
+            if state.effective.get(name) != wanted
+        }
+        if mismatched:
+            state.errors.append(f"摄像头控制读回不一致：{mismatched}")
+    return state
+
+
 @dataclass(frozen=True, slots=True)
 class VideoFrameTable:
     pts_monotonic_ns: np.ndarray
@@ -167,9 +246,101 @@ class VideoFrameTable:
     height: int
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewFrameSnapshot:
+    """浏览器预览通道的不可变快照。"""
+
+    session_id: int
+    generation: int
+    active: bool
+    jpeg: bytes | None
+
+
+class PreviewFrameHub:
+    """让一个浏览器 MJPEG 通道跨越多个 FFmpeg 进程持续存在。"""
+
+    def __init__(self) -> None:
+        self._session_id = 0
+        self._generation = 0
+        self._active = False
+        self._jpeg: bytes | None = None
+        self._changed = asyncio.Event()
+
+    def _signal(self) -> None:
+        changed = self._changed
+        self._changed = asyncio.Event()
+        changed.set()
+
+    def activate(self) -> int:
+        """开始一次新的用户预览会话；录制切换不会再次调用。"""
+
+        if self._active:
+            return self._session_id
+        self._session_id += 1
+        self._generation += 1
+        self._active = True
+        self._jpeg = None
+        self._signal()
+        return self._session_id
+
+    def deactivate(self) -> None:
+        """显式释放设备时关闭通道并丢弃最后一帧。"""
+
+        if not self._active and self._jpeg is None:
+            return
+        self._generation += 1
+        self._active = False
+        self._jpeg = None
+        self._signal()
+
+    def publish(self, jpeg: bytes) -> None:
+        if not self._active:
+            return
+        self._jpeg = jpeg
+        self._generation += 1
+        self._signal()
+
+    def snapshot(self) -> PreviewFrameSnapshot:
+        return PreviewFrameSnapshot(
+            session_id=self._session_id,
+            generation=self._generation,
+            active=self._active,
+            jpeg=self._jpeg,
+        )
+
+    async def wait_for_change(
+        self,
+        session_id: int,
+        generation: int,
+        *,
+        timeout: float = 0.5,
+    ) -> PreviewFrameSnapshot:
+        """等待新帧、会话切换或显式释放，避免返回 200 空流。"""
+
+        # 先抓取事件引用再读快照：publish() 若夹在两者之间，会唤醒这个旧事件；
+        # 反过来先读快照可能错过一次信号，只能等到超时再看到新帧。
+        changed = self._changed
+        current = self.snapshot()
+        if (
+            current.session_id != session_id
+            or current.generation != generation
+            or not current.active
+        ):
+            return current
+        try:
+            await asyncio.wait_for(changed.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
+        return self.snapshot()
+
+
 class FFmpegVideoRecorder:
     def __init__(
-        self, settings: VideoSettings, device: str, output_path: Path | None
+        self,
+        settings: VideoSettings,
+        device: str,
+        output_path: Path | None,
+        preview_hub: PreviewFrameHub | None = None,
     ) -> None:
         self.settings = settings
         self.device = device
@@ -179,7 +350,54 @@ class FFmpegVideoRecorder:
         self.latest_jpeg: bytes | None = None
         self.preview_generation = 0
         self.started_monotonic_ns: int | None = None
+        self.control_state = CameraControlState()
+        self.preview_hub = preview_hub
+        self._source_pts_seconds: deque[float] = deque()
+        self._preview_times: deque[float] = deque()
         self._tasks: list[asyncio.Task[Any]] = []
+
+    @staticmethod
+    def _rolling_fps(values: deque[float]) -> float:
+        if len(values) < 2 or values[-1] <= values[0]:
+            return 0.0
+        return (len(values) - 1) / (values[-1] - values[0])
+
+    def _trim_window(self, values: deque[float]) -> None:
+        if not values:
+            return
+        cutoff = values[-1] - self.settings.source_fps_window_seconds
+        while len(values) > 2 and values[0] < cutoff:
+            values.popleft()
+
+    @property
+    def source_fps(self) -> float:
+        return self._rolling_fps(self._source_pts_seconds)
+
+    @property
+    def preview_fps(self) -> float:
+        return self._rolling_fps(self._preview_times)
+
+    @property
+    def source_frame_count(self) -> int:
+        return len(self._source_pts_seconds)
+
+    @property
+    def frame(self) -> int:
+        return self.progress.frame
+
+    @property
+    def fps(self) -> float:
+        """旧 API 兼容别名；新界面应分别读取 source_fps/preview_fps。"""
+
+        return self.source_fps
+
+    @property
+    def bitrate(self) -> str:
+        return self.progress.bitrate
+
+    @property
+    def speed(self) -> str:
+        return self.progress.speed
 
     def command(self) -> list[str]:
         settings = self.settings
@@ -240,9 +458,23 @@ class FFmpegVideoRecorder:
                 self.device,
             ]
         )
+        source_stats_output = [
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "wrapped_avframe",
+            "-stats_enc_pre",
+            "pipe:2",
+            "-stats_enc_pre_fmt",
+            "source {n} {pts} {tb}",
+            "-f",
+            "null",
+            "/dev/null",
+        ]
         if self.output_path is None:
             command.extend(
                 [
+                    *source_stats_output,
                     "-vf",
                     f"fps={settings.preview_fps},scale={settings.preview_width}:-2",
                     "-c:v",
@@ -259,6 +491,7 @@ class FFmpegVideoRecorder:
             return command
         command.extend(
             [
+                *source_stats_output,
                 "-filter_complex",
                 split + record_filter + preview_filter,
                 *encoder,
@@ -295,12 +528,14 @@ class FFmpegVideoRecorder:
     async def start(self) -> None:
         if self.output_path is not None:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.started_monotonic_ns = __import__("time").monotonic_ns()
+        self.control_state = await apply_video_controls(self.settings, self.device)
+        self.started_monotonic_ns = time.monotonic_ns()
         self.process = await asyncio.create_subprocess_exec(
             *self.command(),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            close_fds=True,
         )
         self._tasks = [
             asyncio.create_task(self._read_preview()),
@@ -349,12 +584,30 @@ class FFmpegVideoRecorder:
                     break
                 self.latest_jpeg = bytes(buffer[start : end + 2])
                 self.preview_generation += 1
+                if self.preview_hub is not None:
+                    self.preview_hub.publish(self.latest_jpeg)
+                self._preview_times.append(time.monotonic())
+                self._trim_window(self._preview_times)
                 del buffer[: end + 2]
 
     async def _read_progress(self) -> None:
         assert self.process and self.process.stderr
         while line := await self.process.stderr.readline():
             text = line.decode(errors="replace").strip()
+            if text.startswith("source "):
+                fields = text.split()
+                if len(fields) == 4:
+                    try:
+                        pts = float(fields[2])
+                        numerator, denominator = fields[3].split("/", 1)
+                        seconds = pts * float(numerator) / float(denominator)
+                        self._source_pts_seconds.append(seconds)
+                        self._trim_window(self._source_pts_seconds)
+                    except (ValueError, ZeroDivisionError):
+                        self.progress.errors.append(text)
+                else:
+                    self.progress.errors.append(text)
+                continue
             if "=" not in text:
                 if text:
                     self.progress.errors.append(text)

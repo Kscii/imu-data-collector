@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from imu_data_collector.ble import CW12EUBleSource
+from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.models import (
@@ -59,11 +60,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, Any]:
-        return {"ok": True, **coordinator.snapshot()}
+        return {"ok": True, "build_id": CAPTURE_API_BUILD_ID, **coordinator.snapshot()}
 
     @app.get("/api/v1/config")
     async def config() -> dict[str, Any]:
         return {
+            "build_id": CAPTURE_API_BUILD_ID,
             "data_root": str(active_settings.data_root),
             "minimum_free_gib": active_settings.minimum_free_gib,
             "allowed_unikeys": list(active_settings.identity.allowed_unikeys),
@@ -75,8 +77,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "address": active_settings.imu.address,
                 "expected_rate_hz": active_settings.imu.expected_rate_hz,
                 "expected_rate_status": active_settings.imu.expected_rate_status,
+                "calibration_profile_id": active_settings.imu.calibration_profile_id,
                 "calibration_verified": bool(
-                    active_settings.imu.accel_counts_per_g
+                    active_settings.imu.calibration_verified
+                    and active_settings.imu.accel_counts_per_g
                     and active_settings.imu.gyro_counts_per_dps
                 ),
             },
@@ -84,7 +88,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "width": active_settings.video.width,
                 "height": active_settings.video.height,
                 "requested_fps": active_settings.video.requested_fps,
+                "preview_fps": active_settings.video.preview_fps,
                 "bitrate": active_settings.video.bitrate,
+                "manual_controls_enabled": (
+                    active_settings.video.manual_controls_enabled
+                ),
+                "prod_min_source_fps": active_settings.video.prod_min_source_fps,
+                "prod_min_span_fps": active_settings.video.prod_min_span_fps,
             },
             "upload": {
                 "enabled": active_settings.upload.enabled,
@@ -410,22 +420,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, media_type="video/x-matroska", filename=path.name)
 
     @app.get("/api/v1/preview.mjpeg")
-    async def preview(request: Request) -> StreamingResponse:
-        async def stream():
+    async def preview(
+        request: Request,
+        stream: Annotated[int, Query(ge=1)],
+    ) -> StreamingResponse:
+        initial = coordinator.preview_stream.snapshot()
+        if not initial.active or initial.session_id != stream:
+            raise HTTPException(status_code=409, detail="预览通道尚未建立或已经释放")
+
+        async def body():
             generation = -1
             while True:
                 if await request.is_disconnected():
                     return
-                recorder = coordinator.video
-                if recorder is None:
+                frame = coordinator.preview_stream.snapshot()
+                if not frame.active or frame.session_id != initial.session_id:
                     return
-                if recorder and recorder.latest_jpeg and recorder.preview_generation != generation:
-                    generation = recorder.preview_generation
-                    yield _mjpeg_part(recorder.latest_jpeg)
-                await asyncio.sleep(0.05)
+                if frame.jpeg is not None and frame.generation != generation:
+                    generation = frame.generation
+                    yield _mjpeg_part(frame.jpeg)
+                elif frame.jpeg is None:
+                    generation = frame.generation
+                await coordinator.preview_stream.wait_for_change(
+                    initial.session_id,
+                    generation,
+                )
 
         return StreamingResponse(
-            stream(),
+            body(),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",

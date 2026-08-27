@@ -1,6 +1,7 @@
 data_root: "~/IMUData"
 catalog_path: "~/.local/share/imu-data-collector/catalog.sqlite3"
 activity_taxonomy_path: "configs/activities.yaml"
+calibration_evidence_path: "configs/calibration-evidence.yaml"
 server_host: "127.0.0.1"
 server_port: 8765
 minimum_free_gib: 20
@@ -32,6 +33,8 @@ annotation:
   server_port: 8766
   catalog_path: "~/.local/share/imu-annotation/catalog.sqlite3"
   review_policy: "single_user"
+  # 大于 0 时由服务器后台持续扫描新的完整 manifest；0 表示关闭后台扫描。
+  catalog_refresh_interval_s: 10
 
 storage:
   # 默认不接触云端；需要手动发布时用私有 YAML 切换到 gcs。
@@ -48,8 +51,17 @@ imu:
   expected_rate_hz: 25.0
   expected_rate_status: "short_probe_observed_2026-08-25_pending_long_run"
   frame_size_bytes: 16
-  accel_counts_per_g: null
-  gyro_counts_per_dps: null
+  # 仅适用于地址 83:FC:90:14:1E:A4 的当前设备；原始计数始终另外保留。
+  calibration_profile_id: "cw12eu_t_83fc90141ea4_v1_20260827"
+  calibration_verified: true
+  accel_counts_per_g: 4096.0
+  gyro_counts_per_dps: 32.8
+  accel_bias_counts: [30.0, 48.0, -40.0]
+  gyro_bias_counts: [-17.0, 0.0, 10.0]
+  raw_axis_order: [0, 1, 2]
+  axis_signs: [1, -1, 1]
+  calibration_method: "six_face_static_and_multi_axis_360deg_engineering_v1"
+  calibration_evidence_sha256: null
 
 video:
   device: null
@@ -64,6 +76,16 @@ video:
   preview_width: 640
   preview_fps: 10
   vaapi_device: "/dev/dri/renderD128"
+  # 固定照明下锁定曝光，避免 C930c 自动曝光把输入帧率降到约 15 FPS。
+  manual_controls_enabled: true
+  auto_exposure: 1
+  exposure_time_absolute: 200
+  gain: 192
+  exposure_dynamic_framerate: 0
+  power_line_frequency: 1
+  source_fps_window_seconds: 5.0
+  prod_min_source_fps: 29.0
+  prod_min_span_fps: 27.0
 
 upload:
   enabled: false

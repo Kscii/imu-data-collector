@@ -52,7 +52,7 @@ gs://soft3888-label/
   captures/<recording_id>/capture.h5|video.mkv|preview.mp4|manifest.json
   reviews/<recording_id>/review.json
   diagnostics/sync-experiments/<experiment_id>.json
-  exports/<recording_id>/aligned30.h5
+  exports/<recording_id>/review-<revision>/aligned30-<digest>.h5
   releases/<release_id>/*.tar|manifest.json
   release-tombstones/<release_id>.json
 ```
@@ -63,8 +63,9 @@ gs://soft3888-label/
 训练发布位于 `releases/`，相同内容用指纹去重。撤销后有效 TAR 和 manifest 进入软删除，轻量
 墓碑继续保留。
 
-每日 systemd timer 运行孤儿清理：只删除 `captures/` 中超过 7 天仍无 manifest 的中断上传。
-完整录制不自动清理。
+每日 systemd timer 运行孤儿清理：删除超过 7 天仍无 manifest 的中断 capture、没有当前
+review/release 引用的旧导出，以及缺少 manifest 的 release TAR。当前有效导出、有效发布引用
+和完整录制不自动清理。
 
 ## GitHub Actions
 
@@ -136,9 +137,9 @@ curl --fail http://127.0.0.1:8766/api/v1/health
 加入 IAP 但没有私有邮箱映射的账号也被拒绝。合法账号进入后，页首应显示自己的 UniKey，且
 页面不能切换成别人。
 
-SQLite catalog 是可重建索引，丢失后由管理员调用 index refresh；`review.json` 和不可变采集
-制品不依赖 VM 启动盘。不要覆盖对象来“回滚”标注，正式修改通过 revision、重开和重新导出
-完成。
+SQLite catalog 是可重建索引。服务器默认每 10 秒扫描一次 Bucket，新 manifest 会自动进入
+索引；管理员也可以在页面点击“立即扫描 Bucket”强制刷新。`review.json` 和不可变采集制品
+不依赖 VM 启动盘。不要覆盖对象来“回滚”标注，正式修改通过 revision、重开和重新导出完成。
 
 Cloud Monitoring 至少为实例不可达、HTTPS 5xx 和磁盘空间设置基础告警；Billing Budget 建议
 设置 A$50、A$80、A$100 三档通知。Budget 是告警，不会自动停止资源。
