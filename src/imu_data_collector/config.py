@@ -63,6 +63,16 @@ class UploadSettings:
 
 
 @dataclass(slots=True)
+class BackgroundJobSettings:
+    """后台收尾和发布的资源及重试策略。"""
+
+    allow_during_recording: bool = True
+    retry_delays_seconds: tuple[float, float, float] = (5.0, 30.0, 120.0)
+    poll_interval_seconds: float = 0.5
+    subprocess_nice: int = 10
+
+
+@dataclass(slots=True)
 class StorageSettings:
     backend: str = "local"
     root: Path = Path("~/.local/share/imu-data-collector/objects")
@@ -115,6 +125,7 @@ class Settings:
     imu: ImuSettings = field(default_factory=ImuSettings)
     video: VideoSettings = field(default_factory=VideoSettings)
     upload: UploadSettings = field(default_factory=UploadSettings)
+    background_jobs: BackgroundJobSettings = field(default_factory=BackgroundJobSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     auth: AuthSettings = field(default_factory=AuthSettings)
     annotation: AnnotationSettings = field(default_factory=AnnotationSettings)
@@ -155,6 +166,12 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     imu = ImuSettings(**imu_values)
     video = VideoSettings(**values.pop("video", {}))
     upload = UploadSettings(**values.pop("upload", {}))
+    background_job_values = values.pop("background_jobs", {})
+    if "retry_delays_seconds" in background_job_values:
+        background_job_values["retry_delays_seconds"] = tuple(
+            background_job_values["retry_delays_seconds"]
+        )
+    background_jobs = BackgroundJobSettings(**background_job_values)
     storage_values = values.pop("storage", {})
     if "root" in storage_values:
         storage_values["root"] = Path(storage_values["root"])
@@ -188,6 +205,7 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         imu=imu,
         video=video,
         upload=upload,
+        background_jobs=background_jobs,
         storage=storage,
         auth=auth,
         annotation=annotation,

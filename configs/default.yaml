@@ -90,3 +90,11 @@ upload:
   enabled: false
   remote: "gdrive"
   remote_root: null
+
+background_jobs:
+  # 后台任务默认与采集低优先级并行；若实测影响帧率或丢包，改为 false 后重启。
+  allow_during_recording: true
+  # 首次执行失败后再自动重试三次。
+  retry_delays_seconds: [5, 30, 120]
+  poll_interval_seconds: 0.5
+  subprocess_nice: 10

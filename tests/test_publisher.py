@@ -34,7 +34,7 @@ async def test_publish_uses_h5_formal_start_and_repairs_legacy_manifest(
         )
         handle.create_group("imu")
 
-    async def preview(_mkv_path: Path, output_path: Path) -> Path:
+    async def preview(_mkv_path: Path, output_path: Path, **_kwargs) -> Path:
         output_path.write_bytes(b"preview")
         return output_path
 

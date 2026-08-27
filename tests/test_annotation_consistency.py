@@ -23,6 +23,8 @@ from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
+    ActivityTaxonomyCreateRequest,
+    ActivityTaxonomyUpdateRequest,
     AnnotationDocument,
     AnnotationReviewWorkflowRequest,
     ArtifactDescriptor,
@@ -388,6 +390,177 @@ def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None
             ),
             "xfan0282",
         )
+
+
+def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    app = create_annotation_app(settings, store)
+    service = app.state.annotation_service
+    service.refresh()
+
+    initial = service.taxonomy_definition()
+    created = service.create_taxonomy_activity(
+        ActivityTaxonomyCreateRequest(
+            expected_version=initial["version"],
+            binary_label="non_fall",
+            code="stair_climbing",
+            display_name_zh="上下楼梯",
+            display_name_en="Stair climbing",
+        )
+    )
+    assert created["version"] != initial["version"]
+    assert service.taxonomy_definition(initial["version"]) == initial
+
+    review = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="assign",
+            expected_revision=service.review(recording_id).revision,
+        ),
+        "xfan0282",
+    )
+    saved = service.save_annotations(
+        recording_id,
+        AnnotationDocument(
+            taxonomy_id=initial["taxonomy_id"],
+            taxonomy_version=initial["version"],
+            revision=review.annotations.revision + 1,
+            segments=[
+                ActivitySegment(
+                    segment_id="seg_001",
+                    start_ns=0,
+                    end_ns=1_000_000_000,
+                    binary_label=BinaryLabel.NON_FALL,
+                    activity_code="stair_climbing",
+                    annotator_id="xfan0282",
+                )
+            ],
+        ),
+        "xfan0282",
+        review.revision,
+    )
+    assert saved.taxonomy_version == created["version"]
+
+    disabled = service.update_taxonomy_activity(
+        "stair_climbing",
+        ActivityTaxonomyUpdateRequest(
+            expected_version=created["version"], active=False
+        ),
+    )
+    current_review = service.review(recording_id)
+    retained = saved.model_copy(update={"revision": saved.revision + 1})
+    assert service.save_annotations(
+        recording_id,
+        retained,
+        "xfan0282",
+        current_review.revision,
+    ).taxonomy_version == disabled["version"]
+
+    with pytest.raises(ValueError, match="停用标签不能用于新标注"):
+        service.save_annotations(
+            recording_id,
+            retained.model_copy(
+                update={
+                    "revision": retained.revision + 1,
+                    "segments": [
+                        *retained.segments,
+                        retained.segments[0].model_copy(
+                            update={
+                                "segment_id": "seg_002",
+                                "start_ns": 1_000_000_000,
+                                "end_ns": 2_000_000_000,
+                            }
+                        ),
+                    ],
+                }
+            ),
+            "xfan0282",
+            service.review(recording_id).revision,
+        )
+
+    with pytest.raises(ValueError, match="只能停用"):
+        service.delete_taxonomy_activity("stair_climbing", disabled["version"])
+
+
+def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    app = create_annotation_app(settings, store)
+    with TestClient(app) as client:
+        initial = client.get("/api/v1/taxonomy/admin")
+        assert initial.status_code == 200
+        version = initial.json()["version"]
+        created = client.post(
+            "/api/v1/taxonomy/activities",
+            json={
+                "expected_version": version,
+                "binary_label": "non_fall",
+                "code": "stair_climbing",
+                "display_name_zh": "上下楼梯",
+                "display_name_en": "Stair climbing",
+            },
+        )
+        assert created.status_code == 200
+        conflict = client.patch(
+            "/api/v1/taxonomy/activities/stair_climbing",
+            json={"expected_version": version, "active": False},
+        )
+        assert conflict.status_code == 409
+        latest = client.get("/api/v1/taxonomy/admin").json()
+        deleted = client.delete(
+            "/api/v1/taxonomy/activities/stair_climbing",
+            params={"expected_version": latest["version"]},
+        )
+        assert deleted.status_code == 200
+        assert all(
+            item["code"] != "stair_climbing"
+            for item in deleted.json()["non_fall"]
+        )
+
+    settings.auth.local_actor_id = "rkim6933"
+    member_app = create_annotation_app(settings, store)
+    with TestClient(member_app) as client:
+        assert client.get("/api/v1/taxonomy").status_code == 200
+        assert client.get("/api/v1/taxonomy/admin").status_code == 403
+
+
+def test_completed_review_exports_with_its_pinned_taxonomy_version(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    _ready_review(service, recording_id)
+    original_version = service.review(recording_id).annotations.taxonomy_version
+    current = service.taxonomy_definition()
+    service.create_taxonomy_activity(
+        ActivityTaxonomyCreateRequest(
+            expected_version=current["version"],
+            binary_label="non_fall",
+            code="stair_climbing",
+            display_name_zh="上下楼梯",
+            display_name_en="Stair climbing",
+        )
+    )
+
+    completed = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete",
+            expected_revision=service.review(recording_id).revision,
+        ),
+        "xfan0282",
+    )
+
+    assert completed.active_export is not None
+    assert completed.annotations.taxonomy_version == original_version
+    assert completed.annotations.taxonomy_version != service.taxonomy["version"]
 
 
 def test_configured_evidence_hash_must_match_actual_file(tmp_path: Path) -> None:

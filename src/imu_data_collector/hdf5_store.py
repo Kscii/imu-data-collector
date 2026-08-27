@@ -549,6 +549,7 @@ class CaptureH5Writer:
         width: int,
         height: int,
         requested_fps: float,
+        video_filename: str | None = None,
         ffmpeg_diagnostics: list[str] | None = None,
         camera_controls_requested: dict[str, int] | None = None,
         camera_controls_effective: dict[str, int] | None = None,
@@ -586,7 +587,7 @@ class CaptureH5Writer:
         )
         video.attrs.update(
             {
-                "path": video_path.name,
+                "path": video_filename or video_path.name,
                 "sha256": sha256_file(video_path),
                 "codec": codec,
                 "width": width,
@@ -613,6 +614,71 @@ class CaptureH5Writer:
             }
         )
         self.handle.flush()
+
+    def seal_for_finalization(
+        self,
+        ended_at_utc: str,
+        *,
+        callback_drops: int,
+    ) -> None:
+        """冻结采集输入并关闭 H5；耗时收尾由独立后台任务完成。"""
+
+        self._update_notification_counts()
+        self.handle["imu"].attrs["callback_drops"] = callback_drops
+        self.handle.attrs.update(
+            {
+                "capture_ended_at_utc": ended_at_utc,
+                "state": "pending_finalization",
+                "parse_errors": json.dumps(self.parse_errors[:20]),
+            }
+        )
+        self.handle.flush()
+        self.handle.close()
+
+    @classmethod
+    def open_for_finalization(
+        cls, path: Path, imu_settings: ImuSettings
+    ) -> CaptureH5Writer:
+        """从冻结的 partial 副本恢复只负责收尾的 writer。"""
+
+        writer = object.__new__(cls)
+        writer.path = path
+        writer.handle = h5py.File(path, "r+", libver="latest")
+        writer._disable_file_descriptor_inheritance()
+        writer.imu_settings = imu_settings
+        writer.recording_start_monotonic_ns = int(
+            writer.handle.attrs["recording_start_monotonic_ns"]
+        )
+        writer.recording_id = str(writer.handle.attrs["recording_id"])
+        writer.packet_count = int(
+            writer.handle.attrs.get(
+                "packet_count", len(writer.handle["imu/packets/receive_time_ns"])
+            )
+        )
+        writer.imu_packet_count = int(
+            writer.handle.attrs.get(
+                "imu_packet_count",
+                np.count_nonzero(writer.handle["imu/packets/parse_valid"][:]),
+            )
+        )
+        writer.auxiliary_notification_count = int(
+            writer.handle.attrs.get("auxiliary_notification_count", 0)
+        )
+        writer.unknown_notification_count = int(
+            writer.handle.attrs.get("unknown_notification_count", 0)
+        )
+        writer.sample_count = int(
+            writer.handle.attrs.get(
+                "sample_count", len(writer.handle["imu/samples/raw_counts"])
+            )
+        )
+        try:
+            writer.parse_errors = list(
+                json.loads(str(writer.handle.attrs.get("parse_errors", "[]")))
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            writer.parse_errors = []
+        return writer
 
     def write_sync(self, anchors: list[SyncAnchor]) -> SyncModel:
         """初始化无锚点状态；旧仿射拟合仅保留为只读兼容实现。"""

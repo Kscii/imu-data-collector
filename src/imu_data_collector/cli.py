@@ -424,7 +424,12 @@ def main() -> None:
         )
         print(
             json.dumps(
-                {"ready": report.ready, "issues": report.issues, "metrics": report.metrics},
+                {
+                    "ready": report.ready,
+                    "blocking_issues": report.issues,
+                    "quality_warnings": report.warnings,
+                    "metrics": report.metrics,
+                },
                 indent=2,
                 ensure_ascii=False,
             )

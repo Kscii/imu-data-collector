@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot from "./Plot";
+import { resolveAnnotationShortcut } from "./annotationShortcuts";
 import {
   apiErrorMessage,
   isEnglish,
@@ -13,7 +14,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数采平台", "IMU Data Collector");
 
-type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "library";
+type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library";
 
 const CAPTURE_FORM_KEY = "imu-capture-form-v1";
 
@@ -35,7 +36,7 @@ function nextCollectionId(current: string, participant: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", training: "library" }
+    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library" }
     : { capture: "capture", records: "library", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -68,11 +69,27 @@ type Recording = {
   started_at_utc: string;
   duration_ns?: number;
   issues: string[];
+  validation_issues?: string[];
+  quality_warnings?: string[];
   upload_state: string;
   index_state?: "not_requested" | "pending" | "indexed" | "rejected";
   index_message?: string;
   manifest_generation?: number | null;
   purpose?: "annotation" | "calibration_evidence";
+  h5_path?: string | null;
+  mkv_path?: string | null;
+  finalization_job?: BackgroundJob | null;
+  upload_job?: BackgroundJob | null;
+};
+
+type BackgroundJob = {
+  kind: "finalize" | "publish";
+  state: "queued" | "running" | "retry_wait" | "succeeded" | "failed";
+  phase: string;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at_utc?: string | null;
+  last_error?: string | null;
 };
 
 type CalibrationEvidence = {
@@ -154,8 +171,17 @@ type AnnotationDocument = {
 type Taxonomy = {
   taxonomy_id: string;
   version: string;
-  fall: { code: string; display_name_zh: string; display_name_en: string }[];
-  non_fall: { code: string; display_name_zh: string; display_name_en: string }[];
+  revision: number;
+  fall: TaxonomyEntry[];
+  non_fall: TaxonomyEntry[];
+};
+
+type TaxonomyEntry = {
+  code: string;
+  display_name_zh: string;
+  display_name_en: string;
+  active: boolean;
+  usage_count?: number;
 };
 
 type AppConfig = {
@@ -486,10 +512,54 @@ function tierLabel(tier: "test" | "prod") {
   return tier === "prod" ? "正式数据" : "测试数据";
 }
 
+function isTextEntryTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName);
+}
+
+const activeJobStates = new Set(["queued", "running", "retry_wait"]);
+
+function jobStateLabel(job: BackgroundJob) {
+  const state: Record<BackgroundJob["state"], string> = {
+    queued: "等待执行",
+    running: "正在执行",
+    retry_wait: "等待自动重试",
+    succeeded: "已完成",
+    failed: "需要人工重试",
+  };
+  const phase: Record<string, string> = {
+    queued: "排队",
+    starting: "准备启动",
+    copying_h5: "复制冻结的 H5",
+    reconstructing_imu: "重建 IMU 时间轴",
+    probing_source_video: "读取原始视频时间轴",
+    normalizing_video: "规范化视频时间轴",
+    probing_normalized_video: "复核规范化视频",
+    writing_h5: "写入视频与同步信息",
+    validating: "校验采集制品",
+    committing: "原子提交",
+    packaging: "生成发布制品",
+    uploading: "上传对象存储",
+    verifying: "校验远端制品",
+    completed: "完成",
+  };
+  return `${state[job.state]} · ${phase[job.phase] ?? job.phase}`;
+}
+
 function issueLabel(issue: string) {
+  const residualWarning = issue.match(
+    /^IMU packet timestamp maximum residual is ([0-9.]+) ms; warning threshold is 200 ms$/
+  );
+  if (residualWarning) {
+    return tr(
+      `IMU 包时间戳最大残差为 ${residualWarning[1]} ms，超过 200 ms 警告阈值`,
+      `IMU packet timestamp maximum residual is ${residualWarning[1]} ms, above the 200 ms warning threshold`,
+    );
+  }
   const labels: Record<string, string> = {
     "synchronization anchors have not been verified": "同步锚点尚未验证",
-    "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证"
+    "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证",
+    "IMU packet timestamp maximum residual exceeds 0.5 seconds": "IMU 包时间戳最大残差超过 0.5 秒",
   };
   return labels[issue] ?? userVisibleMessage(issue);
 }
@@ -542,6 +612,12 @@ export default function App() {
   }, [annotationApplication]);
 
   useEffect(() => {
+    if (annotationApplication && session && tab === "taxonomy" && !session.is_admin) {
+      selectTab("annotate");
+    }
+  }, [annotationApplication, session, tab]);
+
+  useEffect(() => {
     if (annotationApplication) return;
     sessionStorage.setItem(
       CAPTURE_FORM_KEY,
@@ -585,7 +661,10 @@ export default function App() {
     if (annotationApplication) {
       api<Session>("/api/v1/session").then(setSession).catch((e) => setCaptureError(e.message));
       refreshRecordings();
-      const recordingsTimer = window.setInterval(refreshRecordings, 10_000);
+      const recordingsTimer = window.setInterval(() => {
+        void refreshRecordings();
+        void api<Taxonomy>("/api/v1/taxonomy").then(setTaxonomy).catch((e) => setCaptureError(e.message));
+      }, 10_000);
       return () => window.clearInterval(recordingsTimer);
     }
     refreshRecordings();
@@ -734,7 +813,7 @@ export default function App() {
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button></> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button>{session?.is_admin && <button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button>}<button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button></> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
           {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
@@ -780,6 +859,7 @@ export default function App() {
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} onChanged={refreshRecordings} />
       )}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
+      {annotationApplication && tab === "taxonomy" && taxonomy && session?.is_admin && <TaxonomyAdminPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary recordings={recordings} onChanged={refreshRecordings} />}
     </div>
@@ -905,7 +985,8 @@ function CapturePage(props: any) {
           <Plot time={chart.t} values={chart.values} />
         </div>
       </section>
-      {live.recording?.issues?.length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{live.recording.issues.map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {(live.recording?.quality_warnings ?? []).length > 0 && <div className="warning-banner"><strong>上一次录制质量警告（允许发布）</strong>{live.recording.quality_warnings.map((warning: string) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
       {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div></div>}
       {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
       {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0} / 3 次自动重连。</div>}
@@ -973,6 +1054,136 @@ function Metric({ label, value, warn = false }: { label: string; value: string |
   return <div className={`metric ${warn ? "warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
+function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
+  const [definition, setDefinition] = useState<Taxonomy>(taxonomy);
+  const [binaryLabel, setBinaryLabel] = useState<"fall" | "non_fall">("non_fall");
+  const [code, setCode] = useState("");
+  const [nameZh, setNameZh] = useState("");
+  const [nameEn, setNameEn] = useState("");
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const refresh = async () => {
+    const value = await api<Taxonomy>("/api/v1/taxonomy/admin");
+    setDefinition(value);
+    onChanged(value);
+    return value;
+  };
+
+  useEffect(() => {
+    refresh().catch((value) => setError((value as Error).message));
+  }, []);
+
+  const createActivity = async () => {
+    setError("");
+    setMessage("");
+    setBusy("create");
+    try {
+      await api("/api/v1/taxonomy/activities", {
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: definition.version,
+          binary_label: binaryLabel,
+          code: code.trim(),
+          display_name_zh: nameZh.trim(),
+          display_name_en: nameEn.trim(),
+        })
+      });
+      await refresh();
+      setCode("");
+      setNameZh("");
+      setNameEn("");
+      setMessage(tr("活动标签已新增", "Activity label added"));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const updateActivity = async (entry: TaxonomyEntry, changes: Partial<TaxonomyEntry>) => {
+    setError("");
+    setMessage("");
+    setBusy(entry.code);
+    try {
+      await api(`/api/v1/taxonomy/activities/${encodeURIComponent(entry.code)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ expected_version: definition.version, ...changes })
+      });
+      await refresh();
+      setMessage(tr(`活动标签已更新：${entry.code}`, `Activity label updated: ${entry.code}`));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const deleteActivity = async (entry: TaxonomyEntry) => {
+    if (!window.confirm(tr(`永久删除从未使用的活动标签 ${entry.code}？`, `Permanently delete the unused activity label ${entry.code}?`))) return;
+    setError("");
+    setMessage("");
+    setBusy(entry.code);
+    try {
+      await api(`/api/v1/taxonomy/activities/${encodeURIComponent(entry.code)}?expected_version=${encodeURIComponent(definition.version)}`, { method: "DELETE" });
+      await refresh();
+      setMessage(tr(`活动标签已删除：${entry.code}`, `Activity label deleted: ${entry.code}`));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return <main className="taxonomy-admin">
+    {error && <div className="error-banner">{error}</div>}
+    {message && <div className="success-banner">{message}</div>}
+    <section className="panel taxonomy-intro">
+      <div><div className="panel-title">活动标签管理</div><strong>当前版本 {definition.version}</strong><p className="stage-help">标签 code 和跌倒类型创建后保持不变。已使用标签只能停用，历史标注仍按原版本解释。</p></div>
+      <span className="state">仅管理员</span>
+    </section>
+    <section className="panel taxonomy-create">
+      <div className="panel-title">新增活动标签</div>
+      <div className="taxonomy-create-fields">
+        <label>标签类型<select value={binaryLabel} onChange={(event) => setBinaryLabel(event.target.value as "fall" | "non_fall")}><option value="non_fall">非跌倒</option><option value="fall">跌倒</option></select></label>
+        <label>稳定 code<input value={code} onChange={(event) => setCode(event.target.value)} placeholder="例如 stair_climbing" /></label>
+        <label>中文名称<input value={nameZh} onChange={(event) => setNameZh(event.target.value)} /></label>
+        <label>English name<input value={nameEn} onChange={(event) => setNameEn(event.target.value)} /></label>
+        <button className="primary" disabled={busy !== "" || !code.trim() || !nameZh.trim() || !nameEn.trim()} onClick={createActivity}>新增标签</button>
+      </div>
+    </section>
+    {(["fall", "non_fall"] as const).map((label) => <section className="panel taxonomy-group" key={label}>
+      <div className="panel-title">{label === "fall" ? "跌倒活动" : "非跌倒活动"}</div>
+      {definition[label].map((entry) => <TaxonomyAdminRow key={entry.code} entry={entry} busy={busy === entry.code} onSave={updateActivity} onDelete={deleteActivity} />)}
+    </section>)}
+  </main>;
+}
+
+function TaxonomyAdminRow({ entry, busy, onSave, onDelete }: { entry: TaxonomyEntry; busy: boolean; onSave: (entry: TaxonomyEntry, changes: Partial<TaxonomyEntry>) => Promise<void>; onDelete: (entry: TaxonomyEntry) => Promise<void> }) {
+  const [nameZh, setNameZh] = useState(entry.display_name_zh);
+  const [nameEn, setNameEn] = useState(entry.display_name_en);
+
+  useEffect(() => {
+    setNameZh(entry.display_name_zh);
+    setNameEn(entry.display_name_en);
+  }, [entry.display_name_zh, entry.display_name_en]);
+
+  const changed = nameZh.trim() !== entry.display_name_zh || nameEn.trim() !== entry.display_name_en;
+  return <div className={`taxonomy-row ${entry.active ? "" : "taxonomy-row-inactive"}`}>
+    <code>{entry.code}</code>
+    <input aria-label={`${entry.code} 中文名称`} value={nameZh} onChange={(event) => setNameZh(event.target.value)} />
+    <input aria-label={`${entry.code} English name`} value={nameEn} onChange={(event) => setNameEn(event.target.value)} />
+    <span>{entry.usage_count ?? 0} 个区间</span>
+    <span className={`state ${entry.active ? "state-ready" : "state-needs_attention"}`}>{entry.active ? "启用" : "已停用"}</span>
+    <div className="taxonomy-row-actions">
+      <button disabled={busy || !changed || !nameZh.trim() || !nameEn.trim()} onClick={() => onSave(entry, { display_name_zh: nameZh.trim(), display_name_en: nameEn.trim() })}>保存名称</button>
+      <button disabled={busy} onClick={() => onSave(entry, { active: !entry.active })}>{entry.active ? "停用" : "恢复"}</button>
+      {(entry.usage_count ?? 0) === 0 && <button className="danger" disabled={busy} onClick={() => onDelete(entry)}>永久删除</button>}
+    </div>
+  </div>;
+}
+
 function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; session: Session; onChanged: () => Promise<Recording[]> }) {
   const [selected, setSelected] = useState("");
   const [doc, setDoc] = useState<AnnotationDocument | null>(null);
@@ -984,16 +1195,16 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   const [experimentBusy, setExperimentBusy] = useState(false);
   const [recommendationOffsetSource, setRecommendationOffsetSource] = useState<"formal_anchor" | "none">("none");
   const [annotationKind, setAnnotationKind] = useState<"fall" | "non_fall" | "exclude">("non_fall");
-  const [activity, setActivity] = useState(taxonomy.non_fall[0].code);
+  const [activity, setActivity] = useState(taxonomy.non_fall.find((item) => item.active)?.code ?? taxonomy.non_fall[0].code);
   const [exclusionReason, setExclusionReason] = useState<Exclusion["reason"]>("other");
   const [marks, setMarks] = useState<{ start?: number; end?: number; impact?: number }>({});
   const [currentTime, setCurrentTime] = useState(0);
   const annotator = session.unikey;
   const [sync, setSync] = useState<SyncState | null>(null);
-  const [selectedImuTime, setSelectedImuTime] = useState<number | null>(null);
   const [syncRole, setSyncRole] = useState<"start_tap" | "end_tap">("start_tap");
   const [review, setReview] = useState<ReviewDocument | null>(null);
   const [status, setStatus] = useState<RecordingStatus | null>(null);
+  const [recordingTaxonomy, setRecordingTaxonomy] = useState<Taxonomy>(taxonomy);
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -1045,6 +1256,20 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   }, [selected]);
 
   useEffect(() => {
+    if (!doc || doc.taxonomy_version === taxonomy.version) {
+      setRecordingTaxonomy(taxonomy);
+      return;
+    }
+    const controller = new AbortController();
+    api<Taxonomy>(`/api/v1/taxonomy?version=${encodeURIComponent(doc.taxonomy_version)}`, { signal: controller.signal })
+      .then(setRecordingTaxonomy)
+      .catch((value) => {
+        if ((value as Error).name !== "AbortError") setError((value as Error).message);
+      });
+    return () => controller.abort();
+  }, [doc?.taxonomy_version, taxonomy.version]);
+
+  useEffect(() => {
     if (!frameTimes?.frame_count || !video.current) return;
     const previewFrame = nearestIndex(
       frameTimes.media_time_ns,
@@ -1057,9 +1282,11 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
 
   useEffect(() => {
     if (annotationKind === "exclude") return;
-    const choices = taxonomy[annotationKind];
-    setActivity(choices[0].code);
-  }, [annotationKind]);
+    const choices = taxonomy[annotationKind].filter((item) => item.active);
+    if (!choices.some((item) => item.code === activity)) {
+      setActivity(choices[0]?.code ?? "");
+    }
+  }, [annotationKind, taxonomy.version]);
 
   const updateVideoPosition = (mediaTime: number) => {
     if (frameTimes) {
@@ -1363,7 +1590,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
     }
   };
 
-  const choices = annotationKind === "exclude" ? [] : taxonomy[annotationKind];
+  const choices = annotationKind === "exclude" ? [] : taxonomy[annotationKind].filter((item) => item.active);
   const saveSync = async (applyFixedOffset = false) => {
     if (!sync || !selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator) return;
     setError("");
@@ -1483,6 +1710,40 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
         : review.workflow.annotator_id !== annotator
           ? `任务当前由 ${review.workflow.annotator_id} 负责；接管后才能修改`
           : "";
+  const displayTaxonomy = review?.workflow.state === "completed" ? recordingTaxonomy : taxonomy;
+  const activityDisplay = (code: string) => {
+    const entry = [...displayTaxonomy.fall, ...displayTaxonomy.non_fall].find((item) => item.code === code);
+    if (!entry) return code;
+    return `${isEnglish ? entry.display_name_en : entry.display_name_zh} · ${code}${entry.active ? "" : " · 已停用"}`;
+  };
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      const action = resolveAnnotationShortcut(
+        {
+          code: event.code,
+          key: event.key,
+          shiftKey: event.shiftKey,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          altKey: event.altKey,
+          repeat: event.repeat,
+          isComposing: event.isComposing,
+          textEntryFocused: isTextEntryTarget(event.target),
+        },
+        canEdit,
+        annotationKind === "fall",
+      );
+      if (!action) return;
+      event.preventDefault();
+      if (action.kind === "step") stepFrame(action.delta);
+      else if (action.kind === "mark") mark(action.target);
+      else if (action.kind === "select") setAnnotationKind(action.target);
+      else void save(false);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [annotationKind, canEdit, currentFrame, currentTime, frameTimes, doc, review, selected]);
 
   return (
     <main className="annotation-layout">
@@ -1513,37 +1774,40 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
               {canReopen && <button onClick={() => changeWorkflow("reopen")}>重开并继续修改</button>}
             </div>
           </div>}
+          <div className="annotation-editor">
+          <section className="annotation-media-column">
           <div className="panel video-review">
             <video
               ref={video}
               controls
               tabIndex={0}
+              aria-keyshortcuts=", . Shift+, Shift+. I O 2 F N X Control+S"
               src={`/api/v1/recordings/${selected}/video`}
               onTimeUpdate={(event) => updateVideoPosition(event.currentTarget.currentTime)}
               onSeeked={(event) => updateVideoPosition(event.currentTarget.currentTime)}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowLeft" || event.key === ",") { event.preventDefault(); stepFrame(-1); }
-                if (event.key === "ArrowRight" || event.key === ".") { event.preventDefault(); stepFrame(1); }
-                if (event.key.toLowerCase() === "i") { event.preventDefault(); mark("start"); }
-                if (event.key.toLowerCase() === "o") { event.preventDefault(); mark("end"); }
-                if (event.key === "2" && annotationKind === "fall") { event.preventDefault(); mark("impact"); }
-                if (event.key.toLowerCase() === "f") setAnnotationKind("fall");
-                if (event.key.toLowerCase() === "n") setAnnotationKind("non_fall");
-                if (event.key.toLowerCase() === "x") setAnnotationKind("exclude");
-                if (event.ctrlKey && event.key.toLowerCase() === "s") { event.preventDefault(); save(false); }
-              }}
             />
             <div className="frame-controls">
-              <button onClick={() => stepFrame(-1)} disabled={!frameTimes || currentFrame <= 0}>上一帧</button>
+              <button onClick={() => stepFrame(-5)} disabled={!frameTimes || currentFrame <= 0}>向前 5 帧</button>
+              <button onClick={() => stepFrame(-1)} disabled={!frameTimes || currentFrame <= 0}>向前 1 帧</button>
               <span>零基帧 {currentFrame} / {frameTimes ? frameTimes.frame_count - 1 : "—"}</span>
-              <span>录制时间 {frameTimes ? (frameTimes.time_ns[currentFrame] / 1e9).toFixed(9) : "—"} s</span>
-              <span>媒体 PTS {frameTimes ? (frameTimes.media_time_ns[currentFrame] / 1e9).toFixed(9) : "—"} s</span>
-              <button onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>下一帧</button>
+              <span>录制时间 {currentTime.toFixed(3)} s</span>
+              <button onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>向后 1 帧</button>
+              <button onClick={() => stepFrame(5)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>向后 5 帧</button>
               <button className="primary" title={editDisabledReason} onClick={loadExperimentWindow} disabled={!canEdit || !frameTimes || experimentBusy}>此帧是{syncRole === "start_tap" ? "开始" : "结束"}轻拍首次接触</button>
             </div>
             {!canEdit && <p className="stage-help warning-text">{editDisabledReason}</p>}
-            <details><summary>视频与快捷键说明</summary><p className="stage-help">页面从约 0.2 秒处开始预览以避开摄像头启动过渡；原始第 0 帧仍完整保留。暂停到手首次接触 IMU 的画面后，可用键盘 ←/→ 或 ,/. 逐帧移动；帧号从 0 开始，所有同步和标注均使用真实逐帧时间戳。</p></details>
+            <details><summary>视频与快捷键说明</summary><p className="stage-help">页面从约 0.2 秒处开始预览以避开摄像头启动过渡；原始第 0 帧仍完整保留。全局使用 ,/. 移动一帧，Shift+,/. 移动五帧；I/O/2 标记开始、结束和撞击，F/N/X 切换标注类型。输入控件聚焦时快捷键自动停用。</p><p className="stage-help">媒体 PTS {frameTimes ? (frameTimes.media_time_ns[currentFrame] / 1e9).toFixed(9) : "—"} s · 所有同步和标注使用真实逐帧录制时间戳。</p></details>
           </div>
+
+          <div className="panel full-timeline-panel">
+            <div className="panel-title">完整录制 IMU · {timeline?.unit} · {timeline?.time_s.length ?? 0} 个显示点</div>
+            <div className="timeline-time-readout"><strong>当前视频 {currentTime.toFixed(3)} s</strong><span>零基帧 {currentFrame}</span></div>
+            {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} height={250} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} />}
+            <p className="stage-help compact-help">点击曲线可将视频跳转到最接近的真实帧。</p>
+          </div>
+          </section>
+
+          <section className="annotation-task-column">
 
           <div className="panel sync-panel">
             <div className="panel-title">第 1 步 · 开始/结束轻拍同步复核</div>
@@ -1601,7 +1865,6 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             </div>
           </div>
 
-          <div className="panel"><div className="panel-title">完整录制 IMU · {timeline?.unit} · {timeline?.time_s.length ?? 0} 个显示点 · 正式标注与同步复核</div>{timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} height={250} onSelectTime={setSelectedImuTime} />}</div>
           <div className="panel sync-panel">
             <div className="panel-title">同步结论 · 条件式固定偏移</div>
             <p className="stage-help">时间比例固定为 1.0；只有估计偏移至少 0.1 秒且首尾差不超过 0.1 秒时，才建议平移 IMU。原始主机时间永不覆盖。</p>
@@ -1648,7 +1911,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
               return <div className="segment-row" key={segment.segment_id}>
                 <span>{segment.segment_id}</span>
                 <strong>{segment.binary_label === "fall" ? "跌倒" : "非跌倒"}</strong>
-                <span>{segment.activity_code}</span>
+                <span>{activityDisplay(segment.activity_code)}</span>
                 <span>{seconds(segment.start_ns)} → {seconds(segment.end_ns)}</span>
                 {segment.binary_label === "fall" && <span className={impact ? "success-text" : "warning-text"}>撞击 {seconds(impact?.time_ns)}</span>}
                 {segment.binary_label === "fall" && impact && <button onClick={() => jumpToRecordingTime(impact.time_ns)}>跳转撞击帧</button>}
@@ -1687,6 +1950,8 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
                 </>}
             </div>
           </div>}
+          </section>
+          </div>
         </>}
       </section>
     </main>
@@ -1788,7 +2053,11 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
 
   useEffect(() => {
     const pending = recordings.filter((recording) => recording.index_state === "pending");
-    if (pending.length === 0) return;
+    const hasActiveJobs = recordings.some((recording) =>
+      [recording.finalization_job, recording.upload_job]
+        .some((job) => job && activeJobStates.has(job.state))
+    );
+    if (pending.length === 0 && !hasActiveJobs) return;
     let active = true;
     const poll = async () => {
       await Promise.allSettled(
@@ -1804,7 +2073,7 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
       active = false;
       window.clearInterval(timer);
     };
-  }, [recordings.map((item) => `${item.recording_id}:${item.index_state}`).join("|")]);
+  }, [recordings.map((item) => `${item.recording_id}:${item.index_state}:${item.finalization_job?.state}:${item.finalization_job?.phase}:${item.upload_job?.state}:${item.upload_job?.phase}`).join("|")]);
 
   const publish = async (recording: Recording) => {
     setError("");
@@ -1815,13 +2084,40 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
       const gib = estimate.estimated_bytes / 1024 ** 3;
       if (!window.confirm(`将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。\n预计读取或上传约 ${gib.toFixed(2)} GiB，继续吗？`)) return;
       await api(`/api/v1/recordings/${recording.recording_id}/publish`, { method: "POST" });
-      setMessage(`已上传 Bucket，正在等待标注端接收：${recording.recording_id}`);
+      setMessage(`已加入后台上传队列：${recording.recording_id}`);
       onChanged();
     } catch (e) {
       setError((e as Error).message);
       onChanged();
     } finally {
       setBusy("");
+    }
+  };
+
+  const retryFinalization = async (recording: Recording) => {
+    setError("");
+    setMessage("");
+    setBusy(recording.recording_id);
+    try {
+      await api(`/api/v1/recordings/${recording.recording_id}/finalization/retry`, {
+        method: "POST"
+      });
+      setMessage(`已加入后台收尾队列：${recording.recording_id}`);
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+      onChanged();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const copyRecordingId = async (recordingId: string) => {
+    try {
+      await navigator.clipboard.writeText(recordingId);
+      setMessage(`已复制录制 ID：${recordingId}`);
+    } catch (e) {
+      setError((e as Error).message);
     }
   };
 
@@ -1869,7 +2165,7 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
-      <div className="panel-title">本地录制与手动发布</div>
+      <div className="panel-title">本地录制与后台处理</div>
       <p className="stage-help">这里只负责确认采集结果并交给标注存储；同步、标注和训练快照在独立标注平台完成。</p>
       {recordings.map((recording) => <article key={recording.recording_id}>
         <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {tierLabel(recording.data_tier)} · {seconds(recording.duration_ns)}</span></div>
@@ -1880,12 +2176,17 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
           {recording.index_state === "pending" && <span>等待标注端接收</span>}
           {recording.index_state === "rejected" && <span className="warning-text">标注端拒绝</span>}
         </div>
+        {recording.finalization_job && <p className={recording.finalization_job.state === "failed" ? "warning-text" : "stage-help"}>后台收尾：{jobStateLabel(recording.finalization_job)} · 尝试 {recording.finalization_job.attempts}/{recording.finalization_job.max_attempts}{recording.finalization_job.last_error ? ` · ${recording.finalization_job.last_error}` : ""}</p>}
+        {recording.upload_job && <p className={recording.upload_job.state === "failed" ? "warning-text" : "stage-help"}>后台上传：{jobStateLabel(recording.upload_job)} · 尝试 {recording.upload_job.attempts}/{recording.upload_job.max_attempts}{recording.upload_job.last_error ? ` · ${recording.upload_job.last_error}` : ""}</p>}
         {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{recording.index_message}</p>}
         <div className="save-row">
-          <button className="primary" disabled={recording.state !== "ready" || busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在发布…" : ["uploaded", "published"].includes(recording.upload_state) ? "重新校验发布" : "估算并发布"}</button>
-          <button className="danger" disabled={Boolean(busy)} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
+          {recording.h5_path?.endsWith(".partial.h5") && recording.mkv_path?.endsWith(".partial.mkv") && !activeJobStates.has(recording.finalization_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => retryFinalization(recording)}>{busy === recording.recording_id ? "正在提交…" : "重新收尾"}</button>}
+          {recording.state === "ready" && !["uploaded", "published"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在提交…" : recording.upload_job?.state === "failed" ? "重新上传" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并发布"}</button>}
+          <button onClick={() => copyRecordingId(recording.recording_id)}>复制录制 ID</button>
+          <button className="danger" disabled={Boolean(busy) || [recording.finalization_job, recording.upload_job].some((job) => job && activeJobStates.has(job.state))} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>
-        {recording.issues.length > 0 && <ul>{recording.issues.map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
+        {[...recording.issues, ...(recording.validation_issues ?? [])].length > 0 && <ul>{[...recording.issues, ...(recording.validation_issues ?? [])].map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
+        {(recording.quality_warnings ?? []).length > 0 && <ul className="warning-text">{recording.quality_warnings?.map((warning) => <li key={warning}>质量警告（允许发布）：{issueLabel(warning)}</li>)}</ul>}
       </article>)}
     </section>
     <section className="panel library">

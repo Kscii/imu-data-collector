@@ -261,6 +261,55 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
     assert validate_capture_h5(path, taxonomy()).ready
 
 
+@pytest.mark.parametrize(
+    ("maximum_ns", "ready", "warning_count", "blocking_issue"),
+    [
+        (200_000_000, True, 0, None),
+        (200_000_001, True, 1, None),
+        (500_000_000, True, 1, None),
+        (
+            500_000_001,
+            False,
+            0,
+            "IMU packet timestamp maximum residual exceeds 0.5 seconds",
+        ),
+    ],
+)
+def test_packet_timestamp_maximum_residual_uses_tiered_gate(
+    tmp_path: Path,
+    maximum_ns: int,
+    ready: bool,
+    warning_count: int,
+    blocking_issue: str | None,
+) -> None:
+    path = build_capture(tmp_path)
+    with h5py.File(path, "r+") as handle:
+        handle["imu"].attrs["packet_end_fit_residual_rms_ns"] = 10_000_000.0
+        handle["imu"].attrs["packet_end_fit_residual_max_abs_ns"] = maximum_ns
+
+    report = validate_capture_h5(path, taxonomy())
+
+    assert report.ready is ready
+    assert len(report.warnings) == warning_count
+    if warning_count:
+        assert f"{maximum_ns / 1e6:.3f} ms" in report.warnings[0]
+    if blocking_issue is not None:
+        assert blocking_issue in report.issues
+
+
+def test_packet_timestamp_fit_rms_remains_blocking(tmp_path: Path) -> None:
+    path = build_capture(tmp_path)
+    with h5py.File(path, "r+") as handle:
+        handle["imu"].attrs["packet_end_fit_residual_rms_ns"] = 100_000_001.0
+        handle["imu"].attrs["packet_end_fit_residual_max_abs_ns"] = 250_000_000
+
+    report = validate_capture_h5(path, taxonomy())
+
+    assert not report.ready
+    assert "IMU packet timestamp fit RMS exceeds 0.1 seconds" in report.issues
+    assert len(report.warnings) == 1
+
+
 def test_auxiliary_notifications_are_preserved_without_blocking_validation(
     tmp_path: Path,
 ) -> None:

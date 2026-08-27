@@ -26,6 +26,8 @@ from imu_data_collector.auth import (
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.models import (
+    ActivityTaxonomyCreateRequest,
+    ActivityTaxonomyUpdateRequest,
     AnnotationRecordingDeleteRequest,
     AnnotationReviewWorkflowRequest,
     AnnotationSaveRequest,
@@ -166,8 +168,63 @@ def create_annotation_app(
         return current_actor(request).public_dict()
 
     @app.get("/api/v1/taxonomy")
-    def taxonomy() -> dict[str, Any]:
-        return service.taxonomy
+    def taxonomy(
+        version: Annotated[str | None, Query(max_length=80)] = None,
+    ) -> dict[str, Any]:
+        try:
+            return service.taxonomy_definition(version)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该活动标签版本") from error
+
+    @app.get("/api/v1/taxonomy/admin")
+    def taxonomy_admin(request: Request) -> dict[str, Any]:
+        admin_actor(request)
+        return service.taxonomy_admin_summary()
+
+    @app.post("/api/v1/taxonomy/activities")
+    def create_taxonomy_activity(
+        body: ActivityTaxonomyCreateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        admin_actor(request)
+        try:
+            return service.create_taxonomy_activity(body)
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.patch("/api/v1/taxonomy/activities/{code}")
+    def update_taxonomy_activity(
+        code: str,
+        body: ActivityTaxonomyUpdateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        admin_actor(request)
+        try:
+            return service.update_taxonomy_activity(code, body)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该活动标签") from error
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.delete("/api/v1/taxonomy/activities/{code}")
+    def delete_taxonomy_activity(
+        code: str,
+        request: Request,
+        expected_version: Annotated[str, Query(min_length=1, max_length=80)],
+    ) -> dict[str, Any]:
+        admin_actor(request)
+        try:
+            return service.delete_taxonomy_activity(code, expected_version)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该活动标签") from error
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.post("/api/v1/index/refresh")
     def refresh(request: Request) -> dict[str, Any]:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import shutil
 import time
 from datetime import UTC, datetime
@@ -21,6 +23,10 @@ from imu_data_collector.cw12eu import (
     classify_notification,
     parse_notification,
 )
+from imu_data_collector.finalization import (
+    cleanup_partial_inputs,
+    finalize_recording,
+)
 from imu_data_collector.hdf5_store import CaptureH5Writer
 from imu_data_collector.maintenance import (
     hard_delete_recording,
@@ -29,6 +35,8 @@ from imu_data_collector.maintenance import (
     scan_incomplete_files,
 )
 from imu_data_collector.models import (
+    BackgroundJobKind,
+    BackgroundJobState,
     CharacterizationStageRequest,
     CharacterizationStartRequest,
     DataTier,
@@ -47,10 +55,10 @@ from imu_data_collector.video import (
     FFmpegVideoRecorder,
     PreviewFrameHub,
     discover_video_devices,
-    normalize_video_timeline,
-    probe_video_frames,
     select_video_device,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RecordingCoordinator:
@@ -100,6 +108,10 @@ class RecordingCoordinator:
         self._video_transition: str | None = None
         self._recording_accepts_imu = False
         self._preview_open_in_flight = False
+        self._job_worker: asyncio.Task[Any] | None = None
+        self._stop_jobs = asyncio.Event()
+        self._jobs_changed = asyncio.Event()
+        self._active_job: dict[str, str] | None = None
 
     def _require_allowed_unikey(self, value: str, field_name: str) -> None:
         if value not in self.settings.identity.allowed_unikeys:
@@ -738,8 +750,203 @@ class RecordingCoordinator:
             snapshot["release_warnings"] = issues
         return snapshot
 
+    async def start_background_jobs(self) -> dict[str, int]:
+        """恢复被服务重启中断的任务，并启动唯一后台 worker。"""
+
+        requeued = self.catalog.requeue_interrupted_jobs()
+        self._stop_jobs.clear()
+        if self._job_worker is None or self._job_worker.done():
+            self._job_worker = asyncio.create_task(
+                self._background_job_loop(), name="recording-background-jobs"
+            )
+        self._jobs_changed.set()
+        return {"requeued": requeued}
+
+    async def stop_background_jobs(self) -> None:
+        self._stop_jobs.set()
+        self._jobs_changed.set()
+        worker = self._job_worker
+        self._job_worker = None
+        if worker is None:
+            return
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        self._active_job = None
+
+    def _wake_background_jobs(self) -> None:
+        self._jobs_changed.set()
+
+    async def _background_job_loop(self) -> None:
+        poll = max(0.1, self.settings.background_jobs.poll_interval_seconds)
+        while not self._stop_jobs.is_set():
+            if (
+                not self.settings.background_jobs.allow_during_recording
+                and self.state == RecordingState.RECORDING
+            ):
+                try:
+                    await asyncio.wait_for(self._jobs_changed.wait(), timeout=poll)
+                except TimeoutError:
+                    pass
+                self._jobs_changed.clear()
+                continue
+            claimed = await asyncio.to_thread(self.catalog.claim_next_job)
+            if claimed is None:
+                try:
+                    await asyncio.wait_for(self._jobs_changed.wait(), timeout=poll)
+                except TimeoutError:
+                    pass
+                self._jobs_changed.clear()
+                continue
+            recording_id, job, payload = claimed
+            self._active_job = {
+                "recording_id": recording_id,
+                "kind": job.kind.value,
+            }
+            try:
+                if job.kind == BackgroundJobKind.FINALIZE:
+                    await self._run_finalization_job(recording_id, payload)
+                else:
+                    await self._run_publish_job(recording_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                message = self._error_message(error, "后台任务失败")
+                status = await asyncio.to_thread(
+                    self.catalog.fail_job,
+                    recording_id,
+                    job.kind,
+                    message,
+                    self.settings.background_jobs.retry_delays_seconds,
+                )
+                summary = self.catalog.get(recording_id)
+                if summary is not None:
+                    if job.kind == BackgroundJobKind.FINALIZE:
+                        update: dict[str, Any] = {"state": RecordingState.FINALIZING}
+                        if status.state == BackgroundJobState.FAILED:
+                            update = {
+                                "state": RecordingState.NEEDS_ATTENTION,
+                                "issues": [message],
+                            }
+                    else:
+                        update = {
+                            "upload_state": (
+                                "retry_wait"
+                                if status.state == BackgroundJobState.RETRY_WAIT
+                                else "failed"
+                            )
+                        }
+                    self.catalog.upsert(summary.model_copy(update=update))
+                logger.exception(
+                    "后台任务失败：recording=%s kind=%s state=%s",
+                    recording_id,
+                    job.kind.value,
+                    status.state.value,
+                )
+            finally:
+                self._active_job = None
+
+    async def _run_finalization_job(
+        self, recording_id: str, payload: dict[str, Any]
+    ) -> None:
+        summary = self._required_summary(recording_id)
+
+        def phase(value: str) -> None:
+            self.catalog.update_job_phase(
+                recording_id, BackgroundJobKind.FINALIZE, value
+            )
+
+        result = await finalize_recording(
+            summary, payload, self.settings, self.taxonomy, phase
+        )
+        preserved_issues = [str(item) for item in payload.get("preserved_issues") or []]
+        validation_issues = list(dict.fromkeys(result.report.issues))
+        warnings = list(
+            dict.fromkeys((*result.report.warnings, *result.recovery_warnings))
+        )
+        state = (
+            RecordingState.READY
+            if not preserved_issues and not validation_issues
+            else RecordingState.NEEDS_ATTENTION
+        )
+        updated = summary.model_copy(
+            update={
+                "state": state,
+                "ended_at_utc": result.ended_at_utc,
+                "duration_ns": result.duration_ns,
+                "h5_path": str(result.h5_path),
+                "mkv_path": str(result.mkv_path),
+                "issues": preserved_issues,
+                "validation_issues": validation_issues,
+                "quality_warnings": warnings,
+            }
+        )
+        await asyncio.to_thread(self.catalog.commit_finalization, updated)
+        try:
+            await asyncio.to_thread(cleanup_partial_inputs, summary)
+        except OSError:
+            # 最终制品和目录索引已经原子提交；遗留 partial 只占空间，不能把
+            # 已成功的收尾重新标成失败。维护扫描可随后清理它。
+            logger.warning("收尾成功但清理 partial 失败：%s", recording_id, exc_info=True)
+        if state == RecordingState.READY and updated.data_tier == DataTier.PROD:
+            try:
+                self.catalog.enqueue_job(
+                    recording_id,
+                    BackgroundJobKind.PUBLISH,
+                    max_attempts=(
+                        len(self.settings.background_jobs.retry_delays_seconds) + 1
+                    ),
+                )
+                self.catalog.upsert(
+                    updated.model_copy(update={"upload_state": "queued"})
+                )
+                self._wake_background_jobs()
+            except Exception:
+                # 收尾已经原子完成，发布排队属于下一生命周期，不能反向回滚
+                # 或把有效的最终 H5/MKV 改回 finalizing。
+                self.catalog.upsert(
+                    updated.model_copy(update={"upload_state": "failed"})
+                )
+                logger.exception("正式录制已收尾，但自动发布入队失败：%s", recording_id)
+
+    async def _run_publish_job(self, recording_id: str) -> None:
+        summary = self._required_summary(recording_id)
+        if summary.state != RecordingState.READY:
+            raise ValueError("只有通过采集验证的 ready 录制可以发布")
+        self.catalog.update_job_phase(
+            recording_id, BackgroundJobKind.PUBLISH, "packaging"
+        )
+        summary = summary.model_copy(update={"upload_state": "packaging"})
+        self.catalog.upsert(summary)
+        self.catalog.update_job_phase(
+            recording_id, BackgroundJobKind.PUBLISH, "uploading"
+        )
+        summary = summary.model_copy(update={"upload_state": "uploading"})
+        self.catalog.upsert(summary)
+        manifest, manifest_generation = await publish_recording(
+            summary, self.settings, self.object_store
+        )
+        self.catalog.update_job_phase(
+            recording_id, BackgroundJobKind.PUBLISH, "verifying"
+        )
+        manifest_key = f"captures/{recording_id}/manifest.json"
+        if await asyncio.to_thread(self.object_store.stat, manifest_key) is None:
+            raise RuntimeError("远端 manifest 验证失败")
+        updated = summary.model_copy(
+            update={
+                "upload_state": "uploaded",
+                "index_state": "pending",
+                "index_message": "已上传 Bucket，等待标注端扫描并回执",
+                "manifest_generation": manifest_generation,
+            }
+        )
+        self.catalog.upsert(updated)
+        self.catalog.complete_job(recording_id, BackgroundJobKind.PUBLISH)
+        logger.info("后台发布完成：%s (%s)", recording_id, manifest.schema_version)
+
     async def shutdown(self) -> None:
         """服务退出时释放设备；正式会话保留 partial 并明确标记失败。"""
+
+        await self.stop_background_jobs()
 
         async with self._lock:
             mode = self.mode
@@ -910,6 +1117,25 @@ class RecordingCoordinator:
                 ):
                     details = "；".join(self.video.control_state.errors)
                     raise RuntimeError(f"正式录制摄像头控制未生效：{details}")
+                self.writer.handle["video"].attrs.update(
+                    {
+                        "camera_controls_requested_json": json.dumps(
+                            getattr(self.video.control_state, "requested", {}),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "camera_controls_effective_json": json.dumps(
+                            getattr(self.video.control_state, "effective", {}),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "camera_control_errors_json": json.dumps(
+                            getattr(self.video.control_state, "errors", []),
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+                self.writer.handle.flush()
                 capture_start_ns = self.video.started_monotonic_ns or time.monotonic_ns()
                 capture_started_at = datetime.now(UTC).isoformat()
                 self.writer.set_recording_start(
@@ -1106,11 +1332,14 @@ class RecordingCoordinator:
                 or self.mode != "capture"
             ):
                 raise RuntimeError("no active recording")
+            recording = self.current
             self.state = RecordingState.FINALIZING
             self.device_state = DeviceSessionState.RELEASING
             capture_ended_at = datetime.now(UTC).isoformat()
-            self.current = self.current.model_copy(update={"state": self.state})
-            self.catalog.upsert(self.current)
+            recording = recording.model_copy(
+                update={"state": RecordingState.FINALIZING, "ended_at_utc": capture_ended_at}
+            )
+            self.catalog.upsert(recording)
             issues: list[str] = []
             assert self.video and self.ble and self.writer
             capture_video = self.video
@@ -1129,126 +1358,57 @@ class RecordingCoordinator:
                     "ble_retained_after_capture", time.monotonic_ns()
                 )
             except Exception as error:
-                issues.append(str(error))
-
-            partial_h5 = Path(self.current.h5_path or "")
-            partial_mkv = Path(self.current.mkv_path or "")
-            final_h5 = partial_h5.with_name(partial_h5.name.replace(".partial.h5", ".h5"))
-            final_mkv = partial_mkv.with_name(partial_mkv.name.replace(".partial.mkv", ".mkv"))
-            normalizing_mkv = partial_mkv.with_name(
-                partial_mkv.name.replace(".partial.mkv", ".normalizing.mkv")
-            )
+                issues.append(self._error_message(error, "无法记录 BLE 保持事件"))
             try:
-                rate, _residual = capture_writer.reconstruct_times()
-                self.observed_rate_hz = rate
-                capture_writer.handle["imu"].attrs["callback_drops"] = (
-                    capture_ble.dropped_callback_packets
+                capture_writer.seal_for_finalization(
+                    capture_ended_at,
+                    callback_drops=capture_ble.dropped_callback_packets,
                 )
-                if not partial_mkv.is_file() or partial_mkv.stat().st_size == 0:
-                    raise ValueError("FFmpeg produced no MKV data")
-                frame_table = await probe_video_frames(
-                    partial_mkv, capture_writer.recording_start_monotonic_ns
-                )
-                await normalize_video_timeline(partial_mkv, normalizing_mkv)
-                normalized_table = await probe_video_frames(
-                    normalizing_mkv,
-                    int(frame_table.pts_monotonic_ns[0]),
-                    pts_are_monotonic=False,
-                )
-                if not np.array_equal(
-                    normalized_table.pts_monotonic_ns,
-                    frame_table.pts_monotonic_ns,
-                ):
-                    raise RuntimeError("MKV 重封装前后的帧数量或逐帧时间间隔不一致")
-                normalizing_mkv.replace(final_mkv)
-                capture_writer.write_video_frames(
-                    pts_monotonic_ns=frame_table.pts_monotonic_ns,
-                    media_time_ns=(
-                        frame_table.pts_monotonic_ns - frame_table.pts_monotonic_ns[0]
-                    ),
-                    duration_ns=frame_table.duration_ns,
-                    key_frame=frame_table.key_frame,
-                    video_path=final_mkv,
-                    codec=frame_table.codec,
-                    width=frame_table.width,
-                    height=frame_table.height,
-                    requested_fps=self.settings.video.requested_fps,
-                    ffmpeg_diagnostics=capture_video.progress.errors,
-                    camera_controls_requested=capture_video.control_state.requested,
-                    camera_controls_effective=capture_video.control_state.effective,
-                    camera_control_errors=capture_video.control_state.errors,
-                )
-                span_fps = (
-                    (len(frame_table.pts_monotonic_ns) - 1)
-                    * 1e9
-                    / (
-                        frame_table.pts_monotonic_ns[-1]
-                        - frame_table.pts_monotonic_ns[0]
-                    )
-                    if len(frame_table.pts_monotonic_ns) > 1
-                    and frame_table.pts_monotonic_ns[-1]
-                    > frame_table.pts_monotonic_ns[0]
-                    else 0.0
-                )
-                if (
-                    self.current.data_tier == DataTier.PROD
-                    and span_fps < self.settings.video.prod_min_span_fps
-                ):
-                    issues.append(
-                        "正式录制视频全程帧率不足："
-                        f"{span_fps:.2f} FPS < "
-                        f"{self.settings.video.prod_min_span_fps:.2f} FPS"
-                    )
-                capture_writer.write_sync([])
-                capture_writer.finish(ended_at_utc=capture_ended_at)
-                partial_h5.replace(final_h5)
-                partial_mkv.unlink(missing_ok=True)
             except Exception as error:
-                issues.append(str(error))
+                issues.append(self._error_message(error, "无法冻结采集 H5"))
                 capture_writer.abort_close()
             finally:
-                # 后续验证和预览恢复都不应再持有采集 writer。即使文件收尾失败，
-                # abort_close() 也会在这里之前尽最大努力释放 H5 写锁。
                 self.writer = None
 
-            duration_ns: int | None = None
-            ended_at = capture_ended_at
-            try:
-                report = (
-                    validate_capture_h5(final_h5, self.taxonomy)
-                    if final_h5.is_file()
-                    else None
-                )
-                if report and report.issues:
-                    issues.extend(report.issues)
-                if final_h5.is_file():
-                    with h5py.File(final_h5, "r") as handle:
-                        duration_ns = int(handle.attrs.get("duration_ns", 0))
-                        ended_at = str(
-                            handle.attrs.get("ended_at_utc", capture_ended_at)
-                        )
-            except Exception as error:
-                # 文件已经原子改名后，验证失败属于“需要处理”，不能让会话永久
-                # 停留在 finalizing。具体错误会随目录记录保留下来。
-                issues.append(f"H5 收尾验证失败：{self._error_message(error, '未知错误')}")
-            issues = list(dict.fromkeys(issues))
-            final_state = RecordingState.READY if not issues else RecordingState.NEEDS_ATTENTION
-            self.state = final_state
-            self.current = self.current.model_copy(
+            context = {
+                "ended_at_utc": capture_ended_at,
+                "preserved_issues": list(dict.fromkeys(issues)),
+                "ffmpeg_diagnostics": list(
+                    getattr(capture_video.progress, "errors", [])
+                ),
+                "camera_controls_requested": dict(
+                    getattr(capture_video.control_state, "requested", {})
+                ),
+                "camera_controls_effective": dict(
+                    getattr(capture_video.control_state, "effective", {})
+                ),
+                "camera_control_errors": list(
+                    getattr(capture_video.control_state, "errors", [])
+                ),
+            }
+            recording = recording.model_copy(
                 update={
-                    "state": final_state,
-                    "ended_at_utc": ended_at,
-                    "duration_ns": duration_ns,
-                    "h5_path": str(final_h5) if final_h5.is_file() else str(partial_h5),
-                    "mkv_path": str(final_mkv) if final_mkv.is_file() else str(partial_mkv),
-                    "issues": issues,
+                    "state": RecordingState.FINALIZING,
+                    "issues": [],
+                    "validation_issues": [],
+                    "quality_warnings": [],
                 }
             )
-            self.catalog.upsert(self.current)
-            self.mode = "devices_preview"
+            self.catalog.upsert(recording)
+            self.catalog.enqueue_job(
+                recording.recording_id,
+                BackgroundJobKind.FINALIZE,
+                context,
+                max_attempts=len(self.settings.background_jobs.retry_delays_seconds) + 1,
+                reset=True,
+            )
+            self._wake_background_jobs()
 
-            # 必须在 H5 已关闭、最终路径和目录终态均已写回之后，才能创建新的
-            # FFmpeg 预览进程，避免子进程继承采集文件描述符及其写锁。
+            self.mode = "devices_preview"
+            self.current = None
+            self.state = RecordingState.IDLE
+
+            # H5 已关闭后立即恢复预览；耗时收尾只访问冻结的 partial。
             preview_restore_error: Exception | None = None
             self._video_transition = "restoring_preview"
             try:
@@ -1280,7 +1440,7 @@ class RecordingCoordinator:
                 )
             if self._monitoring_requested:
                 self._start_preview_watchdog(self._device_operation_id)
-            return self.current
+            return self.catalog.get(recording.recording_id) or recording
 
     async def _restore_preview_after_session(self, camera_id: str | None) -> None:
         """录制或表征结束后恢复常驻预览；失败信息由 start_preview 统一记录。"""
@@ -1415,6 +1575,8 @@ class RecordingCoordinator:
             self.state = RecordingState.FINALIZING
             self.device_state = DeviceSessionState.RELEASING
             issues: list[str] = []
+            validation_issues: list[str] = []
+            quality_warnings: list[str] = []
             if self.current_stage is not None:
                 self._close_characterization_stage()
             assert self.ble is not None and self.writer is not None
@@ -1458,7 +1620,8 @@ class RecordingCoordinator:
                 report = validate_capture_h5(
                     final_h5, self.taxonomy, require_video=False, require_sync=False
                 )
-                issues.extend(report.issues)
+                validation_issues.extend(report.issues)
+                quality_warnings.extend(report.warnings)
                 report_path = write_characterization_report(final_h5)
             except Exception as error:
                 issues.append(str(error))
@@ -1466,7 +1629,9 @@ class RecordingCoordinator:
                 self.writer.abort_close()
             issues = list(dict.fromkeys(issues))
             final_state = (
-                RecordingState.READY if not issues else RecordingState.NEEDS_ATTENTION
+                RecordingState.READY
+                if not issues and not validation_issues
+                else RecordingState.NEEDS_ATTENTION
             )
             self.state = final_state
             self.current = self.current.model_copy(
@@ -1476,6 +1641,8 @@ class RecordingCoordinator:
                     "duration_ns": duration_ns,
                     "h5_path": str(final_h5) if final_h5.is_file() else str(partial_h5),
                     "issues": issues,
+                    "validation_issues": list(dict.fromkeys(validation_issues)),
+                    "quality_warnings": list(dict.fromkeys(quality_warnings)),
                 }
             )
             result = {
@@ -1633,6 +1800,13 @@ class RecordingCoordinator:
                 "reconnect_attempt": self._video_reconnect_attempt,
             },
             "free_disk_gib": free_gib,
+            "background_jobs": {
+                **self.catalog.job_counts(),
+                "active": self._active_job,
+                "allow_during_recording": (
+                    self.settings.background_jobs.allow_during_recording
+                ),
+            },
             "characterization": self.characterization_snapshot()
             if self.mode == "characterization"
             else self.last_characterization,
@@ -1652,7 +1826,7 @@ class RecordingCoordinator:
         self.catalog.upsert(updated)
 
     async def publish(self, recording_id: str) -> dict[str, Any]:
-        """由用户明确触发，把一次完整录制交付给独立标注存储。"""
+        """把发布请求持久化入队；实际上传不阻塞 HTTP 请求。"""
 
         summary = self._required_summary(recording_id)
         if summary.state != RecordingState.READY:
@@ -1663,37 +1837,88 @@ class RecordingCoordinator:
             and self.current.recording_id == recording_id
         ):
             raise ValueError("当前会话仍在使用该录制")
-        updating = summary.model_copy(update={"upload_state": "packaging"})
-        self.catalog.upsert(updating)
-        try:
-            updating = updating.model_copy(update={"upload_state": "uploading"})
-            self.catalog.upsert(updating)
-            manifest, manifest_generation = await publish_recording(
-                updating, self.settings, self.object_store
-            )
-            updating = updating.model_copy(update={"upload_state": "verifying"})
-            self.catalog.upsert(updating)
-            manifest_key = f"captures/{recording_id}/manifest.json"
-            if self.object_store.stat(manifest_key) is None:
-                raise RuntimeError("远端 manifest 验证失败")
-            updating = updating.model_copy(
+        existing = self.catalog.get_job(recording_id, BackgroundJobKind.PUBLISH)
+        reset = bool(
+            existing and existing[0].state == BackgroundJobState.FAILED
+        )
+        job = self.catalog.enqueue_job(
+            recording_id,
+            BackgroundJobKind.PUBLISH,
+            max_attempts=len(self.settings.background_jobs.retry_delays_seconds) + 1,
+            reset=reset,
+        )
+        if job.state in {
+            BackgroundJobState.QUEUED,
+            BackgroundJobState.RETRY_WAIT,
+        }:
+            self.catalog.upsert(summary.model_copy(update={"upload_state": "queued"}))
+            self._wake_background_jobs()
+        return {
+            "recording_id": recording_id,
+            "accepted": True,
+            "job": job.model_dump(mode="json"),
+        }
+
+    async def retry_finalization(self, recording_id: str) -> dict[str, Any]:
+        """人工确认后重新收尾尚未发布的 partial 制品。"""
+
+        summary = self._required_summary(recording_id)
+        if summary.upload_state in {"uploaded", "published"}:
+            raise ValueError("已经发布的录制禁止重新收尾")
+        if summary.state not in {
+            RecordingState.NEEDS_ATTENTION,
+            RecordingState.FAILED,
+            RecordingState.FINALIZING,
+        }:
+            raise ValueError("只有收尾失败或中断的录制可以重新收尾")
+        if self.current and self.current.recording_id == recording_id:
+            raise ValueError("当前硬件会话仍在使用该录制")
+        partial_h5 = Path(summary.h5_path or "")
+        partial_mkv = Path(summary.mkv_path or "")
+        if not partial_h5.name.endswith(".partial.h5") or not partial_mkv.name.endswith(
+            ".partial.mkv"
+        ):
+            raise ValueError("该录制没有可重新收尾的 partial H5/MKV")
+        if not partial_h5.is_file() or not partial_mkv.is_file():
+            raise ValueError("该录制的 partial H5/MKV 已缺失")
+        existing = self.catalog.get_job(recording_id, BackgroundJobKind.FINALIZE)
+        if existing and existing[0].state in {
+            BackgroundJobState.QUEUED,
+            BackgroundJobState.RUNNING,
+            BackgroundJobState.RETRY_WAIT,
+        }:
+            raise ValueError("该录制的后台收尾仍在执行或等待自动重试")
+        payload = (
+            dict(existing[1])
+            if existing
+            else {
+                "ended_at_utc": summary.ended_at_utc,
+                "preserved_issues": [],
+            }
+        )
+        job = self.catalog.enqueue_job(
+            recording_id,
+            BackgroundJobKind.FINALIZE,
+            payload,
+            max_attempts=len(self.settings.background_jobs.retry_delays_seconds) + 1,
+            reset=True,
+        )
+        self.catalog.upsert(
+            summary.model_copy(
                 update={
-                    "upload_state": "uploaded",
-                    "index_state": "pending",
-                    "index_message": "已上传 Bucket，等待标注端扫描并回执",
-                    "manifest_generation": manifest_generation,
+                    "state": RecordingState.FINALIZING,
+                    "issues": [],
+                    "validation_issues": [],
+                    "quality_warnings": [],
                 }
             )
-            self.catalog.upsert(updating)
-            return {
-                **manifest.model_dump(mode="json"),
-                "manifest_generation": manifest_generation,
-                "upload_state": "uploaded",
-                "index_state": "pending",
-            }
-        except Exception:
-            self.catalog.upsert(updating.model_copy(update={"upload_state": "failed"}))
-            raise
+        )
+        self._wake_background_jobs()
+        return {
+            "recording_id": recording_id,
+            "accepted": True,
+            "job": job.model_dump(mode="json"),
+        }
 
     async def refresh_publish_status(self, recording_id: str) -> RecordingSummary:
         """读取标注端回执，严格区分上传成功与实际进入标注索引。"""
@@ -1767,10 +1992,57 @@ class RecordingCoordinator:
     def rebuild_catalog(self) -> dict[str, int]:
         return rebuild_catalog(self.settings.data_root, self.catalog)
 
+    def revalidate_unuploaded_recordings(self) -> dict[str, int]:
+        """启动时重评未上传的待检查录制，不改动任何源制品。"""
+
+        result = {
+            "scanned": 0,
+            "updated": 0,
+            "ready": 0,
+            "still_blocked": 0,
+            "skipped": 0,
+        }
+        for summary in self.catalog.list():
+            if summary.state != RecordingState.NEEDS_ATTENTION:
+                continue
+            if summary.upload_state in {"uploaded", "published"}:
+                result["skipped"] += 1
+                continue
+            result["scanned"] += 1
+            h5_path = Path(summary.h5_path or "")
+            mkv_path = Path(summary.mkv_path or "")
+            if not h5_path.is_file() or not mkv_path.is_file():
+                result["skipped"] += 1
+                continue
+            report = validate_capture_h5(h5_path, self.taxonomy)
+            state = (
+                RecordingState.READY
+                if not summary.issues and not report.issues
+                else RecordingState.NEEDS_ATTENTION
+            )
+            updated = summary.model_copy(
+                update={
+                    "state": state,
+                    "validation_issues": list(report.issues),
+                    "quality_warnings": list(report.warnings),
+                }
+            )
+            if updated != summary:
+                self.catalog.upsert(updated)
+                result["updated"] += 1
+            if state == RecordingState.READY:
+                result["ready"] += 1
+            else:
+                result["still_blocked"] += 1
+        logger.info("启动自动重评未上传录制：%s", result)
+        return result
+
     def delete_recording(self, recording_id: str, confirmation: str) -> Path:
         summary = self._required_summary(recording_id)
         if self.current and self.current.recording_id == recording_id:
             raise ValueError("当前会话正在使用该录制")
+        if self.catalog.has_active_job(recording_id):
+            raise ValueError("该录制仍有后台收尾或上传任务，暂不能删除")
         deleted = hard_delete_recording(
             self.settings.data_root, summary, confirmation
         )

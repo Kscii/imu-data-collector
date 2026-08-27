@@ -27,8 +27,9 @@ try:
 except (OSError, TimeoutError, urllib.error.URLError):
     raise SystemExit(0)
 
-if payload.get("state") in {"recording", "finalizing"}:
-    print("当前仍在录制或收尾，拒绝更新。请等待录制进入 ready 后重试。", file=sys.stderr)
+active_job = (payload.get("background_jobs") or {}).get("active")
+if payload.get("state") in {"recording", "finalizing"} or active_job:
+    print("当前仍在录制或执行后台收尾/上传，拒绝更新。请等待任务完成后重试。", file=sys.stderr)
     raise SystemExit(2)
 PY
 
