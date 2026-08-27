@@ -1,17 +1,30 @@
 import { useEffect, useRef } from "react";
 import uPlot from "uplot";
+import { tr } from "./i18n";
 
 const colors = ["#ef4444", "#22c55e", "#3b82f6", "#f59e0b", "#a855f7", "#06b6d4"];
 const labels = ["ax", "ay", "az", "gx", "gy", "gz"];
 const noMarkers: PlotMarker[] = [];
+const noRegions: PlotRegion[] = [];
 
 type Props = {
   time: number[];
   values: number[][];
   cursorTime?: number;
   markers?: PlotMarker[];
+  regions?: PlotRegion[];
+  selectionLabels?: PlotSelectionLabel[];
+  controlledCursor?: boolean;
+  showMarkerKey?: boolean;
   height?: number;
   onSelectTime?: (time: number) => void;
+  onSelectLabel?: (key: string) => void;
+};
+
+export type PlotSelectionLabel = {
+  key: string;
+  label: string;
+  color?: string;
 };
 
 export type PlotMarker = {
@@ -20,6 +33,14 @@ export type PlotMarker = {
   color: string;
   dashed?: boolean;
   showPoints?: boolean;
+};
+
+export type PlotRegion = {
+  start: number;
+  end: number;
+  color: string;
+  borderColor?: string;
+  label?: string;
 };
 
 function nearestIndex(values: number[], target: number) {
@@ -62,17 +83,27 @@ function fitValueRange(plot: uPlot, values: number[][]) {
   plot.setScale("y", { min: minimum - padding, max: maximum + padding });
 }
 
-export default function Plot({ time, values, cursorTime, markers = noMarkers, height = 290, onSelectTime }: Props) {
+function formatPlotValue(value: number | undefined) {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  if (Number.isInteger(value) && Math.abs(value) >= 100) return value.toLocaleString();
+  return value.toFixed(3).replace(/\.000$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
+export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, onSelectTime, onSelectLabel }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const onSelectTimeRef = useRef(onSelectTime);
   const timeRef = useRef(time);
   const valuesRef = useRef(values);
   const markersRef = useRef(markers);
+  const regionsRef = useRef(regions);
+  const cursorTimeRef = useRef(cursorTime);
 
   timeRef.current = time;
   valuesRef.current = values;
   markersRef.current = markers;
+  regionsRef.current = regions;
+  cursorTimeRef.current = cursorTime;
 
   useEffect(() => {
     onSelectTimeRef.current = onSelectTime;
@@ -85,50 +116,88 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, he
       {
         width,
         height,
-        cursor: { drag: { x: true, y: false } },
+        cursor: { show: !controlledCursor, drag: { x: true, y: false } },
+        legend: { show: !controlledCursor },
         scales: { x: { time: false } },
-        ...(markersRef.current.length > 0 ? {
-          hooks: {
-            draw: [
-              (u: uPlot) => {
-                const currentTime = timeRef.current;
-                const currentValues = valuesRef.current;
-                if (!currentTime.length || !markersRef.current.length) return;
-                const { ctx, bbox } = u;
-                const pixelRatio = uPlot.pxRatio;
-                ctx.save();
-                for (const marker of markersRef.current) {
-                  if (marker.time < currentTime[0] || marker.time > currentTime[currentTime.length - 1]) continue;
-                  const x = Math.round(u.valToPos(marker.time, "x", true));
-                  ctx.strokeStyle = marker.color;
-                  ctx.lineWidth = 2 * pixelRatio;
-                  ctx.setLineDash(marker.dashed ? [6 * pixelRatio, 5 * pixelRatio] : []);
+        hooks: {
+          draw: [
+            (u: uPlot) => {
+              const currentTime = timeRef.current;
+              const currentValues = valuesRef.current;
+              if (!currentTime.length) return;
+              const { ctx, bbox } = u;
+              const pixelRatio = uPlot.pxRatio;
+              ctx.save();
+              for (const region of regionsRef.current) {
+                if (region.end < currentTime[0] || region.start > currentTime[currentTime.length - 1]) continue;
+                const start = Math.max(region.start, currentTime[0]);
+                const end = Math.min(region.end, currentTime[currentTime.length - 1]);
+                const left = u.valToPos(start, "x", true);
+                const right = u.valToPos(end, "x", true);
+                ctx.fillStyle = region.color;
+                ctx.fillRect(left, bbox.top, Math.max(1, right - left), bbox.height);
+                if (region.borderColor) {
+                  ctx.fillStyle = region.borderColor;
+                  ctx.fillRect(left, bbox.top, Math.max(1, right - left), 4 * pixelRatio);
+                }
+              }
+              for (const marker of markersRef.current) {
+                if (marker.time < currentTime[0] || marker.time > currentTime[currentTime.length - 1]) continue;
+                const x = Math.round(u.valToPos(marker.time, "x", true));
+                ctx.strokeStyle = marker.color;
+                ctx.lineWidth = 2 * pixelRatio;
+                ctx.setLineDash(marker.dashed ? [6 * pixelRatio, 5 * pixelRatio] : []);
+                ctx.beginPath();
+                ctx.moveTo(x, bbox.top);
+                ctx.lineTo(x, bbox.top + bbox.height);
+                ctx.stroke();
+
+                if (marker.showPoints) {
+                  const sampleIndex = nearestIndex(currentTime, marker.time);
+                  const row = currentValues[sampleIndex] ?? [];
+                  ctx.setLineDash([]);
+                  row.slice(0, 6).forEach((value, axis) => {
+                    const y = u.valToPos(value, "y", true);
+                    ctx.beginPath();
+                    ctx.fillStyle = colors[axis];
+                    ctx.strokeStyle = "#f8fafc";
+                    ctx.lineWidth = 1.25 * pixelRatio;
+                    ctx.arc(x, y, 4 * pixelRatio, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                  });
+                }
+              }
+              if (controlledCursor && cursorTimeRef.current !== undefined) {
+                const playhead = cursorTimeRef.current;
+                if (playhead >= currentTime[0] && playhead <= currentTime[currentTime.length - 1]) {
+                  const x = Math.round(u.valToPos(playhead, "x", true));
+                  ctx.setLineDash([]);
+                  ctx.strokeStyle = "rgba(2, 6, 23, 0.95)";
+                  ctx.lineWidth = 6 * pixelRatio;
                   ctx.beginPath();
                   ctx.moveTo(x, bbox.top);
                   ctx.lineTo(x, bbox.top + bbox.height);
                   ctx.stroke();
-
-                  if (marker.showPoints) {
-                    const sampleIndex = nearestIndex(currentTime, marker.time);
-                    const row = currentValues[sampleIndex] ?? [];
-                    ctx.setLineDash([]);
-                    row.slice(0, 6).forEach((value, axis) => {
-                      const y = u.valToPos(value, "y", true);
-                      ctx.beginPath();
-                      ctx.fillStyle = colors[axis];
-                      ctx.strokeStyle = "#f8fafc";
-                      ctx.lineWidth = 1.25 * pixelRatio;
-                      ctx.arc(x, y, 4 * pixelRatio, 0, Math.PI * 2);
-                      ctx.fill();
-                      ctx.stroke();
-                    });
-                  }
+                  ctx.strokeStyle = "#f8fafc";
+                  ctx.lineWidth = 2.25 * pixelRatio;
+                  ctx.beginPath();
+                  ctx.moveTo(x, bbox.top);
+                  ctx.lineTo(x, bbox.top + bbox.height);
+                  ctx.stroke();
+                  ctx.fillStyle = "#38bdf8";
+                  ctx.beginPath();
+                  ctx.moveTo(x, bbox.top + 8 * pixelRatio);
+                  ctx.lineTo(x - 6 * pixelRatio, bbox.top);
+                  ctx.lineTo(x + 6 * pixelRatio, bbox.top);
+                  ctx.closePath();
+                  ctx.fill();
                 }
-                ctx.restore();
               }
-            ]
-          }
-        } : {}),
+              ctx.restore();
+            }
+          ]
+        },
         axes: [
           { stroke: "#94a3b8", grid: { stroke: "#253046" } },
           { stroke: "#94a3b8", grid: { stroke: "#253046" } }
@@ -157,8 +226,22 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, he
     const select = (event: MouseEvent) => {
       if (!plot.current || !host.current || !onSelectTimeRef.current) return;
       const bounds = host.current.getBoundingClientRect();
-      const value = plot.current.posToVal(event.clientX - bounds.left, "x");
-      onSelectTimeRef.current(value);
+      const relativeX = event.clientX - bounds.left;
+      const relativeY = event.clientY - bounds.top;
+      const plotLeft = plot.current.bbox.left / uPlot.pxRatio;
+      const plotTop = plot.current.bbox.top / uPlot.pxRatio;
+      const plotWidth = plot.current.bbox.width / uPlot.pxRatio;
+      const plotHeight = plot.current.bbox.height / uPlot.pxRatio;
+      if (
+        relativeX < plotLeft
+        || relativeX > plotLeft + plotWidth
+        || relativeY < plotTop
+        || relativeY > plotTop + plotHeight
+      ) return;
+      const canvasX = relativeX * uPlot.pxRatio;
+      const value = plot.current.posToVal(canvasX, "x", true);
+      const sampleIndex = nearestIndex(timeRef.current, value);
+      if (sampleIndex >= 0) onSelectTimeRef.current(timeRef.current[sampleIndex]);
     };
     host.current.addEventListener("click", select);
     return () => {
@@ -167,7 +250,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, he
       plot.current?.destroy();
       plot.current = null;
     };
-  }, [height]);
+  }, [controlledCursor, height]);
 
   useEffect(() => {
     if (!plot.current) return;
@@ -181,19 +264,25 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, he
   }, [time, values]);
 
   useEffect(() => {
-    if (plot.current && cursorTime !== undefined && time.length) {
-      plot.current.setCursor({ left: plot.current.valToPos(cursorTime, "x"), top: 0 });
-    }
-  }, [cursorTime, time]);
+    if (!plot.current || cursorTime === undefined || !time.length) return;
+    if (controlledCursor) plot.current.redraw();
+    else plot.current.setCursor({ left: plot.current.valToPos(cursorTime, "x"), top: 0 });
+  }, [controlledCursor, cursorTime, time]);
 
   useEffect(() => {
     plot.current?.redraw();
-  }, [markers]);
+  }, [markers, regions]);
+
+  const selectedIndex = cursorTime === undefined ? -1 : nearestIndex(time, cursorTime);
+  const selectedTime = selectedIndex >= 0 ? time[selectedIndex] : undefined;
+  const selectedValues = selectedIndex >= 0 ? values[selectedIndex] ?? [] : [];
 
   return (
     <div className="plot-with-markers">
       <div className="plot" ref={host} />
-      {markers.length > 0 && <div className="plot-marker-key">{markers.map((marker) => <span key={`${marker.label}-${marker.time}`}><i style={{ background: marker.color }} />{marker.label} · {marker.time.toFixed(3)} s</span>)}</div>}
+      {controlledCursor && selectedTime !== undefined && <div className="plot-controlled-readout"><span><strong>time</strong>{selectedTime.toFixed(3)}</span>{labels.map((label, index) => <span key={label}><strong style={{ color: colors[index] }}>{label}</strong>{formatPlotValue(selectedValues[index])}</span>)}</div>}
+      {selectionLabels.length > 0 && <div className="plot-selection-context"><strong>{tr("标注", "Annotation")}</strong>{selectionLabels.map((item) => <button type="button" key={item.key} style={item.color ? { borderColor: item.color } : undefined} onClick={() => onSelectLabel?.(item.key)}>{item.label}</button>)}</div>}
+      {showMarkerKey && markers.length > 0 && <div className="plot-marker-key">{markers.map((marker) => <span key={`${marker.label}-${marker.time}`}><i style={{ background: marker.color }} />{marker.label} · {marker.time.toFixed(3)} s</span>)}</div>}
     </div>
   );
 }

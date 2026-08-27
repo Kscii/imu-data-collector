@@ -34,3 +34,9 @@ test("标记快捷键服从编辑权限和跌倒类型", () => {
   assert.deepEqual(resolveAnnotationShortcut(impact, true, true), { kind: "mark", target: "impact" });
   assert.deepEqual(resolveAnnotationShortcut({ ...base, code: "KeyN", key: "n" }, true, false), { kind: "select", target: "non_fall" });
 });
+
+test("E 可以在只读状态跳到当前区间结尾", () => {
+  const end = { ...base, code: "KeyE", key: "e" };
+  assert.deepEqual(resolveAnnotationShortcut(end, false, false), { kind: "jump_selected_end" });
+  assert.equal(resolveAnnotationShortcut({ ...end, textEntryFocused: true }, true, true), null);
+});
