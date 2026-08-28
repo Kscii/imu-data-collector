@@ -137,7 +137,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: third_party/ffmpeg
-          key: macos-ffmpeg-${{ matrix.arch }}-n8.1.2-b35605ace3ddf7c1a5d67a2eb553f034aef41d55-v1
+          key: macos-ffmpeg-${{ matrix.arch }}-n8.1.2-b35605ace3ddf7c1a5d67a2eb553f034aef41d55-nasm2.16.03-v2
       - name: 从锁定源码构建 FFmpeg 与 x264
         run: ./packaging/macos/prepare-ffmpeg.sh
       - name: macOS 单元与平台适配测试

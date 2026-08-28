@@ -17,8 +17,10 @@ macOS DMG 不使用 Homebrew 运行时库，而是在对应原生 Runner 上从�
 - x264 commit：`b35605ace3ddf7c1a5d67a2eb553f034aef41d55`
 - x264 源码归档 SHA-256：`cd71a7515b0e9a012e1ac9b1f8415bebcaf6fc97d4db32286642ac4c0fbe24f9`
 - x264 上游与许可证：https://code.videolan.org/videolan/x264
+- Intel 构建使用 NASM `2.16.03`，源码归档 SHA-256：`1412a1c760bbd05db026b6c0d1657affd6631cd0a63cddb6f73cc6d4aa616148`
+- NASM 上游与许可证：https://www.nasm.us/
 
 该构建启用了 GPL 组件（包括本项目当前使用的 libx264）。安装包中的 FFmpeg 仍受其自身
 许可证约束；本仓库的 MIT 许可证不会改变 FFmpeg 的许可条件。发布安装包时必须同时保留
-本文件以及 FFmpeg/x264 源码随附的许可证文件。macOS 应用包会在资源目录同时保留这些许可
+本文件以及 FFmpeg/x264/NASM 源码随附的许可证文件。macOS 应用包会在资源目录保留构建中实际使用的许可
 证文本与精确源码版本记录。
