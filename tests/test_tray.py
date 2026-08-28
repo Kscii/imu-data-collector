@@ -30,7 +30,14 @@ def test_tray_icon_is_self_contained() -> None:
 
 def test_tray_reuses_existing_capture_backend(monkeypatch, tmp_path: Path) -> None:
     application = tray.TrayApplication(_settings(tmp_path))
-    monkeypatch.setattr(tray, "_health", lambda _url: {"application": "capture"})
+    monkeypatch.setattr(
+        tray,
+        "_health",
+        lambda _url: {
+            "application": "capture",
+            "build_id": tray.CAPTURE_API_BUILD_ID,
+        },
+    )
 
     application._start_server()
 
@@ -70,6 +77,7 @@ def test_tray_refuses_to_exit_during_recording(monkeypatch, tmp_path: Path) -> N
     application = tray.TrayApplication(_settings(tmp_path))
     icon = _Icon()
     messages: list[str] = []
+    monkeypatch.setattr(tray, "_uses_chinese", lambda: True)
     monkeypatch.setattr(tray, "_health", lambda _url: {"state": "recording"})
     monkeypatch.setattr(
         tray,

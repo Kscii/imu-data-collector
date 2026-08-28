@@ -465,11 +465,14 @@ def test_verified_calibration_is_frozen_and_values_si_use_target_axes(
     writer.abort_close()
 
 
-def test_test_tier_is_default_and_can_never_be_marked_training_eligible(
+def test_prod_tier_is_default_but_explicit_test_can_never_be_training_eligible(
     tmp_path: Path,
 ) -> None:
-    request = RecordingStartRequest(collection_id="pilot", participant_id="xfan0282")
-    assert request.data_tier == DataTier.TEST
+    default_request = RecordingStartRequest(
+        collection_id="pilot", participant_id="xfan0282"
+    )
+    assert default_request.data_tier == DataTier.PROD
+    request = default_request.model_copy(update={"data_tier": DataTier.TEST})
 
     with pytest.raises(ValueError, match="test 数据永久禁止"):
         CaptureH5Writer(

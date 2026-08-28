@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -254,6 +255,7 @@ class RecordingCoordinator:
             "hint": hint,
             "retryable": retryable,
             "time_monotonic_ns": time.monotonic_ns(),
+            **(error.context if isinstance(error, BleOperationError) else {}),
         }
         self.preview_error = message
 
@@ -349,15 +351,24 @@ class RecordingCoordinator:
         finally:
             self._consumer = None
 
-    async def _open_preview_ble(self) -> CW12EUBleSource:
+    async def _open_preview_ble(
+        self, local_device_id: str | None = None
+    ) -> CW12EUBleSource:
         """只连接 IMU；摄像头故障不应迫使 BLE 重新连接。"""
 
-        ble = CW12EUBleSource(self.settings.imu)
+        imu_settings = (
+            replace(self.settings.imu, local_device_id=local_device_id)
+            if local_device_id
+            else self.settings.imu
+        )
+        ble = CW12EUBleSource(imu_settings)
         try:
             await asyncio.wait_for(ble.start(), timeout=20.0)
         except BaseException:
             await self._bounded_cleanup(None, ble, None)
             raise
+        if ble.device_identifier:
+            self.settings.imu.local_device_id = ble.device_identifier
         return ble
 
     async def _open_preview_video(
@@ -613,7 +624,12 @@ class RecordingCoordinator:
 
         opening: list[tuple[str, asyncio.Task[Any]]] = []
         if keep_ble is None:
-            opening.append(("ble", asyncio.create_task(self._open_preview_ble())))
+            open_ble = (
+                self._open_preview_ble(request.imu_local_device_id)
+                if request.imu_local_device_id
+                else self._open_preview_ble()
+            )
+            opening.append(("ble", asyncio.create_task(open_ble)))
         if keep_video is None:
             opening.append(
                 (

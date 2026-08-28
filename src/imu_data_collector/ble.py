@@ -12,6 +12,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 
 from imu_data_collector.config import ImuSettings
+from imu_data_collector.device_binding import DeviceBindingStore
 from imu_data_collector.host import platform_id
 
 if sys.platform.startswith("linux"):
@@ -38,12 +39,14 @@ class BleOperationError(RuntimeError):
         phase: str,
         hint: str,
         retryable: bool = True,
+        context: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.phase = phase
         self.hint = hint
         self.retryable = retryable
+        self.context = context or {}
 
     def as_detail(self) -> dict[str, Any]:
         return {
@@ -53,6 +56,7 @@ class BleOperationError(RuntimeError):
             "message": str(self),
             "hint": self.hint,
             "retryable": self.retryable,
+            **self.context,
         }
 
 
@@ -69,17 +73,33 @@ def _scanner_error(error: Exception) -> BleOperationError:
             "access denied",
         )
     ):
+        current = platform_id()
+        hint = (
+            "请在系统设置 → 隐私与安全性 → 蓝牙中允许 IMU Data Collector，"
+            "并确认系统蓝牙已开启"
+            if current == "macos"
+            else "请开启 Windows 蓝牙并确认系统已允许桌面应用访问蓝牙"
+            if current == "windows"
+            else "请确认蓝牙适配器、BlueZ 服务和应用权限正常"
+        )
         return BleOperationError(
             "ble_adapter_unavailable",
             f"系统蓝牙适配器不可用：{message}",
             phase="scan",
-            hint="请开启 Windows 蓝牙并确认系统已允许桌面应用访问蓝牙",
+            hint=hint,
         )
+    hint = (
+        "请检查系统设置 → 隐私与安全性 → 蓝牙，并确认 IMU 未被其他设备连接"
+        if platform_id() == "macos"
+        else "请检查 Windows 蓝牙服务和适配器状态后重试"
+        if platform_id() == "windows"
+        else "请检查 BlueZ 服务和适配器状态后重试"
+    )
     return BleOperationError(
         "ble_scan_failed",
         f"BLE 扫描失败：{message}",
         phase="scan",
-        hint="请检查 Windows 蓝牙服务和适配器状态后重试",
+        hint=hint,
     )
 
 
@@ -87,6 +107,17 @@ def _connect_error(error: Exception) -> BleOperationError:
     message = str(error).strip() or type(error).__name__
     lowered = message.lower()
     if any(marker in lowered for marker in ("access denied", "auth", "pair")):
+        if platform_id() == "macos":
+            return BleOperationError(
+                "ble_permission_denied",
+                f"macOS 拒绝访问 IMU：{message}",
+                phase="connect",
+                hint=(
+                    "请在系统设置 → 隐私与安全性 → 蓝牙中允许 "
+                    "IMU Data Collector，然后重新打开应用"
+                ),
+                retryable=False,
+            )
         return BleOperationError(
             "imu_pairing_required",
             f"Windows 拒绝访问 IMU：{message}",
@@ -118,7 +149,12 @@ def _connect_error(error: Exception) -> BleOperationError:
 
 
 class CW12EUBleSource:
-    def __init__(self, settings: ImuSettings) -> None:
+    def __init__(
+        self,
+        settings: ImuSettings,
+        *,
+        binding_store: DeviceBindingStore | None = None,
+    ) -> None:
         self.settings = settings
         self.queue: asyncio.Queue[NotificationPacket] = asyncio.Queue(maxsize=256)
         self.client: BleakClient | None = None
@@ -134,6 +170,10 @@ class CW12EUBleSource:
             "macos": "bleak_corebluetooth",
         }.get(platform_id(), "bleak_unknown")
         self._stopping = False
+        self._verified_packet = asyncio.Event()
+        self.binding_store = binding_store or (
+            DeviceBindingStore() if platform_id() == "macos" else None
+        )
 
     @staticmethod
     async def _find_cached_device_path(address: str) -> str | None:
@@ -223,6 +263,7 @@ class CW12EUBleSource:
     async def connect(self, timeout: float = 15.0) -> None:
         is_linux = sys.platform.startswith("linux")
         is_windows = sys.platform.startswith("win")
+        is_macos = platform_id() == "macos"
         device_path = (
             await self._find_cached_device_path(self.settings.address)
             if is_linux
@@ -246,6 +287,54 @@ class CW12EUBleSource:
                 self.settings.name,
                 None,
             )
+
+        if device is None and is_macos and self.settings.local_device_id:
+            try:
+                device = await BleakScanner.find_device_by_address(
+                    self.settings.local_device_id,
+                    timeout=min(timeout, 4.0),
+                )
+            except Exception as error:
+                raise _scanner_error(error) from error
+
+        if device is None and is_macos:
+            try:
+                discovered = await BleakScanner.discover(
+                    timeout=min(timeout, 5.0),
+                    return_adv=True,
+                )
+            except Exception as error:
+                raise _scanner_error(error) from error
+            candidates: list[BLEDevice] = []
+            for address, (candidate, advertisement) in discovered.items():
+                name = candidate.name or advertisement.local_name
+                if address == self.settings.local_device_id or name == self.settings.name:
+                    candidates.append(candidate)
+            selected_by_id = next(
+                (
+                    item
+                    for item in candidates
+                    if item.address == self.settings.local_device_id
+                ),
+                None,
+            )
+            if selected_by_id is not None:
+                candidates = [selected_by_id]
+            if len(candidates) > 1:
+                raise BleOperationError(
+                    "imu_multiple_candidates",
+                    f"发现 {len(candidates)} 个同名 {self.settings.name}，需要先选择设备",
+                    phase="scan",
+                    hint="请在设备列表中选择本机 CoreBluetooth UUID 后重新连接",
+                    context={
+                        "candidates": [
+                            {"local_device_id": item.address, "name": item.name}
+                            for item in candidates
+                        ]
+                    },
+                )
+            if candidates:
+                device = candidates[0]
 
         found_event = asyncio.Event()
 
@@ -343,6 +432,24 @@ class CW12EUBleSource:
                 phase="notify",
                 hint="确认当前样机固件仍提供 0x2AE1 通知特征，然后重新连接",
             ) from error
+        if platform_id() == "macos":
+            try:
+                await asyncio.wait_for(self._verified_packet.wait(), timeout=3.0)
+            except TimeoutError as error:
+                await self.stop()
+                raise BleOperationError(
+                    "imu_notification_timeout",
+                    "已订阅 IMU 通知特征，但三秒内没有收到数据",
+                    phase="notify",
+                    hint="确认选择的是 CW12EU-T 传感器且设备未被其他电脑或手机占用",
+                ) from error
+            if self.binding_store is not None and self.device_identifier:
+                self.binding_store.save_imu(
+                    device_name=self.settings.name,
+                    local_device_id=self.device_identifier,
+                    notify_uuid=self.settings.notify_uuid,
+                )
+                self.settings.local_device_id = self.device_identifier
 
     async def stop(self) -> None:
         client = self.client
@@ -364,6 +471,7 @@ class CW12EUBleSource:
         received = time.monotonic_ns()
         self.last_packet_ns = received
         packet = NotificationPacket(bytes(payload), received)
+        self._verified_packet.set()
         try:
             self.queue.put_nowait(packet)
         except asyncio.QueueFull:

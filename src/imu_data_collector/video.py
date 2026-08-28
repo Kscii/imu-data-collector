@@ -22,6 +22,8 @@ from imu_data_collector.host import (
     resolve_executable,
 )
 
+_MACOS_RECORDING_ENCODER: str | None = None
+
 
 async def _run_capture(
     *args: str, timeout_seconds: float = 10.0
@@ -48,6 +50,42 @@ async def _run_capture(
         stderr = stderr + message.encode()
         return 124, stdout.decode(errors="replace"), stderr.decode(errors="replace")
     return process.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+
+async def _select_macos_recording_encoder() -> str:
+    """真实启动一次硬编码；失败时确定性回退软件 x264。"""
+
+    global _MACOS_RECORDING_ENCODER
+    if _MACOS_RECORDING_ENCODER is not None:
+        return _MACOS_RECORDING_ENCODER
+    ffmpeg = resolve_executable("ffmpeg")
+    code, _stdout, _stderr = await _run_capture(
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=128x128:r=30",
+        "-frames:v",
+        "1",
+        "-an",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "h264_videotoolbox",
+        "-allow_sw",
+        "0",
+        "-f",
+        "null",
+        os.devnull,
+        timeout_seconds=15.0,
+    )
+    _MACOS_RECORDING_ENCODER = (
+        "h264_videotoolbox" if code == 0 else "libx264"
+    )
+    return _MACOS_RECORDING_ENCODER
 
 
 def _supports_profile(formats: str, settings: VideoSettings) -> bool:
@@ -180,6 +218,24 @@ def _parse_dshow_profiles(text: str) -> list[dict[str, Any]]:
     return profiles
 
 
+def _parse_avfoundation_devices(text: str) -> list[dict[str, str]]:
+    """只读取 FFmpeg 可接受的当前视频索引；音频设备必须排除。"""
+
+    devices: list[dict[str, str]] = []
+    in_video_section = False
+    for line in text.splitlines():
+        if "AVFoundation video devices" in line:
+            in_video_section = True
+            continue
+        if "AVFoundation audio devices" in line:
+            in_video_section = False
+            continue
+        match = re.search(r"\[(\d+)\]\s+(.+)$", line)
+        if in_video_section and match:
+            devices.append({"index": match.group(1), "name": match.group(2).strip()})
+    return devices
+
+
 def _stable_camera_id(props: dict[str, str], device: str) -> str:
     serial = props.get("ID_SERIAL", "")
     path = props.get("ID_PATH", "")
@@ -242,6 +298,9 @@ async def discover_video_devices(
         return output
 
     if current_platform == "macos":
+        from imu_data_collector.macos_devices import enumerate_video_devices
+
+        native_devices = await asyncio.to_thread(enumerate_video_devices)
         _code, _stdout, stderr = await _run_capture(
             ffmpeg,
             "-hide_banner",
@@ -253,39 +312,39 @@ async def discover_video_devices(
             "",
             timeout_seconds=8.0,
         )
-        output = []
-        in_video_section = False
-        for line in stderr.splitlines():
-            if "AVFoundation video devices" in line:
-                in_video_section = True
+        output: list[dict[str, Any]] = []
+        unused_native = list(native_devices)
+        for ffmpeg_device in _parse_avfoundation_devices(stderr):
+            name = ffmpeg_device["name"]
+            native = next(
+                (item for item in unused_native if item["name"] == name),
+                None,
+            )
+            if native is None:
                 continue
-            if "AVFoundation audio devices" in line:
-                in_video_section = False
-            match = re.search(r"\[(\d+)\]\s+(.+)$", line)
-            if not in_video_section or not match:
-                continue
-            index, name = match.groups()
-            selected = {
-                "width": profile.width,
-                "height": profile.height,
-                "fps": float(profile.requested_fps),
-                "input_format": "backend_default",
-            }
+            unused_native.remove(native)
+            profiles = list(native["profiles"])
+            selected = _choose_profile(profiles, profile)
+            format_summary = "\n".join(
+                f"{item['width']}x{item['height']} @ {float(item['fps']):.3f} fps"
+                for item in profiles
+            )
             output.append(
                 {
-                    "device": index,
-                    "product": name.strip(),
-                    "serial": "",
-                    "path": index,
+                    "device": ffmpeg_device["index"],
+                    "product": name,
+                    "serial": native["unique_id"],
+                    "path": ffmpeg_device["index"],
                     "interface": "",
-                    "integration": "unknown",
-                    "camera_id": f"avfoundation:{index}:{name.strip()}",
-                    "formats": "由 AVFoundation 在启动时协商",
-                    "profiles": [selected],
+                    "integration": native["integration"],
+                    "camera_id": f"avfoundation:{native['unique_id']}",
+                    "formats": format_summary,
+                    "profiles": profiles,
                     "selected_profile": selected,
-                    "supports_default_profile": True,
-                    "color_capture": True,
+                    "supports_default_profile": selected is not None,
+                    "color_capture": bool(profiles),
                     "backend": "ffmpeg_avfoundation",
+                    "device_type": native["device_type"],
                 }
             )
         return output
@@ -608,6 +667,7 @@ class FFmpegVideoRecorder:
         self._source_pts_seconds: deque[float] = deque()
         self._preview_times: deque[float] = deque()
         self._tasks: list[asyncio.Task[Any]] = []
+        self.recording_encoder = "libx264"
 
     @staticmethod
     def _rolling_fps(values: deque[float]) -> float:
@@ -671,6 +731,20 @@ class FFmpegVideoRecorder:
                 "[record_out]",
                 "-c:v",
                 "h264_vaapi",
+                "-profile:v",
+                "high",
+            ]
+        elif current_platform == "macos" and self.recording_encoder == "h264_videotoolbox":
+            record_filter = "[record]format=nv12[record_out];"
+            encoder = [
+                "-map",
+                "[record_out]",
+                "-c:v",
+                "h264_videotoolbox",
+                "-allow_sw",
+                "0",
+                "-realtime",
+                "1",
                 "-profile:v",
                 "high",
             ]
@@ -818,6 +892,8 @@ class FFmpegVideoRecorder:
     async def start(self) -> None:
         if self.output_path is not None:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            if platform_id() == "macos":
+                self.recording_encoder = await _select_macos_recording_encoder()
         self.control_state = await apply_video_controls(self.settings, self.device)
         self.started_monotonic_ns = time.monotonic_ns()
         self.process = await asyncio.create_subprocess_exec(

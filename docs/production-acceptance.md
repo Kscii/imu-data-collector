@@ -44,6 +44,9 @@ sudo journalctl -u imu-annotation-gc.service -n 100 --no-pager
 
 - Windows 安装包内不存在 `google_oauth_client_secret`；首次 Google 登录经上传代理成功，刷新或
   重启本机服务后仍可用系统凭据库中的 refresh token 获取短期 ID token；
+- macOS 两个 DMG 的 CPU 架构、最低系统版本、ad-hoc 签名、随包 FFmpeg/x264 和 SHA-256
+  均通过 CI；Intel 真机按 [macOS 桌面测试版](macos-desktop.md) 完成权限、BLE、摄像头、
+  完整 test 录制和 Keychain 上传。Apple Silicon 未做真机验收时必须明确记录为 CI-only；
 - token exchange 拒绝非 loopback 回调，错误页和服务日志不包含 code、verifier、refresh token
   或 client secret；
 - IAP 登录后页首显示正确 UniKey，不能切换身份；
