@@ -293,6 +293,24 @@ type Camera = {
   color_capture: boolean;
 };
 
+type ImuCandidate = {
+  local_device_id: string;
+  name: string | null;
+};
+
+type ImuBinding = {
+  state: "bound" | "unbound";
+  device_name: string;
+  local_device_id: string | null;
+  verified_at_utc: string | null;
+};
+
+type DeviceList = {
+  cameras: Camera[];
+  platform: string;
+  imu_binding: ImuBinding;
+};
+
 type SyncAnchor = {
   imu_time_ns: number;
   video_time_ns: number;
@@ -410,7 +428,7 @@ const exclusionLabels: Record<Exclusion["reason"], string> = {
 };
 
 class ApiRequestError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly detail?: unknown) {
     super(message);
     this.name = "ApiRequestError";
   }
@@ -431,9 +449,9 @@ async function api<T>(path: string, init?: RequestInit, timeoutMs = 45_000): Pro
       const payload = await response.json().catch(() => ({}));
       const detail = payload.detail;
       if (detail && typeof detail === "object") {
-        throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status);
+        throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status, detail);
       }
-      throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status);
+      throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status, detail);
     }
     return response.json();
   } catch (error) {
@@ -629,7 +647,7 @@ export default function App() {
   const [collection, setCollection] = useState(
     captureForm.collection ?? defaultCollectionId(captureForm.participant ?? "xfan0282")
   );
-  const [dataTier, setDataTier] = useState<"test" | "prod">(captureForm.dataTier ?? "test");
+  const [dataTier, setDataTier] = useState<"test" | "prod">(captureForm.dataTier ?? "prod");
   const [captureError, setCaptureError] = useState("");
   const [captureOperation, setCaptureOperation] = useState("");
   const [recordings, setRecordings] = useState<Recording[]>([]);
@@ -638,6 +656,9 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [cameraId, setCameraId] = useState(captureForm.cameraId ?? "");
+  const [imuBinding, setImuBinding] = useState<ImuBinding | null>(null);
+  const [imuCandidates, setImuCandidates] = useState<ImuCandidate[]>([]);
+  const [imuLocalDeviceId, setImuLocalDeviceId] = useState("");
   const liveRef = useRef<{ t: number[]; values: number[][] }>({ t: [], values: [] });
   const [, redraw] = useState(0);
   const versionMismatch = !annotationApplication
@@ -688,8 +709,12 @@ export default function App() {
     }
   };
   const refreshCameras = (force = false) =>
-    api<{ cameras: Camera[] }>(`/api/v1/devices${force ? "?refresh_cameras=true" : ""}`).then((value) => {
+    api<DeviceList>(`/api/v1/devices${force ? "?refresh_cameras=true" : ""}`).then((value) => {
       setCameras(value.cameras);
+      setImuBinding(value.imu_binding);
+      if (value.imu_binding.local_device_id) {
+        setImuLocalDeviceId(value.imu_binding.local_device_id);
+      }
       setCameraId((current) => {
         if (value.cameras.some((item) => item.camera_id === current)) return current;
         const compatible = value.cameras.filter((item) => item.supports_default_profile && item.color_capture);
@@ -698,6 +723,36 @@ export default function App() {
           ?? "";
       });
     }).catch((e) => setCaptureError(e.message));
+
+  const acceptPreviewError = (value: unknown) => {
+    const error = value as ApiRequestError;
+    const detail = error.detail as { code?: unknown; candidates?: unknown } | undefined;
+    if (detail?.code === "imu_multiple_candidates" && Array.isArray(detail.candidates)) {
+      const candidates = detail.candidates.filter((item): item is ImuCandidate => (
+        Boolean(item)
+        && typeof item === "object"
+        && typeof (item as ImuCandidate).local_device_id === "string"
+      ));
+      setImuCandidates(candidates);
+      if (candidates.length && !candidates.some((item) => item.local_device_id === imuLocalDeviceId)) {
+        setImuLocalDeviceId(candidates[0].local_device_id);
+      }
+    }
+    setCaptureError(error.message);
+  };
+
+  const forgetImuBinding = async () => {
+    if (captureInteractionBlocked || captureOperation) return;
+    try {
+      const binding = await api<ImuBinding>("/api/v1/devices/imu-binding", { method: "DELETE" });
+      setImuBinding(binding);
+      setImuLocalDeviceId("");
+      setImuCandidates([]);
+      setCaptureError("");
+    } catch (error) {
+      setCaptureError((error as Error).message);
+    }
+  };
 
   useEffect(() => {
     api<Taxonomy>("/api/v1/taxonomy").then(setTaxonomy).catch((e) => setCaptureError(e.message));
@@ -805,12 +860,15 @@ export default function App() {
     try {
       const snapshot = await api<any>(`/api/v1/preflight/${active ? "stop" : "start"}`, {
         method: "POST",
-        body: active ? undefined : JSON.stringify({ camera_id: cameraId || null })
+        body: active ? undefined : JSON.stringify({
+          camera_id: cameraId || null,
+          imu_local_device_id: imuLocalDeviceId || null,
+        })
       });
       setLive(snapshot);
       if (!active) liveRef.current = { t: [], values: [] };
     } catch (e) {
-      setCaptureError((e as Error).message);
+      acceptPreviewError(e);
     } finally {
       setCaptureOperation("");
     }
@@ -823,11 +881,14 @@ export default function App() {
     try {
       const snapshot = await api<any>("/api/v1/preflight/start", {
         method: "POST",
-        body: JSON.stringify({ camera_id: cameraId || null })
+        body: JSON.stringify({
+          camera_id: cameraId || null,
+          imu_local_device_id: imuLocalDeviceId || null,
+        })
       });
       setLive(snapshot);
     } catch (e) {
-      setCaptureError((e as Error).message);
+      acceptPreviewError(e);
     } finally {
       setCaptureOperation("");
     }
@@ -894,6 +955,11 @@ export default function App() {
           refreshCameras={refreshCameras}
           toggleImuPreview={toggleImuPreview}
           retryPreview={retryPreview}
+          imuBinding={imuBinding}
+          imuCandidates={imuCandidates}
+          imuLocalDeviceId={imuLocalDeviceId}
+          setImuLocalDeviceId={setImuLocalDeviceId}
+          forgetImuBinding={forgetImuBinding}
           captureOperation={captureOperation}
           interactionBlocked={captureInteractionBlocked}
           ownsCaptureTab={ownsCaptureTab}
@@ -989,7 +1055,8 @@ function CapturePage(props: any) {
   const {
     live, participant, setParticipant, collection, setCollection, start, stop, chart,
     dataTier, setDataTier, allowedUnikeys, cameras, cameraId, changeCamera, refreshCameras,
-    toggleImuPreview, retryPreview, captureOperation, interactionBlocked, ownsCaptureTab
+    toggleImuPreview, retryPreview, imuBinding, imuCandidates, imuLocalDeviceId,
+    setImuLocalDeviceId, forgetImuBinding, captureOperation, interactionBlocked, ownsCaptureTab
   } = props;
   const [previewRetry, setPreviewRetry] = useState(0);
   const active = live.state === "recording" && live.session_type === "capture";
@@ -1015,6 +1082,8 @@ function CapturePage(props: any) {
         <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">测试数据（不进入训练）</option><option value="prod">正式数据（需通过质量门禁）</option></select></label>
         <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
         <button disabled={interactionBlocked || active || busy} onClick={() => refreshCameras(true)}>重新扫描摄像头</button>
+        {imuCandidates.length > 1 && <label>IMU 设备<select value={imuLocalDeviceId} onChange={(e) => setImuLocalDeviceId(e.target.value)} disabled={interactionBlocked || active || busy}>{imuCandidates.map((item: ImuCandidate) => <option key={item.local_device_id} value={item.local_device_id}>{item.name || "CW12EU-T"} · {item.local_device_id}</option>)}</select></label>}
+        {imuBinding?.state === "bound" && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={forgetImuBinding}>忘记已绑定 IMU</button>}
         <button disabled={interactionBlocked || active || busy || anotherSession || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{previewButtonLabel}</button>
         {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>重试失败设备</button>}
         {!active ? <button className="primary" disabled={interactionBlocked || busy || anotherSession || !cameraId} onClick={start}>{captureOperation === "starting_recording" ? "正在准备…" : "开始录制"}</button> : <button className="danger" disabled={interactionBlocked || busy} onClick={stop}>{captureOperation === "stopping_recording" ? "正在结束…" : "结束录制"}</button>}

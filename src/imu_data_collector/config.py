@@ -10,7 +10,13 @@ from typing import Any, Literal
 
 import yaml
 
-from imu_data_collector.host import application_root, user_cache_dir, user_data_dir
+from imu_data_collector.device_binding import DeviceBindingStore
+from imu_data_collector.host import (
+    application_root,
+    platform_id,
+    user_cache_dir,
+    user_data_dir,
+)
 
 
 @dataclass(slots=True)
@@ -56,6 +62,13 @@ class VideoSettings:
     source_fps_window_seconds: float = 5.0
     prod_min_source_fps: float = 29.0
     prod_min_span_fps: float = 27.0
+
+
+@dataclass(slots=True)
+class CaptureSettings:
+    """采集页面的跨平台默认行为。"""
+
+    default_data_tier: Literal["test", "prod"] = "prod"
 
 
 @dataclass(slots=True)
@@ -152,6 +165,7 @@ class Settings:
     server_host: str = "127.0.0.1"
     server_port: int = 8765
     minimum_free_gib: int = 20
+    capture: CaptureSettings = field(default_factory=CaptureSettings)
     imu: ImuSettings = field(default_factory=ImuSettings)
     video: VideoSettings = field(default_factory=VideoSettings)
     upload: UploadSettings = field(default_factory=UploadSettings)
@@ -186,6 +200,7 @@ class Settings:
 
 def _construct_settings(payload: dict[str, Any]) -> Settings:
     values = dict(payload)
+    capture = CaptureSettings(**values.pop("capture", {}))
     imu_values = values.pop("imu", {})
     for tuple_key in (
         "accel_bias_counts",
@@ -239,6 +254,7 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         if key in values:
             values[key] = Path(values[key])
     return Settings(
+        capture=capture,
         imu=imu,
         video=video,
         upload=upload,
@@ -272,6 +288,13 @@ def load_settings(config_path: Path | None = None) -> Settings:
     if broker_server_port := os.environ.get("IMU_UPLOAD_BROKER_PORT"):
         settings.cloud.broker_server_port = int(broker_server_port)
     settings.resolve_paths(project_root)
+    if platform_id() == "macos" and settings.imu.local_device_id is None:
+        binding = DeviceBindingStore().load_imu(
+            expected_name=settings.imu.name,
+            notify_uuid=settings.imu.notify_uuid,
+        )
+        if binding is not None:
+            settings.imu.local_device_id = binding.local_device_id
     return settings
 
 

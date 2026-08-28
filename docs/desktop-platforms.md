@@ -5,14 +5,15 @@
 | 平台 | BLE | 摄像头 | 安装形式 | 当前结论 |
 | --- | --- | --- | --- | --- |
 | Arch/Linux | Bleak + BlueZ LE | FFmpeg + V4L2 | `uv` 或 systemd 用户服务 | 已验收生产基线 |
-| Windows 10/11 x64 | Bleak + WinRT | FFmpeg + DirectShow | PyInstaller onedir + Inno Setup | Windows 10 打包、真实 BLE 通知和摄像头预览已验收；完整录制待验收 |
-| macOS | Bleak + CoreBluetooth | FFmpeg + AVFoundation | 实验性 PyInstaller onedir | 需要物理 Mac、签名、公证与真机验收 |
+| Windows 10/11 x64 | Bleak + WinRT | FFmpeg + DirectShow | PyInstaller onedir + Inno Setup | Windows 10 已验收真实 BLE、摄像头、短录制、登录和上传；Windows 11 与长时故障恢复待验收 |
+| macOS 13+ Intel / Apple Silicon | Bleak + CoreBluetooth | FFmpeg + AVFoundation | 原生分架构 `.app` + DMG | CI 构建路径已实现；Intel 真机完整验收待完成，不宣称已生产可用 |
 | WSL2 | 不承诺 | 不承诺 | 无 | 暂不支持；不要把 USB/BLE 透传当作原生 Windows |
 | Android | 不适用当前桌面包 | 不适用 | 无 | 暂不属于采集端范围 |
 
 Windows 10 与 Windows 11 共用 WinRT、DirectShow 和 x64 安装包代码路径；“预期兼容”不等于
 已经在 Windows 11 真机验收。macOS CI 只证明代码可导入和构建，不能替代摄像头、BLE、权限
-弹窗、签名和公证验收。
+弹窗和完整录制验收。当前 macOS 包采用 ad-hoc 签名且不做 Apple 公证，这是小组测试版的明确
+限制，不等同于正式对外分发。
 
 ## 不变的数据原则
 
@@ -40,7 +41,9 @@ capture H5 schema 1.6 新增或冻结以下运行时事实：
 - Linux：优先 MJPEG，使用 V4L2 设置并读回手动曝光；`camera_control_policy=fixed_verified`。
 - Windows：使用 DirectShow；摄像头厂商与驱动不统一，第一版不伪装成已经锁定曝光，使用
   `camera_control_policy=observed_fps_gate`，由录前滚动 FPS 和整段 PTS 门禁判断。
-- macOS：使用 AVFoundation；同样按实际 FPS/PTS 门禁，模式协商仍需真机完善。
+- macOS：通过 PyObjC 读取 AVFoundation 的稳定 `uniqueID` 与真实支持格式，再映射到本次
+  FFmpeg 枚举索引；按实际 FPS/PTS 门禁。录制启动时实测 `h264_videotoolbox`，硬编码不可用
+  则回退随包 `libx264`，不把编码器存在误当作硬件可用。
 
 浏览器预览主动限制约 10 FPS，只降低 JPEG 和页面绘图负担；MKV 输入目标仍是 30 FPS。
 
@@ -56,7 +59,8 @@ GitHub tag `desktop-vX.Y.Z` 会：
 6. 发布带标签版本号的未签名单安装器 EXE 与 `SHA256SUMS.txt`，并更新 GitHub Latest Release。
 
 手动运行工作流只生成供开发者下载的 Actions artifact，不会替换组员使用的 Latest Release。
-macOS 仍是独立实验 artifact，其失败不会阻止 Windows 稳定版发布。这里的“单安装器”表示组员
+稳定标签必须同时通过 Windows、macOS arm64 和 macOS x86_64 三套构建，才发布同一个 Latest
+Release。这里的“单安装器”表示 Windows 组员
 只需下载和双击一个 EXE；安装后 Python、HDF5、WebUI 和 FFmpeg 仍以 onedir 形式存放，避免
 onefile 每次启动重新解压大型运行时。
 
@@ -77,6 +81,19 @@ imu-collector devices
 托盘后端仍只监听 `127.0.0.1:8765`，不安装 Windows Service、不随登录自启，也不自动更新。
 托盘启动失败会弹出错误，并把详细信息写入用户缓存目录的 `logs/tray.log`。开发者仍可运行
 `imu-collector start` 使用原有控制台生命周期。
+
+## macOS 构建边界
+
+GitHub Actions 在 `macos-15` 原生 arm64 Runner 和 `macos-15-intel` 原生 x86_64 Runner 分别
+构建，不制作 Rosetta 通用包。两套构建都从锁定源码归档编译 FFmpeg n8.1.2 与 x264，将
+SHA-256、架构、编码器、动态链接、Info.plist、ad-hoc 签名和 DMG 挂载作为自动门禁。应用最低
+系统版本为 macOS 13，不启用 App Sandbox，不申请麦克风权限，也不随登录自启或自动更新。
+
+CoreBluetooth 不公开 MAC 地址。首次连接按精确名称扫描；同名设备唯一时，只有成功订阅
+`0x2AE1` 并收到通知后才保存该 Mac 的 CoreBluetooth UUID。发现多个同名设备时必须人工选择；
+后续优先按保存 UUID 连接，失效则退回扫描。WebUI 可忘记绑定，绑定文件位于 Application
+Support，不写入 H5 的物理设备校准身份。详细安装与真机清单见
+[macOS 桌面测试版](macos-desktop.md)。
 
 ## 2026-08-28 Windows 10 实测边界
 

@@ -2,12 +2,14 @@ import asyncio
 
 import pytest
 
+import imu_data_collector.macos_devices as macos_devices
 import imu_data_collector.video as video_module
 from imu_data_collector.config import VideoSettings
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
     PreviewFrameHub,
     _choose_profile,
+    _parse_avfoundation_devices,
     _parse_dshow_profiles,
     _parse_v4l2_profiles,
     apply_video_controls,
@@ -55,6 +57,32 @@ def test_directshow_parser_keeps_none_typed_virtual_camera_for_diagnostics() -> 
 
     assert devices == [
         {"name": "OBS Virtual Camera", "alternative": "@device_sw_{example}"}
+    ]
+
+
+def test_avfoundation_parser_excludes_audio_devices() -> None:
+    devices = _parse_avfoundation_devices(
+        "[AVFoundation indev] AVFoundation video devices:\n"
+        "[AVFoundation indev] [0] FaceTime HD Camera\n"
+        "[AVFoundation indev] [1] Logitech C93\n"
+        "[AVFoundation indev] AVFoundation audio devices:\n"
+        "[AVFoundation indev] [0] MacBook Microphone\n"
+    )
+
+    assert devices == [
+        {"index": "0", "name": "FaceTime HD Camera"},
+        {"index": "1", "name": "Logitech C93"},
+    ]
+
+
+def test_macos_13_device_types_include_legacy_external_camera() -> None:
+    class FakeAVFoundation:
+        AVCaptureDeviceTypeExternalUnknown = "legacy-external"
+        AVCaptureDeviceTypeBuiltInWideAngleCamera = "built-in"
+
+    assert macos_devices._device_types(FakeAVFoundation) == [
+        "legacy-external",
+        "built-in",
     ]
 
 
@@ -193,6 +221,20 @@ def test_macos_recorder_uses_avfoundation(monkeypatch) -> None:
     assert "0:none" in command
 
 
+def test_macos_recording_prefers_verified_videotoolbox(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(video_module, "platform_id", lambda: "macos")
+    recorder = FFmpegVideoRecorder(
+        VideoSettings(vaapi_device=None), "1", tmp_path / "capture.mkv"
+    )
+    recorder.recording_encoder = "h264_videotoolbox"
+
+    command = recorder.command()
+
+    assert "h264_videotoolbox" in command
+    assert "-allow_sw" in command
+    assert "libx264" not in command
+
+
 @pytest.mark.asyncio
 async def test_manual_camera_controls_are_applied_and_read_back(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
@@ -289,3 +331,50 @@ async def test_discovery_skips_metadata_and_keeps_capture_nodes(
     assert devices[0]["camera_id"] == "logitech_123|if=00"
     assert devices[0]["integration"] == "external"
     assert devices[0]["supports_default_profile"] is True
+
+
+@pytest.mark.asyncio
+async def test_macos_discovery_uses_stable_native_id_and_real_profiles(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(video_module, "platform_id", lambda: "macos")
+    monkeypatch.setattr(
+        macos_devices,
+        "enumerate_video_devices",
+        lambda: [
+            {
+                "unique_id": "USB-LOGITECH-123",
+                "name": "Logitech C93",
+                "device_type": "AVCaptureDeviceTypeExternal",
+                "integration": "external",
+                "profiles": [
+                    {
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30.0,
+                        "min_fps": 5.0,
+                        "input_format": "backend_default",
+                    }
+                ],
+            }
+        ],
+    )
+
+    async def fake_run(*args: str, timeout_seconds: float = 10.0):
+        del args, timeout_seconds
+        return (
+            0,
+            "",
+            "[AVFoundation indev] AVFoundation video devices:\n"
+            "[AVFoundation indev] [2] Logitech C93\n"
+            "[AVFoundation indev] AVFoundation audio devices:\n",
+        )
+
+    monkeypatch.setattr(video_module, "_run_capture", fake_run)
+
+    devices = await discover_video_devices(VideoSettings())
+
+    assert devices[0]["device"] == "2"
+    assert devices[0]["camera_id"] == "avfoundation:USB-LOGITECH-123"
+    assert devices[0]["integration"] == "external"
+    assert devices[0]["selected_profile"]["fps"] == 30.0

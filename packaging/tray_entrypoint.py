@@ -1,4 +1,4 @@
-"""Windows 无控制台托盘入口。"""
+"""Windows 无控制台与 macOS 菜单栏应用入口。"""
 
 from imu_data_collector.tray import main
 

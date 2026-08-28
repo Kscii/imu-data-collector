@@ -1,4 +1,4 @@
-"""Windows 桌面托盘入口。
+"""Windows 与 macOS 桌面托盘入口。
 
 托盘只管理本机采集后端的生命周期，不复制采集状态机。浏览器关闭后后端继续运行；
 只有托盘“退出”才请求 Uvicorn 优雅关闭并释放 BLE、摄像头与后台任务。
@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import ctypes
 import json
+import locale
 import logging
 import os
+import subprocess
 import threading
 import time
 import urllib.error
@@ -22,9 +24,14 @@ from typing import Any
 import uvicorn
 from PIL import Image, ImageDraw
 
+from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
 from imu_data_collector.capture_api import create_capture_app
 from imu_data_collector.config import Settings, load_settings
-from imu_data_collector.host import platform_id, user_cache_dir
+from imu_data_collector.host import (
+    background_subprocess_kwargs,
+    platform_id,
+    user_cache_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,21 @@ def _configure_logging() -> None:
 
 
 def _show_message(title: str, message: str, *, error: bool = False) -> None:
+    if platform_id() == "macos":
+        try:
+            import AppKit
+
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_(title)
+            alert.setInformativeText_(message)
+            alert.setAlertStyle_(
+                AppKit.NSAlertStyleCritical if error else AppKit.NSAlertStyleInformational
+            )
+            alert.addButtonWithTitle_("确定" if _uses_chinese() else "OK")
+            alert.runModal()
+            return
+        except Exception:
+            logger.exception("无法显示 macOS 原生提示框")
     if os.name != "nt":
         if error:
             logger.error("%s: %s", title, message)
@@ -66,6 +88,25 @@ def _show_message(title: str, message: str, *, error: bool = False) -> None:
 
 
 def _confirm_exit() -> bool:
+    if platform_id() == "macos":
+        try:
+            import AppKit
+
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_(_text("退出 IMU 数采平台", "Exit IMU Data Collector"))
+            alert.setInformativeText_(
+                _text(
+                    "退出后将释放 IMU 和摄像头，浏览器页面也会停止工作。",
+                    "Exiting releases the IMU and camera and stops the local WebUI.",
+                )
+            )
+            alert.setAlertStyle_(AppKit.NSAlertStyleWarning)
+            alert.addButtonWithTitle_(_text("退出", "Exit"))
+            alert.addButtonWithTitle_(_text("取消", "Cancel"))
+            return int(alert.runModal()) == int(AppKit.NSAlertFirstButtonReturn)
+        except Exception:
+            logger.exception("无法显示 macOS 退出确认框")
+            return False
     if os.name != "nt":
         return True
     result = ctypes.windll.user32.MessageBoxW(
@@ -75,6 +116,15 @@ def _confirm_exit() -> bool:
         0x00000004 | 0x00000020,
     )
     return result == 6
+
+
+def _uses_chinese() -> bool:
+    language = locale.getlocale()[0] or os.environ.get("LANG", "")
+    return language.lower().startswith("zh")
+
+
+def _text(chinese: str, english: str) -> str:
+    return chinese if _uses_chinese() else english
 
 
 def _create_icon_image() -> Image.Image:
@@ -132,6 +182,51 @@ def _release_windows_mutex(handle: int | None) -> None:
     kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
+def _acquire_instance_lock() -> tuple[int | None, bool]:
+    """返回平台锁句柄和“已有实例”标记。"""
+
+    if platform_id() == "windows":
+        return _acquire_windows_mutex()
+    if platform_id() != "macos":
+        return None, False
+    import fcntl
+
+    lock_path = user_cache_dir() / "application.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        return None, True
+    return descriptor, False
+
+
+def _release_instance_lock(handle: int | None) -> None:
+    if handle is None:
+        return
+    if platform_id() == "windows":
+        _release_windows_mutex(handle)
+        return
+    if platform_id() == "macos":
+        import fcntl
+
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        os.close(handle)
+
+
+def _open_folder(path: os.PathLike[str] | str) -> None:
+    target = os.fspath(path)
+    if platform_id() == "windows":
+        os.startfile(target)  # type: ignore[attr-defined]
+        return
+    subprocess.Popen(
+        ["open", target],
+        close_fds=True,
+        **background_subprocess_kwargs(),
+    )
+
+
 class TrayApplication:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -144,8 +239,31 @@ class TrayApplication:
     def open_webui(self, _icon: Any = None, _item: Any = None) -> None:
         webbrowser.open(self.url)
 
+    def open_data_folder(self, _icon: Any = None, _item: Any = None) -> None:
+        self.settings.data_root.mkdir(parents=True, exist_ok=True)
+        _open_folder(self.settings.data_root)
+
+    def open_log_folder(self, _icon: Any = None, _item: Any = None) -> None:
+        path = user_cache_dir() / "logs"
+        path.mkdir(parents=True, exist_ok=True)
+        _open_folder(path)
+
+    def status_text(self, _item: Any = None) -> str:
+        health = _health(self.url)
+        state = str((health or {}).get("state", "offline"))
+        return _text(f"状态：{state}", f"Status: {state}")
+
     def _start_server(self) -> None:
-        if _health(self.url):
+        existing = _health(self.url)
+        if existing:
+            if existing.get("build_id") != CAPTURE_API_BUILD_ID:
+                raise RuntimeError(
+                    _text(
+                        "端口上已有其他版本的数采后端；请先退出旧应用后再启动当前版本",
+                        "Another collector version is using this port. "
+                        "Exit the old app before starting this version.",
+                    )
+                )
             logger.info("复用已经运行的数采后端：%s", self.url)
             return
         config = uvicorn.Config(
@@ -175,15 +293,24 @@ class TrayApplication:
                 break
             time.sleep(0.2)
         raise RuntimeError(
-            f"本地后端未能在 20 秒内启动。请确认端口 {self.settings.server_port} 未被其他程序占用。"
+            _text(
+                "本地后端未能在 20 秒内启动。请确认端口 "
+                f"{self.settings.server_port} 未被其他程序占用。",
+                "The local backend did not start within 20 seconds. Make sure port "
+                f"{self.settings.server_port} is not in use.",
+            )
         )
 
     def _exit(self, icon: Any, _item: Any = None) -> None:
         health = _health(self.url)
         if health and health.get("state") in {"arming", "recording"}:
             _show_message(
-                "正在录制",
-                "当前录制尚未停止。请先在 WebUI 点击“结束录制”，等待进入后台收尾后再退出。",
+                _text("正在录制", "Recording in progress"),
+                _text(
+                    "当前录制尚未停止。请先在 WebUI 点击“结束录制”，等待进入后台收尾后再退出。",
+                    "Stop the recording in the WebUI and wait for background "
+                    "finalization before exiting.",
+                ),
                 error=True,
             )
             return
@@ -198,13 +325,18 @@ class TrayApplication:
 
         self._start_server()
         menu = pystray.Menu(
-            pystray.MenuItem("打开数采页面", self.open_webui, default=True),
-            pystray.MenuItem("退出", self._exit),
+            pystray.MenuItem(_text("打开数采页面", "Open WebUI"), self.open_webui, default=True),
+            pystray.MenuItem(self.status_text, None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(_text("打开数据目录", "Open Data Folder"), self.open_data_folder),
+            pystray.MenuItem(_text("打开日志目录", "Open Log Folder"), self.open_log_folder),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(_text("退出", "Exit"), self._exit),
         )
         self.icon = pystray.Icon(
             "imu-data-collector",
             _create_icon_image(),
-            "CW12EU-T IMU 数采平台",
+            _text("CW12EU-T IMU 数采平台", "CW12EU-T IMU Data Collector"),
             menu,
         )
         self.open_webui()
@@ -219,14 +351,21 @@ class TrayApplication:
 
 def main() -> None:
     _configure_logging()
-    if platform_id() != "windows":
-        _show_message("不支持的平台", "托盘入口目前只支持 Windows。", error=True)
+    if platform_id() not in {"windows", "macos"}:
+        _show_message(
+            _text("不支持的平台", "Unsupported platform"),
+            _text(
+                "桌面托盘入口只支持 Windows 和 macOS。",
+                "The desktop tray app supports Windows and macOS only.",
+            ),
+            error=True,
+        )
         return
-    mutex: int | None = None
+    instance_lock: int | None = None
     try:
         settings = load_settings()
         url = f"http://{settings.server_host}:{settings.server_port}"
-        mutex, already_running = _acquire_windows_mutex()
+        instance_lock, already_running = _acquire_instance_lock()
         if already_running:
             webbrowser.open(url)
             return
@@ -234,9 +373,12 @@ def main() -> None:
     except Exception as error:
         logger.exception("托盘应用启动或运行失败")
         _show_message(
-            "IMU 数采平台启动失败",
-            f"{error}\n\n详细日志位于本机应用缓存目录的 logs/tray.log。",
+            _text("IMU 数采平台启动失败", "IMU Data Collector failed to start"),
+            _text(
+                f"{error}\n\n详细日志位于本机应用缓存目录的 logs/tray.log。",
+                f"{error}\n\nSee logs/tray.log in the application cache directory for details.",
+            ),
             error=True,
         )
     finally:
-        _release_windows_mutex(mutex)
+        _release_instance_lock(instance_lock)

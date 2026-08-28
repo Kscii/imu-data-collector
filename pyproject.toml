@@ -1,6 +1,6 @@
 [project]
 name = "imu-data-collector"
-version = "0.1.0"
+version = "0.2.0"
 description = "以时间戳为核心的 CW12EU-T IMU 与 UVC 视频数据采集平台"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -20,6 +20,11 @@ dependencies = [
     "uvicorn[standard]>=0.35.0",
     "pystray>=0.19.5",
     "pillow>=12.3.0",
+    "pyobjc-framework-avfoundation>=11.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-corebluetooth>=11.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-coremedia>=11.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-cocoa>=11.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-quartz>=11.0 ; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

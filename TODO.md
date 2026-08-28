@@ -27,12 +27,19 @@
 - [x] capture H5 schema 1.6 冻结 OS、架构、Python 单调时钟实现、BLE/视频后端、本地设备标识、摄像头控制策略和视频时间映射；标注端继续兼容 1.5 与 1.6。
 - [x] 2026-08-28 Windows 10 x64 局域网真机源码验收：138 项 Python 测试与 Ruff 通过，前端双构建通过；PyInstaller onedir 独立 EXE 能找到随包 FFmpeg，并完成 `doctor`、DirectShow 枚举及全新数据目录下的健康接口验收。
 - [~] Windows 双入口已实现：无控制台托盘程序负责双击启动、单实例、打开 WebUI 和安全退出，控制台程序保留诊断命令；Windows 10 已验证托盘进程进入图形 Session 1、无控制台窗口、健康接口 200 且重复启动仍为单实例，仍待人工点击菜单验收“打开页面”和优雅退出。
-- [~] Windows 10/11 x64 未签名试用安装包与 GitHub Release 工作流已实现；仍需真实物理摄像头 30 FPS、CW12EU-T WinRT 通知、完整 H5/MKV 和安装/卸载人工验收。
-- [~] macOS 实验性 onedir 工作流已实现；在获得物理 Mac、Apple 签名和公证前不得标记生产可用。
+- [~] Windows 10/11 x64 未签名试用安装包与 GitHub Release 工作流已实现；Windows 10 已完成
+  罗技约 30 FPS 预览、CW12EU-T WinRT 通知、短录制 H5/MKV、Google 登录和上传验收。仍待
+  Windows 11、安装/卸载、长录制和断线恢复人工验收。
+- [~] macOS 13+ Intel/Apple Silicon 分架构菜单栏 `.app`、ad-hoc 签名 DMG、CoreBluetooth
+  本机 UUID 绑定、AVFoundation 真实模式、VideoToolbox 实测回退和 GitHub Release 门禁已实现；
+  等待 Intel 真机完成权限、BLE、罗技摄像头、完整录制、Keychain 登录上传和故障恢复验收。
+  Apple Silicon 当前只有 CI 证据；未公证测试版不得描述成正式对外发行版。
 - [x] 桌面 Google OAuth + PKCE、系统凭据库、上传代理与单录制 GCS resumable upload 已实现；源码默认本机归档，发布安装包由 CI 注入 broker 配置。代理在 manifest-last 前核对三个对象的大小和 SHA-256。
-- [ ] 在 Google Auth Platform 创建 Desktop OAuth client，填写 GitHub 公开变量与服务器私有配置；完成 Windows 登录、网络中断/重试、标注端索引的云端端到端验收。
-- [ ] 获得可用物理 Windows 摄像头后验证“最高稳定 30 FPS 分辨率”选择；2026-08-28 测试主机只暴露未启动的 OBS Virtual Camera，不能作为物理摄像头验收。
-- [ ] 让 CW12EU-T 与 Arch 完全断开后，在 Windows 蓝牙设置中配对同一设备，验证 WinRT 扫描、通知、25 Hz 原始时间轴、断线恢复和单连接限制。
+- [~] Google Auth Platform Desktop client、GitHub 公开变量与服务器私有 OAuth secret 已配置；
+  Windows 登录、上传和标注端接收已验收，仍待网络中断后的断点续传验收。
+- [x] Windows 10 已使用真实罗技摄像头验证约 30 FPS 输入与浏览器预览，并完成短录制。
+- [~] Windows 10 已在 Arch 完全断开后按固定 public address 取得 GATT 服务、订阅通知并在 WebUI
+  显示约 25 Hz 原始曲线；仍待断电、超距和自动恢复验收。
 
 ### 当前跨仓库小任务
 

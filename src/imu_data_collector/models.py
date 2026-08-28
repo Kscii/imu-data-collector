@@ -117,7 +117,7 @@ class ExclusionReason(StrEnum):
 class RecordingStartRequest(BaseModel):
     collection_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
     participant_id: str
-    data_tier: DataTier = DataTier.TEST
+    data_tier: DataTier = DataTier.PROD
     body_location: str = "chest"
     protocol_id: str = "fall_binary_v1"
     camera_id: str | None = Field(default=None, max_length=512)
@@ -133,6 +133,7 @@ class RecordingStartRequest(BaseModel):
 
 class PreviewStartRequest(BaseModel):
     camera_id: str | None = Field(default=None, max_length=512)
+    imu_local_device_id: str | None = Field(default=None, max_length=128)
 
 
 class ActivitySegment(BaseModel):

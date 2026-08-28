@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "IMU 数采平台";
+"NSCameraUsageDescription" = "用于录制与 IMU 样本按时间戳对齐的视频。";
+"NSBluetoothAlwaysUsageDescription" = "用于接收 CW12EU-T 传感器的 IMU 样本。";
+"NSBluetoothPeripheralUsageDescription" = "用于接收 CW12EU-T 传感器的 IMU 样本。";

@@ -1,10 +1,13 @@
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from bleak.backends.device import BLEDevice
 
 import imu_data_collector.ble as ble_module
 from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.config import ImuSettings
+from imu_data_collector.device_binding import DeviceBindingStore
 
 
 @pytest.mark.asyncio
@@ -103,6 +106,10 @@ async def test_scan_timeout_reports_target_not_advertising(
         async def stop(self) -> None:
             return None
 
+        @staticmethod
+        async def discover(**_kwargs: Any) -> dict[str, Any]:
+            return {}
+
     monkeypatch.setattr(ble_module.sys, "platform", "darwin")
     monkeypatch.setattr(ble_module, "BleakScanner", EmptyScanner)
 
@@ -112,7 +119,7 @@ async def test_scan_timeout_reports_target_not_advertising(
 
     assert caught.value.code == "imu_not_advertising"
     assert caught.value.phase == "scan"
-    assert "手机" in caught.value.hint
+    assert "其他电脑" in caught.value.hint
 
 
 @pytest.mark.asyncio
@@ -135,3 +142,80 @@ async def test_gatt_discovery_failure_has_stable_error_code(
 
     assert caught.value.code == "imu_gatt_discovery_failed"
     assert caught.value.phase == "gatt"
+
+
+@pytest.mark.asyncio
+async def test_macos_requires_selection_when_multiple_same_name_devices_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = {
+        "LOCAL-1": (
+            BLEDevice("LOCAL-1", "CW12EU-T", None),
+            SimpleNamespace(local_name="CW12EU-T"),
+        ),
+        "LOCAL-2": (
+            BLEDevice("LOCAL-2", "CW12EU-T", None),
+            SimpleNamespace(local_name="CW12EU-T"),
+        ),
+    }
+
+    class FakeScanner:
+        @staticmethod
+        async def discover(**_kwargs: Any):
+            return devices
+
+    monkeypatch.setattr(ble_module.sys, "platform", "darwin")
+    monkeypatch.setattr(ble_module, "BleakScanner", FakeScanner)
+
+    source = CW12EUBleSource(ImuSettings(), binding_store=None)
+    with pytest.raises(BleOperationError) as caught:
+        await source.connect()
+
+    assert caught.value.code == "imu_multiple_candidates"
+    assert [item["local_device_id"] for item in caught.value.context["candidates"]] == [
+        "LOCAL-1",
+        "LOCAL-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_macos_binding_is_saved_only_after_notification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    device = BLEDevice("LOCAL-1", "CW12EU-T", None)
+
+    class FakeScanner:
+        @staticmethod
+        async def discover(**_kwargs: Any):
+            return {
+                "LOCAL-1": (
+                    device,
+                    SimpleNamespace(local_name="CW12EU-T"),
+                )
+            }
+
+    class FakeClient:
+        def __init__(self, _device: Any, **_kwargs: Any) -> None:
+            self.is_connected = False
+
+        async def connect(self) -> None:
+            self.is_connected = True
+
+        async def start_notify(self, _uuid: str, callback: Any) -> None:
+            callback(None, bytearray(b"verified-notification"))
+
+    store = DeviceBindingStore(tmp_path / "bindings.json")
+    monkeypatch.setattr(ble_module.sys, "platform", "darwin")
+    monkeypatch.setattr(ble_module, "BleakScanner", FakeScanner)
+    monkeypatch.setattr(ble_module, "BleakClient", FakeClient)
+
+    source = CW12EUBleSource(ImuSettings(), binding_store=store)
+    await source.start()
+
+    binding = store.load_imu(
+        expected_name="CW12EU-T",
+        notify_uuid=source.settings.notify_uuid,
+    )
+    assert binding is not None
+    assert binding.local_device_id == "LOCAL-1"

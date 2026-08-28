@@ -17,7 +17,8 @@ from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
-from imu_data_collector.host import resource_path
+from imu_data_collector.device_binding import DeviceBindingStore
+from imu_data_collector.host import platform_id, resource_path
 from imu_data_collector.models import (
     CharacterizationStageRequest,
     CharacterizationStartRequest,
@@ -125,7 +126,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
             "minimum_free_gib": active.minimum_free_gib,
             "allowed_unikeys": list(active.identity.allowed_unikeys),
             "data_tiers": ["test", "prod"],
-            "default_data_tier": "test",
+            "default_data_tier": active.capture.default_data_tier,
             "background_jobs": {
                 "allow_during_recording": active.background_jobs.allow_during_recording,
                 "automatic_prod_publish": active.publish.mode != "disabled",
@@ -238,7 +239,23 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
             bool, Query(description="忽略会话缓存并重新枚举摄像头")
         ] = False,
     ) -> dict[str, Any]:
-        cameras = await coordinator.list_cameras(refresh=refresh_cameras)
+        try:
+            cameras = await coordinator.list_cameras(refresh=refresh_cameras)
+        except Exception as error:
+            raise HTTPException(
+                status_code=409,
+                detail=_operation_error_detail(
+                    error,
+                    code="camera_discovery_failed",
+                    component="video",
+                    hint=(
+                        "请在系统设置 → 隐私与安全性 → 相机中允许 "
+                        "IMU Data Collector，然后重新扫描摄像头"
+                        if platform_id() == "macos"
+                        else "请确认摄像头已连接且未被其他程序占用"
+                    ),
+                ),
+            ) from error
         ble: list[dict[str, Any]] = []
         ble_scan: dict[str, Any] = {
             "requested": False,
@@ -276,11 +293,45 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
                             error,
                             code="ble_scan_failed",
                             component="ble",
-                            hint="请检查 Windows 蓝牙服务和适配器状态后重试",
+                            hint=(
+                                "请检查系统设置 → 隐私与安全性 → 蓝牙后重试"
+                                if platform_id() == "macos"
+                                else "请检查 Windows 蓝牙服务和适配器状态后重试"
+                                if platform_id() == "windows"
+                                else "请检查 BlueZ 服务和适配器状态后重试"
+                            ),
                         ),
                     }
                 )
-        return {"cameras": cameras, "ble": ble, "ble_scan": ble_scan}
+        binding_store = DeviceBindingStore()
+        permissions: dict[str, Any] = {}
+        if platform_id() == "macos":
+            from imu_data_collector.macos_devices import permission_statuses
+
+            permissions = await asyncio.to_thread(permission_statuses)
+        return {
+            "cameras": cameras,
+            "ble": ble,
+            "ble_scan": ble_scan,
+            "platform": platform_id(),
+            "permissions": permissions,
+            "imu_binding": binding_store.status(
+                expected_name=active.imu.name,
+                notify_uuid=active.imu.notify_uuid,
+            ),
+        }
+
+    @app.delete("/api/v1/devices/imu-binding")
+    async def forget_imu_binding() -> dict[str, Any]:
+        """忘记本机 CoreBluetooth UUID；当前已建立的连接不受影响。"""
+
+        store = DeviceBindingStore()
+        store.forget_imu()
+        active.imu.local_device_id = None
+        return store.status(
+            expected_name=active.imu.name,
+            notify_uuid=active.imu.notify_uuid,
+        )
 
     @app.post("/api/v1/recordings/start")
     async def start(request: RecordingStartRequest) -> dict[str, Any]:

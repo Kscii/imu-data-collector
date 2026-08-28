@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "IMU Data Collector";
+"NSCameraUsageDescription" = "Records video aligned with IMU samples by timestamp.";
+"NSBluetoothAlwaysUsageDescription" = "Receives IMU samples from the CW12EU-T sensor.";
+"NSBluetoothPeripheralUsageDescription" = "Receives IMU samples from the CW12EU-T sensor.";

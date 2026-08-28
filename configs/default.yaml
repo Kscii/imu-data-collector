@@ -5,6 +5,10 @@ server_host: "127.0.0.1"
 server_port: 8765
 minimum_free_gib: 20
 
+capture:
+  # 没有浏览器会话记录时，所有平台默认采集正式数据；正式质量门禁不会放宽。
+  default_data_tier: "prod"
+
 identity:
   # 参与者和标注者共用同一白名单；修改后需重启本地服务。
   allowed_unikeys:

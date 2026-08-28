@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   windows:
-    name: Windows 10/11 x64 单安装器
+    name: Windows 10/11 x64 安装器
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -50,7 +50,7 @@ jobs:
           if ($env:GITHUB_REF -like "refs/tags/desktop-v*") {
             $version = $env:GITHUB_REF_NAME -replace '^desktop-v', ''
           } else {
-            $version = "0.1.0-dev.$env:GITHUB_RUN_NUMBER"
+            $version = "0.2.0-dev.$env:GITHUB_RUN_NUMBER"
           }
           if ($version -notmatch '^\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?$') {
             throw "无效的桌面版本：$version"
@@ -62,9 +62,7 @@ jobs:
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup --no-progress -y
-          }
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
           if (-not (Test-Path $iscc)) { throw "没有找到 Inno Setup 6 编译器" }
       - name: 构建安装器
         shell: pwsh
@@ -79,15 +77,23 @@ jobs:
           & (Join-Path $target "imu-collector.exe") doctor
       - name: 生成 SHA-256
         shell: pwsh
-        run: Get-FileHash dist-installer\*.exe -Algorithm SHA256 | Format-List | Out-File dist-installer\SHA256SUMS.txt
+        run: Get-FileHash dist-installer\*.exe -Algorithm SHA256 | Format-List | Out-File dist-installer\SHA256SUMS-Windows.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: imu-data-collector-windows-x64-unsigned
+          name: imu-data-collector-windows-x64
           path: dist-installer/*
 
   macos:
-    name: macOS 实验性命令行包
-    runs-on: macos-latest
+    name: macOS 13+ ${{ matrix.arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@v7.0.0
@@ -99,11 +105,13 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+      - name: 校验 Runner 架构
+        run: test "$(uname -m)" = "${{ matrix.arch }}"
       - name: 构建采集 WebUI
         working-directory: frontend
         run: npm ci && npm run build:capture
       - name: 安装锁定依赖
-        run: uv sync --frozen --group package
+        run: uv sync --frozen --dev --group package
       - name: 生成团队桌面配置
         env:
           BROKER_URL: ${{ vars.DESKTOP_UPLOAD_BROKER_URL }}
@@ -113,31 +121,79 @@ jobs:
           test -n "${OAUTH_CLIENT_ID}" || { echo "缺少仓库变量 DESKTOP_GOOGLE_OAUTH_CLIENT_ID" >&2; exit 1; }
           uv run python scripts/prepare_desktop_config.py --output build/desktop-config --broker-url "${BROKER_URL}" --oauth-client-id "${OAUTH_CLIENT_ID}"
           echo "IMU_DESKTOP_CONFIG_DIR=$(pwd)/build/desktop-config" >> "${GITHUB_ENV}"
-      - name: 构建实验性 onedir
-        run: uv run --group package pyinstaller --noconfirm --clean packaging/imu_collector.spec
-      - name: 打包并生成 SHA-256
+      - name: 解析应用版本
         run: |
-          tar -C dist -czf imu-data-collector-macos-experimental.tar.gz imu-collector
-          shasum -a 256 imu-data-collector-macos-experimental.tar.gz > SHA256SUMS-macos.txt
+          if [[ "${GITHUB_REF}" == refs/tags/desktop-v* ]]; then
+            version="${GITHUB_REF_NAME#desktop-v}"
+            bundle_version="${version%%-*}"
+          else
+            version="0.2.0-dev.${GITHUB_RUN_NUMBER}"
+            bundle_version="0.2.${GITHUB_RUN_NUMBER}"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
+          [[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "APP_VERSION=$version" >> "${GITHUB_ENV}"
+          echo "APP_BUNDLE_VERSION=$bundle_version" >> "${GITHUB_ENV}"
+      - uses: actions/cache@v5
+        with:
+          path: third_party/ffmpeg
+          key: macos-ffmpeg-${{ matrix.arch }}-n8.1.2-b35605ace3ddf7c1a5d67a2eb553f034aef41d55-v1
+      - name: 从锁定源码构建 FFmpeg 与 x264
+        run: ./packaging/macos/prepare-ffmpeg.sh
+      - name: macOS 单元与平台适配测试
+        run: uv run pytest -q
+      - name: 生成应用图标
+        run: uv run python packaging/macos/prepare-icon.py
+      - name: 构建菜单栏应用
+        run: uv run --group package pyinstaller --noconfirm --clean packaging/imu_collector.spec
+      - name: ad-hoc 签名与应用结构验收
+        run: |
+          app="dist/IMU Data Collector.app"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "13.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist")" = "true"
+          file "$app/Contents/MacOS/IMU Data Collector" | grep -q "${{ matrix.arch }}"
+          ffmpeg="$(find "$app/Contents" -type f -path '*/third_party/ffmpeg/bin/ffmpeg' -print -quit)"
+          ffprobe="$(find "$app/Contents" -type f -path '*/third_party/ffmpeg/bin/ffprobe' -print -quit)"
+          test -x "$ffmpeg" && test -x "$ffprobe"
+          ! otool -L "$ffmpeg" | grep -E '/(opt/homebrew|usr/local)/'
+          ! otool -L "$ffprobe" | grep -E '/(opt/homebrew|usr/local)/'
+          "$ffmpeg" -hide_banner -encoders > build/encoders.txt 2>&1
+          grep -q libx264 build/encoders.txt
+          grep -q h264_videotoolbox build/encoders.txt
+          "$ffmpeg" -hide_banner -loglevel error -f lavfi -i color=c=black:s=128x128:r=30 -frames:v 1 -c:v libx264 -f null /dev/null
+          "$ffmpeg" -hide_banner -loglevel error -f lavfi -i color=c=black:s=128x128:r=30 -frames:v 1 -c:v h264_videotoolbox -allow_sw 1 -f null /dev/null
+          "$app/Contents/MacOS/imu-collector" --help
+      - name: 构建并挂载验收 DMG
+        run: |
+          ./packaging/macos/build-dmg.sh "${{ matrix.arch }}"
+          dmg="$(find dist-installer -name '*.dmg' -print -quit)"
+          mountpoint="${RUNNER_TEMP}/imu-data-collector-dmg"
+          mkdir -p "$mountpoint"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg"
+          test -d "$mountpoint/IMU Data Collector.app"
+          hdiutil detach "$mountpoint"
+          shasum -a 256 "$dmg" > "dist-installer/SHA256SUMS-macOS-${{ matrix.arch }}.txt"
       - uses: actions/upload-artifact@v6
         with:
-          name: imu-data-collector-macos-experimental
-          path: |
-            imu-data-collector-macos-experimental.tar.gz
-            SHA256SUMS-macos.txt
+          name: imu-data-collector-macos-${{ matrix.arch }}
+          path: dist-installer/*
 
   release:
-    name: 发布 Windows 稳定 GitHub Release
+    name: 发布 Windows 与 macOS 稳定 GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [windows]
+    needs: [windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: imu-data-collector-windows-x64-unsigned
+          pattern: imu-data-collector-*
           path: release-artifacts
+          merge-multiple: true
       - name: 创建稳定 Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -145,4 +201,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" release-artifacts/*
           --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}"
           --latest
-          --notes "Windows 10/11 x64 小组内部稳定版。安装器尚未签名，首次安装可能出现 SmartScreen 提示。"
+          --notes "Windows 10/11 x64 与 macOS 13+（Apple Silicon、Intel）小组内部稳定版。当前安装包采用未公证的 ad-hoc 签名；Windows 首次安装可能出现 SmartScreen，macOS 首次启动请右键应用并选择‘打开’。"

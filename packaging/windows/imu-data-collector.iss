@@ -1,6 +1,6 @@
 #define AppName "CW12EU-T IMU 数采平台"
 #ifndef AppVersion
-  #define AppVersion "0.1.0-dev"
+  #define AppVersion "0.2.0-dev"
 #endif
 #define AppPublisher "Kscii"
 #define AppExeName "imu-data-collector.exe"

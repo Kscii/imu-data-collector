@@ -38,7 +38,7 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
         assert len(config.json()["build_id"]) == 16
         assert config.json()["data_root"] == str(data_root)
         assert config.json()["data_tiers"] == ["test", "prod"]
-        assert config.json()["default_data_tier"] == "test"
+        assert config.json()["default_data_tier"] == "prod"
         assert config.json()["imu"]["calibration_verified"] is False
         assert config.json()["allowed_unikeys"] == [
             "rkim6933",
@@ -106,6 +106,33 @@ def test_device_endpoint_reuses_camera_cache_until_explicit_refresh(
     assert refreshed.json()["cameras"] == [
         {"camera_id": "camera-2", "refresh": True}
     ]
+
+
+def test_device_endpoint_reports_camera_discovery_failure_as_actionable_error(
+    tmp_path: Path,
+) -> None:
+    app = create_capture_app(
+        Settings(
+            data_root=tmp_path / "data",
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+
+    async def fail_cameras(*, refresh: bool = False):
+        del refresh
+        raise RuntimeError("camera permission denied")
+
+    app.state.coordinator.list_cameras = fail_cameras
+    with TestClient(app) as client:
+        response = client.get("/api/v1/devices")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "camera_discovery_failed"
+    assert detail["component"] == "video"
+    assert detail["retryable"] is True
+    assert "camera permission denied" in detail["message"]
 
 
 def test_start_contract_rejects_non_unikey_participant_before_hardware_access(
