@@ -1295,7 +1295,7 @@ class AnnotationService:
         review: ReviewDocument,
         expected_revision: int,
     ) -> TrainingExportReference:
-        """为固定 review revision 构建并上传不可变 aligned25 对象。"""
+        """为固定 review revision 构建并上传不可变 aligned 对象。"""
 
         recording_id = manifest.recording_id
         if manifest.data_tier.value != "prod":
@@ -1318,7 +1318,7 @@ class AnnotationService:
             / "exports"
             / recording_id
             / f"review-{expected_revision}"
-            / "aligned25.h5"
+            / "aligned.h5"
         )
         try:
             export_taxonomy = self.taxonomy_definition(
@@ -1353,7 +1353,7 @@ class AnnotationService:
             logical_digest = str(handle.attrs["logical_content_sha256"])
         key = (
             f"exports/{recording_id}/review-{expected_revision}/"
-            f"aligned25-{logical_digest[:16]}.h5"
+            f"aligned-{logical_digest[:16]}.h5"
         )
         metadata = {
             "sha256": digest,
@@ -1386,7 +1386,7 @@ class AnnotationService:
             export_schema_version="2.0.0",
             hdf5_schema_version=TRAINING_SCHEMA_VERSION,
             sampling_rate_hz=25.0,
-            filename="aligned25.h5",
+            filename="aligned.h5",
             source_review_revision=expected_revision,
             object_key=key,
             sha256=digest,

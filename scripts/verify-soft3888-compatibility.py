@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ import numpy as np
 
 from imu_data_collector.artifacts import (
     create_training_snapshot_archive,
-    export_aligned30,
+    export_aligned,
 )
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.hdf5_store import sha256_file
@@ -40,6 +41,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=(Path(value) if (value := os.environ.get("SOFT3888_ROOT")) else None),
         help="SOFT3888_TU16_04 checkout；提供后会运行其 validate-team",
+    )
+    parser.add_argument(
+        "--snapshot-output",
+        type=Path,
+        help="可选：把生成的确定性测试快照复制到该路径，供 import-team 验收",
     )
     return parser
 
@@ -168,11 +174,11 @@ def main() -> None:
                 last_editor_id="xfan0282",
             ),
         )
-        aligned = export_aligned30(
+        aligned = export_aligned(
             review,
             capture,
             video,
-            root / "aligned30.h5",
+            root / "aligned.h5",
             ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
             taxonomy,
         )
@@ -180,12 +186,16 @@ def main() -> None:
             [("xfan0282", "compatibility-1", aligned)],
             root / "cw12eu_contract_snapshot.tar",
         )
+        if arguments.snapshot_output is not None:
+            arguments.snapshot_output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snapshot, arguments.snapshot_output)
         with h5py.File(aligned, "r") as handle:
             if (
-                str(handle.attrs.get("imu_schema_version")) != "3.0.0"
+                str(handle.attrs.get("imu_schema_version")) != "3.1.0"
+                or float(handle.attrs.get("sampling_rate_hz", 0.0)) != 25.0
                 or set(handle.keys()) != {"samples", "sequences", "annotations"}
             ):
-                raise RuntimeError("采集端没有生成 temporal HDF5 v3 三表合同")
+                raise RuntimeError("采集端没有生成 25 Hz temporal HDF5 v3.1 三表合同")
         if arguments.soft3888_root is None:
             print(f"采集端快照合同通过：{snapshot.name}；未指定 SOFT3888 checkout")
             return

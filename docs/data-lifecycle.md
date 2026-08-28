@@ -38,7 +38,7 @@ unassigned -> in_progress -> completed
 同步、标注、负责人、最后编辑者、revision 和当前有效导出。
 
 点击“完成标注并生成训练 H5”是一次受门禁保护的操作：先检查正式数据、完整覆盖、逐个跌倒
-impact、同步、来源哈希及校准档案，再生成不可变 `aligned25.h5`，最后以一次乐观锁更新把
+impact、同步、来源哈希及校准档案，再生成不可变 `aligned.h5`，最后以一次乐观锁更新把
 工作流设为 `completed`。导出失败时任务仍保持可编辑，不会出现“显示已完成但没有文件”。
 
 ## 3. 对象存储布局
@@ -53,7 +53,7 @@ captures/<recording_id>/
 reviews/<recording_id>/review.json
 
 exports/<recording_id>/review-<revision>/
-  aligned25-<logical_digest>.h5
+  aligned-<logical_digest>.h5
 
 training-snapshots/<snapshot_id>/
   cw12eu_<snapshot_id>.tar
@@ -65,6 +65,12 @@ benchmark-datasets/team/cw12eu/<snapshot_id>/
 
 benchmark-datasets/team/cw12eu/current.json
 
+benchmark-datasets/base/<snapshot_id>/
+  datasets/<dataset_id>.h5
+  manifest.json
+
+benchmark-datasets/base/current.json
+
 calibration-evidence/<profile_id>/<recording_id>/
   capture.h5
   video.mkv
@@ -73,17 +79,17 @@ calibration-evidence/<profile_id>/<recording_id>/
   archive-manifest.json
 ```
 
-`active_export` 记录实际 aligned25 对象键、SHA-256、逻辑摘要、校准证据摘要和来源 revision。
-稳定键不覆盖旧文件，因此重开、修改并再次完成后不会下载旧 aligned25。历史
+`active_export` 记录实际 aligned 对象键、SHA-256、逻辑摘要、校准证据摘要和来源 revision。
+稳定键不覆盖旧文件，因此重开、修改并再次完成后不会下载旧 aligned。历史
 `aligned30.h5` 只保留只读下载兼容；创建新快照前必须重开并重新完成这些旧录制。
 
 ## 4. 训练快照
 
 训练快照是用户点击时对“当前所有已完成正式录制”的冻结视图。服务按录制 ID、导出 revision、
-aligned25 SHA-256 和逻辑摘要计算内容指纹，并生成 `snapshot-<digest>`：
+aligned SHA-256 和逻辑摘要计算内容指纹，并生成 `snapshot-<digest>`：
 
 - 内容相同直接复用已有快照；
-- TAR 自包含所有 aligned25 和逐文件 SHA-256 manifest；
+- TAR 自包含所有 aligned 和逐文件 SHA-256 manifest；
 - 同时合并生成一个可被 benchmark 直接读取的 `cw12eu.h5`；
 - 合并 HDF5 与 manifest 写入不可变 snapshot 前缀，再用 generation 前置条件原子推进
   `current.json`；
@@ -98,7 +104,7 @@ current pointer 不随之删除。训练系统解析受校验的 `current.json` 
 对象列表中的“最新”当作隐式依赖。
 
 快照存在多层显式版本，不能混为一个字段：平台对象存储侧清单使用 `3.0.0`，TAR 内
-`manifest.json` 使用 `2.0.0`，每个 `aligned25.h5` 与合并后的 `cw12eu.h5` 使用 IMU HDF5
+`manifest.json` 使用 `2.0.0`，每个 `aligned.h5` 与合并后的 `cw12eu.h5` 使用 IMU HDF5
 `3.1.0`，benchmark manifest 使用 `imu_benchmark_dataset_manifest_v1` 并声明
 `imu_benchmark_contract_v2`。清单记录规范对象键、字节数、物理 SHA-256 和逻辑内容摘要；
 消费者必须先校验 manifest，再校验实际文件。
@@ -106,6 +112,12 @@ current pointer 不随之删除。训练系统解析受校验的 `current.json` 
 `imu-fall-benchmark` 直接从 `benchmark-datasets/team/cw12eu/current.json` 解析并校验合并后的
 HDF5；TAR 保留给逐录制归档和审计。团队录制不是第三方原始数据源，不需要再次走公共数据集
 adapter；它在此平台完成单位换算、同步、标注和严格 25 Hz 重采样后才发布。
+
+标注平台的“数据集”页只读解析公共和团队 `current.json`，并把不可变历史 manifest 折叠展示。
+目录只接受 `imu_benchmark_contract_v2`、HDF5 `3.1.0`、25 Hz 以及与集合相符的
+`evaluation_role`；下载对象键只能来自已验证 manifest，不能由浏览器传入任意路径。网页允许
+下载 manifest 和单个 H5 用于检查，正式训练仍使用 benchmark 仓库的 `./benchmark data pull`
+完成整套 SHA-256 校验和原子激活。目录 API 没有上传、删除或推进 current pointer 的能力。
 
 ## 5. 校准证据归档
 
@@ -137,7 +149,7 @@ generation 删除原始制品、review、导出和相关诊断引用；对象存
 
 ## 7. test、prod 与 25 Hz
 
-- `test`：联调和结构展示，可下载原始 H5 与 review；不能完成、生成 aligned25 或进入快照；
+- `test`：联调和结构展示，可下载原始 H5 与 review；不能完成、生成 aligned 或进入快照；
 - `prod`：正式采集意图，仍须通过视频、IMU、同步、标注、来源哈希和校准全部门禁。
 
 缺失数据级别的本地旧条目统一按安全的 `test` 处理；系统不提供 legacy 业务状态，也不从文件

@@ -51,10 +51,12 @@ sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
 ```text
 captures/<recording_id>/{capture.h5,video.mkv,preview.mp4,manifest.json}
 reviews/<recording_id>/review.json
-exports/<recording_id>/review-<revision>/aligned25-<digest>.h5
+exports/<recording_id>/review-<revision>/aligned-<digest>.h5
 training-snapshots/<snapshot_id>/{cw12eu_<snapshot_id>.tar,manifest.json}
 benchmark-datasets/team/cw12eu/<snapshot_id>/{datasets/cw12eu.h5,manifest.json}
 benchmark-datasets/team/cw12eu/current.json
+benchmark-datasets/base/<snapshot_id>/{datasets/<dataset_id>.h5,manifest.json}
+benchmark-datasets/base/current.json
 calibration-evidence/<profile_id>/<recording_id>/
 index-receipts/<recording_id>.json
 contracts/annotation-capabilities.json
@@ -66,6 +68,8 @@ benchmark 使用同一个 bucket；`benchmark-datasets/` 已创建为 managed fo
 `roles/storage.objectViewer` 只绑定到该资源，因此不需要也不应访问参与者视频或可变 review。
 team HDF5 和 manifest 使用不可变 snapshot 前缀，只有 `current.json` 会用对象 generation
 前置条件推进。
+标注平台对两个集合只提供经 manifest 解析的只读目录与下载；它不会上传公共数据、删除
+benchmark 对象或修改任何 `current.json`。
 
 ## GitHub Actions
 

@@ -198,13 +198,13 @@ def test_capture_package_excludes_mutable_review_sidecar(tmp_path: Path) -> None
         assert archive.getnames() == ["manifest.json", "capture.h5", "video.mkv"]
 
 
-def test_aligned25_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) -> None:
+def test_aligned_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) -> None:
     h5_path, mkv_path = write_source_pair(tmp_path)
     output = export_aligned(
         completed_review(h5_path, mkv_path),
         h5_path,
         mkv_path,
-        tmp_path / "aligned25.h5",
+        tmp_path / "aligned.h5",
         ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
         taxonomy(),
     )
@@ -388,21 +388,21 @@ def test_aligned_grid_keeps_derived_onset_equal_to_fall_activity_start(
     assert int(onset["start_sample"]) == int(activity["start_sample"])
 
 
-def test_aligned25_export_is_blocked_without_verified_calibration(tmp_path: Path) -> None:
+def test_aligned_export_is_blocked_without_verified_calibration(tmp_path: Path) -> None:
     h5_path, mkv_path = write_source_pair(tmp_path)
     with pytest.raises(ValueError, match="校准"):
         export_aligned(
             completed_review(h5_path, mkv_path),
             h5_path,
             mkv_path,
-            tmp_path / "aligned25.h5",
+            tmp_path / "aligned.h5",
             ImuSettings(),
             taxonomy(),
         )
 
 
 def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path) -> None:
-    aligned = tmp_path / "aligned25.h5"
+    aligned = tmp_path / "aligned.h5"
     aligned.write_bytes(b"aligned")
 
     output = create_training_snapshot_archive(
@@ -413,7 +413,7 @@ def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path
     with tarfile.open(output, "r:") as archive:
         assert archive.getnames() == [
             "manifest.json",
-            "recordings/xfan0282/recording-1/aligned25.h5",
+            "recordings/xfan0282/recording-1/aligned.h5",
         ]
         manifest_stream = archive.extractfile("manifest.json")
         assert manifest_stream is not None
@@ -424,7 +424,7 @@ def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path
         assert manifest["sampling_rate_hz"] == 25
         assert manifest["files"] == [
             {
-                "path": "recordings/xfan0282/recording-1/aligned25.h5",
+                "path": "recordings/xfan0282/recording-1/aligned.h5",
                 "size_bytes": len(b"aligned"),
                 "sha256": sha256_file(aligned),
             }
@@ -437,7 +437,7 @@ def test_merge_training_exports_creates_benchmark_shard(tmp_path: Path) -> None:
         completed_review(h5_path, mkv_path),
         h5_path,
         mkv_path,
-        tmp_path / "aligned25.h5",
+        tmp_path / "aligned.h5",
         ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
         taxonomy(),
     )

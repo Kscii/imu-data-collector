@@ -15,7 +15,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数采平台", "IMU Data Collector");
 
-type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library";
+type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets";
 type AnnotationTaskTab = "sync" | "annotate" | "review" | "data";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -56,7 +56,7 @@ function nextCollectionId(current: string, participant: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library" }
+    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library", datasets: "datasets" }
     : { capture: "capture", records: "library", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -263,6 +263,50 @@ type TrainingSnapshot = {
     current_object_key: string;
   } | null;
   created?: boolean;
+};
+
+type DatasetCatalogFile = {
+  dataset_id: string;
+  filename: string;
+  size_bytes: number;
+  sha256: string;
+  logical_content_sha256: string;
+  hdf5_schema_version: string;
+  sampling_rate_hz: number;
+  evaluation_role: "cross_validation" | "training_only";
+  sequences: number;
+  rows: number;
+  annotations: number;
+  events?: number;
+  segments?: number;
+  fall_sequences?: number;
+  participants?: number;
+  body_locations?: Record<string, number>;
+  supervision?: Record<string, number>;
+};
+
+type DatasetCatalogSnapshot = {
+  kind: "base" | "team";
+  snapshot_id: string;
+  current: boolean;
+  created_at_utc: string;
+  contract_version: string;
+  manifest_sha256: string;
+  source?: Record<string, unknown> | null;
+  files: DatasetCatalogFile[];
+};
+
+type DatasetCatalogCollection = {
+  kind: "base" | "team";
+  available: boolean;
+  current: DatasetCatalogSnapshot | null;
+  history: DatasetCatalogSnapshot[];
+  warnings: string[];
+};
+
+type DatasetCatalogDocument = {
+  schema_version: "imu_dataset_catalog_v1";
+  collections: DatasetCatalogCollection[];
 };
 
 type ReviewDocument = {
@@ -940,7 +984,7 @@ export default function App() {
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button>{session?.is_admin && <button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button>}<button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button></> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button>{session?.is_admin && <button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button>}<button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button></> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
           {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
@@ -993,6 +1037,7 @@ export default function App() {
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session?.is_admin && <TaxonomyAdminPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
+      {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
       {!annotationApplication && tab === "library" && <CaptureLibrary
         recordings={recordings}
         onChanged={refreshRecordings}
@@ -2307,7 +2352,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             {taskTab === "data" && review && <div className="panel compact-panel workflow-panel">
               <div className="panel-title">下载与录制管理</div>
               <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
-              <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned/download`} download>训练 aligned25.h5</a>}</div>
+              <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned/download`} download>训练 aligned.h5</a>}</div>
               <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
             </div>}
           </div>
@@ -2409,6 +2454,105 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { s
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
     </div>
   </article>;
+}
+
+function formatDatasetBytes(sizeBytes: number) {
+  if (sizeBytes >= 1024 ** 3) return `${(sizeBytes / 1024 ** 3).toFixed(2)} GiB`;
+  return `${(sizeBytes / 1024 ** 2).toFixed(2)} MiB`;
+}
+
+function DatasetCatalogPage() {
+  const [catalog, setCatalog] = useState<DatasetCatalogDocument | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setCatalog(await api<DatasetCatalogDocument>("/api/v1/dataset-catalog"));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => { void refresh(); }, []);
+
+  return <main>
+    {error && <div className="error-banner">{error}</div>}
+    <section className="panel dataset-catalog">
+      <div className="dataset-catalog-heading">
+        <div>
+          <div className="panel-title">只读数据集目录</div>
+          <p className="stage-help">这里展示 benchmark 当前版本和不可变历史版本。网页下载适合检查单个文件；正式训练仍推荐在 benchmark 仓库运行 <code>./benchmark data pull</code>，由命令统一校验并原子激活。</p>
+        </div>
+        <button disabled={busy} onClick={refresh}>{busy ? "正在刷新…" : "刷新目录"}</button>
+      </div>
+      {!catalog && !error && <span className="muted">正在读取数据集目录…</span>}
+      {catalog?.collections.map((collection) => <DatasetCollection key={collection.kind} collection={collection} />)}
+    </section>
+  </main>;
+}
+
+function DatasetCollection({ collection }: { collection: DatasetCatalogCollection }) {
+  const title = collection.kind === "base" ? "公共交叉验证数据" : "团队训练数据";
+  return <section className="dataset-collection">
+    <div className="dataset-collection-heading">
+      <div>
+        <h2>{title}</h2>
+        <span>{collection.kind === "base" ? "cross_validation" : "training_only"}</span>
+      </div>
+      <span className={`dataset-availability ${collection.available ? "available" : ""}`}>{collection.available ? "当前版本可用" : "尚未发布"}</span>
+    </div>
+    {collection.warnings.map((warning) => <div className="warning-banner compact-banner" key={warning}>{warning}</div>)}
+    {collection.current && <DatasetSnapshot snapshot={collection.current} />}
+    {collection.history.length > 0 && <details className="snapshot-history dataset-history">
+      <summary>历史版本（{collection.history.length}）</summary>
+      {collection.history.map((snapshot) => <DatasetSnapshot key={snapshot.snapshot_id} snapshot={snapshot} />)}
+    </details>}
+  </section>;
+}
+
+function DatasetSnapshot({ snapshot }: { snapshot: DatasetCatalogSnapshot }) {
+  const base = `/api/v1/dataset-catalog/${snapshot.kind}/${encodeURIComponent(snapshot.snapshot_id)}`;
+  return <article className={`dataset-snapshot ${snapshot.current ? "current-snapshot" : ""}`}>
+    <div className="dataset-snapshot-heading">
+      <div>
+        <strong>{snapshot.current ? "当前版本" : "历史版本"} · {snapshot.snapshot_id}</strong>
+        <span>{snapshot.files.length} 个 H5 · schema 3.1.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
+      </div>
+      <a className="button-link" href={`${base}/manifest/download`} download>下载 manifest</a>
+    </div>
+    <details className="dataset-checks"><summary>版本校验信息</summary><code>contract {snapshot.contract_version}</code><code>manifest SHA-256 {snapshot.manifest_sha256}</code></details>
+    <div className="dataset-file-grid">
+      {snapshot.files.map((file) => <DatasetFile key={file.dataset_id} snapshot={snapshot} file={file} />)}
+    </div>
+  </article>;
+}
+
+function DatasetFile({ snapshot, file }: { snapshot: DatasetCatalogSnapshot; file: DatasetCatalogFile }) {
+  const counts = [
+    `${file.sequences.toLocaleString()} 序列`,
+    `${file.rows.toLocaleString()} 行`,
+    `${file.annotations.toLocaleString()} 标注`,
+    `${(file.events ?? 0).toLocaleString()} 事件`,
+    `${(file.segments ?? 0).toLocaleString()} 区间`,
+    `${(file.fall_sequences ?? 0).toLocaleString()} 跌倒序列`,
+    `${(file.participants ?? 0).toLocaleString()} 参与者`,
+  ];
+  const locations = Object.entries(file.body_locations ?? {}).map(([name, count]) => `${name} ${count}`).join(" · ") || "—";
+  const supervision = Object.entries(file.supervision ?? {}).map(([name, count]) => `${name} ${count}`).join(" · ") || "—";
+  const url = `/api/v1/dataset-catalog/${snapshot.kind}/${encodeURIComponent(snapshot.snapshot_id)}/${encodeURIComponent(file.dataset_id)}/download`;
+  return <section className="dataset-file">
+    <div className="dataset-file-heading"><strong>{file.dataset_id}</strong><span>{formatDatasetBytes(file.size_bytes)}</span></div>
+    <p>{counts.join(" · ")}</p>
+    <p>位置 {locations}</p>
+    <p>监督 {supervision} · {file.evaluation_role}</p>
+    <details><summary>文件指纹</summary><code>SHA-256 {file.sha256}</code><code>logical {file.logical_content_sha256}</code></details>
+    <a className="button-link primary" href={url} download>下载 {file.filename}</a>
+  </section>;
 }
 
 function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }: {

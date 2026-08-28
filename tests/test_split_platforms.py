@@ -153,7 +153,7 @@ def _publish_fixture(
 
 def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> None:
     logical_digest = "b" * 64
-    aligned = tmp_path / f"{recording_id}.aligned25.h5"
+    aligned = tmp_path / f"{recording_id}.aligned.h5"
     text = h5py.string_dtype(encoding="utf-8")
     sequence_dtype = np.dtype(
         [
@@ -213,7 +213,7 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
             data=np.asarray([(0, "activity", 0, 2, "walking")], dtype=annotation_dtype),
         )
     digest = sha256_file(aligned)
-    key = f"exports/{recording_id}/review-0/aligned25-{logical_digest[:16]}.h5"
+    key = f"exports/{recording_id}/review-0/aligned-{logical_digest[:16]}.h5"
     info = store.put_file(
         aligned,
         key,
@@ -243,7 +243,7 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
                 export_schema_version="2.0.0",
                 hdf5_schema_version="3.1.0",
                 sampling_rate_hz=25.0,
-                filename="aligned25.h5",
+                filename="aligned.h5",
                 source_review_revision=0,
                 object_key=key,
                 sha256=digest,

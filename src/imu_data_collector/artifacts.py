@@ -77,13 +77,13 @@ def create_training_snapshot_archive(
     """把逐录制训练文件打包成一个不可变 TAR。"""
 
     if not files:
-        raise ValueError("没有已完成的 aligned25.h5 可加入训练快照")
+        raise ValueError("没有已完成的 aligned.h5 可加入训练快照")
     manifest_files = []
     archive_items: list[tuple[str, Path]] = []
     for participant_id, recording_id, path in sorted(files):
         if not path.is_file():
             raise ValueError(f"训练文件缺失：{path}")
-        archive_path = f"recordings/{participant_id}/{recording_id}/aligned25.h5"
+        archive_path = f"recordings/{participant_id}/{recording_id}/aligned.h5"
         archive_items.append((archive_path, path))
         manifest_files.append(
             {

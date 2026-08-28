@@ -36,7 +36,7 @@ jobs:
       - name: Pytest
         run: uv run pytest -q
       - name: SOFT3888 temporal v3 合同
-        run: uv run pytest -q tests/test_review_artifacts.py::test_aligned30_export_uses_three_root_datasets_and_exact_grid
+        run: uv run pytest -q tests/test_review_artifacts.py::test_aligned_export_uses_three_root_datasets_and_exact_grid
 
   desktop-portability:
     name: 桌面兼容性 · ${{ matrix.os }}
