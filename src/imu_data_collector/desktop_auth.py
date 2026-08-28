@@ -1,7 +1,7 @@
 """桌面端 Google OAuth 2.0 Authorization Code + PKCE 登录。
 
-客户端 ID 是公开配置；安装包不携带客户端密钥或服务账号密钥。长期 refresh token
-只进入操作系统凭据库，短期 ID token 只保留在进程内存中。
+安装包只携带公开 client ID；上传代理保管 Google client secret 并代理 token exchange。
+长期 refresh token 只进入操作系统凭据库，短期 ID token 只保留在进程内存中。
 """
 
 from __future__ import annotations
@@ -31,6 +31,27 @@ class OAuthPending:
     verifier: str
     redirect_uri: str
     created_monotonic: float
+
+
+def _oauth_http_error_message(error: requests.HTTPError) -> str:
+    """只暴露 Google 的标准错误字段，不回显授权码或 token 请求内容。"""
+
+    response = error.response
+    status = response.status_code if response is not None else 0
+    oauth_error = "unknown_error"
+    description = "请检查 OAuth 客户端类型和回调配置"
+    if response is not None:
+        try:
+            payload = response.json()
+        except (requests.JSONDecodeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            oauth_error = str(payload.get("error") or oauth_error)
+            description = str(payload.get("error_description") or description)
+    # 避免上游异常文本注入换行或把错误页无限扩展到本机 UI。
+    oauth_error = " ".join(oauth_error.split())[:80]
+    description = " ".join(description.split())[:240]
+    return f"Google OAuth 拒绝请求（HTTP {status}，{oauth_error}）：{description}"
 
 
 def _jwt_claims_unverified(token: str) -> dict[str, Any]:
@@ -120,13 +141,14 @@ class DesktopOAuthManager:
         try:
             payload = self._token_request(
                 {
-                    "client_id": self.settings.google_oauth_client_id,
                     "code": code,
                     "code_verifier": pending.verifier,
                     "redirect_uri": pending.redirect_uri,
                     "grant_type": "authorization_code",
                 }
             )
+        except requests.HTTPError as error:
+            raise RuntimeError(_oauth_http_error_message(error)) from error
         except requests.RequestException as error:
             raise RuntimeError("无法向 Google 完成登录，请检查网络后重试") from error
         refresh_token = str(payload.get("refresh_token") or "")
@@ -150,7 +172,13 @@ class DesktopOAuthManager:
         return self.status()
 
     def _token_request(self, form: dict[str, Any]) -> dict[str, Any]:
-        response = requests.post(self.settings.token_endpoint, data=form, timeout=20)
+        if not self.settings.broker_url:
+            raise RuntimeError("云端发布尚未配置上传代理")
+        response = requests.post(
+            f"{self.settings.broker_url.rstrip('/')}/v1/oauth/token",
+            json=form,
+            timeout=20,
+        )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -183,7 +211,6 @@ class DesktopOAuthManager:
         try:
             payload = self._token_request(
                 {
-                    "client_id": self.settings.google_oauth_client_id,
                     "refresh_token": refresh_token,
                     "grant_type": "refresh_token",
                 }

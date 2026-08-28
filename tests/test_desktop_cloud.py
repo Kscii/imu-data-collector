@@ -1,9 +1,13 @@
 import base64
 import json
+import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
+import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -35,6 +39,7 @@ def test_google_oauth_client_id_can_be_isolated_from_shared_yaml(
         "IMU_GOOGLE_OAUTH_CLIENT_ID",
         "desktop.apps.googleusercontent.com",
     )
+    monkeypatch.setenv("IMU_GOOGLE_OAUTH_CLIENT_SECRET", "server-private-secret")
     monkeypatch.setenv("IMU_UPLOAD_BROKER_HOST", "0.0.0.0")
     monkeypatch.setenv("IMU_UPLOAD_BROKER_PORT", "9876")
 
@@ -46,6 +51,30 @@ def test_google_oauth_client_id_can_be_isolated_from_shared_yaml(
     )
     assert settings.cloud.broker_server_host == "0.0.0.0"
     assert settings.cloud.broker_server_port == 9876
+    assert settings.cloud.google_oauth_client_secret == "server-private-secret"
+
+
+def test_packaged_desktop_config_never_contains_client_secret(tmp_path: Path) -> None:
+    output = tmp_path / "desktop-config"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/prepare_desktop_config.py",
+            "--output",
+            str(output),
+            "--broker-url",
+            "https://upload.example.test",
+            "--oauth-client-id",
+            "desktop.apps.googleusercontent.com",
+        ],
+        check=True,
+    )
+
+    payload = yaml.safe_load((output / "default.yaml").read_text(encoding="utf-8"))
+    assert payload["publish"]["mode"] == "broker"
+    assert payload["cloud"]["broker_url"] == "https://upload.example.test"
+    assert "google_oauth_client_secret" not in payload["cloud"]
 
 
 def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monkeypatch) -> None:
@@ -63,9 +92,10 @@ def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monk
                 "expires_in": 3600,
             }
 
-    def post(_url: str, *, data: dict, timeout: int):
+    def post(url: str, *, json: dict, timeout: int):
         assert timeout == 20
-        posted.append(data)
+        assert url == "https://upload.example.test/v1/oauth/token"
+        posted.append(json)
         return Response()
 
     monkeypatch.setattr(desktop_auth.requests, "post", post)
@@ -85,16 +115,21 @@ def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monk
         google_oauth_client_id="desktop.apps.googleusercontent.com",
     )
     manager = DesktopOAuthManager(settings)
-    authorization_url = manager.begin("http://127.0.0.1:8765/callback")
+    authorization_url = manager.begin(
+        "http://127.0.0.1:8765/api/v1/cloud/oauth/callback"
+    )
     query = parse_qs(urlparse(authorization_url).query)
 
     assert query["code_challenge_method"] == ["S256"]
     assert query["scope"] == ["openid email profile"]
     assert "code_verifier" not in query
+    assert "client_secret" not in query
     status = manager.complete(state=query["state"][0], code="one-time-code")
 
     assert posted[0]["code_verifier"]
     assert posted[0]["grant_type"] == "authorization_code"
+    assert "client_id" not in posted[0]
+    assert "client_secret" not in posted[0]
     assert "long-lived-secret" in secrets_store.values()
     assert "member@example.com" in secrets_store.values()
     assert "one-time-code" not in secrets_store.values()
@@ -102,6 +137,100 @@ def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monk
     assert status["email"] == "member@example.com"
     assert manager.id_token() == _test_id_token("member@example.com")
     assert DesktopOAuthManager(settings).status()["email"] == "member@example.com"
+
+
+def test_desktop_oauth_reports_safe_google_error_details(monkeypatch) -> None:
+    class Response:
+        status_code = 400
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+        def json(self) -> dict[str, str]:
+            return {
+                "error": "invalid_request",
+                "error_description": "client_secret is missing.",
+            }
+
+    monkeypatch.setattr(
+        desktop_auth.requests,
+        "post",
+        lambda *_args, **_kwargs: Response(),
+    )
+    settings = DesktopCloudSettings(
+        broker_url="https://upload.example.test",
+        google_oauth_client_id="desktop.apps.googleusercontent.com",
+    )
+    manager = DesktopOAuthManager(settings)
+    authorization_url = manager.begin(
+        "http://127.0.0.1:8765/api/v1/cloud/oauth/callback"
+    )
+    state = parse_qs(urlparse(authorization_url).query)["state"][0]
+
+    with pytest.raises(RuntimeError, match="HTTP 400，invalid_request") as caught:
+        manager.complete(state=state, code="one-time-code")
+
+    assert "client_secret is missing" in str(caught.value)
+    assert "one-time-code" not in str(caught.value)
+
+
+def test_desktop_oauth_does_not_require_native_client_secret() -> None:
+    manager = DesktopOAuthManager(
+        DesktopCloudSettings(
+            broker_url="https://upload.example.test",
+            google_oauth_client_id="desktop.apps.googleusercontent.com",
+        )
+    )
+
+    assert manager.configured is True
+    assert manager.begin(
+        "http://127.0.0.1:8765/api/v1/cloud/oauth/callback"
+    ).startswith(
+        "https://accounts.google.com/"
+    )
+
+
+def test_desktop_oauth_refresh_uses_broker_without_client_secret(monkeypatch) -> None:
+    posted: list[dict] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "id_token": _test_id_token("member@example.com"),
+                "expires_in": 3600,
+            }
+
+    def post(url: str, *, json: dict, timeout: int):
+        assert timeout == 20
+        assert url == "https://upload.example.test/v1/oauth/token"
+        posted.append(json)
+        return Response()
+
+    monkeypatch.setattr(desktop_auth.requests, "post", post)
+    monkeypatch.setattr(
+        desktop_auth.keyring,
+        "get_password",
+        lambda _service, name: (
+            "stored-refresh-token" if "refresh-token" in name else None
+        ),
+    )
+    settings = DesktopCloudSettings(
+        broker_url="https://upload.example.test",
+        google_oauth_client_id="desktop.apps.googleusercontent.com",
+    )
+
+    token = DesktopOAuthManager(settings).id_token()
+
+    assert token == _test_id_token("member@example.com")
+    assert posted == [
+        {
+            "refresh_token": "stored-refresh-token",
+            "grant_type": "refresh_token",
+        }
+    ]
 
 
 def test_resumable_upload_uses_bounded_chunks(monkeypatch, tmp_path: Path) -> None:
@@ -214,9 +343,7 @@ class _FakeBucket:
         return self.blobs.setdefault(name, _FakeBlob(name))
 
 
-def test_upload_broker_requires_whitelisted_google_identity(monkeypatch, tmp_path) -> None:
-    bucket = _FakeBucket()
-
+def _patch_broker_storage(monkeypatch, bucket: _FakeBucket) -> None:
     class Client:
         def __init__(self, project=None) -> None:
             self.project = project
@@ -225,16 +352,10 @@ def test_upload_broker_requires_whitelisted_google_identity(monkeypatch, tmp_pat
             return bucket
 
     monkeypatch.setattr(upload_broker.storage, "Client", Client)
-    monkeypatch.setattr(
-        upload_broker.google_id_token,
-        "verify_oauth2_token",
-        lambda token, _request, audience: {
-            "email": "member@example.com",
-            "email_verified": True,
-            "aud": audience,
-        },
-    )
-    settings = Settings(
+
+
+def _broker_settings(tmp_path: Path) -> Settings:
+    return Settings(
         data_root=tmp_path / "data",
         catalog_path=tmp_path / "capture.sqlite3",
         storage=StorageSettings(
@@ -244,11 +365,153 @@ def test_upload_broker_requires_whitelisted_google_identity(monkeypatch, tmp_pat
         ),
         cloud=DesktopCloudSettings(
             google_oauth_client_id="desktop.apps.googleusercontent.com",
+            google_oauth_client_secret="server-private-secret",
         ),
         identity=IdentitySettings(
             email_to_unikey={"member@example.com": "xfan0282"}
         ),
     )
+
+
+def test_upload_broker_refuses_to_start_without_private_client_secret(
+    monkeypatch, tmp_path
+) -> None:
+    _patch_broker_storage(monkeypatch, _FakeBucket())
+    settings = _broker_settings(tmp_path)
+    settings.cloud.google_oauth_client_secret = None
+
+    with pytest.raises(RuntimeError, match="服务器私有"):
+        upload_broker.create_upload_broker_app(settings)
+
+
+def test_upload_broker_exchanges_code_with_server_secret_and_filters_response(
+    monkeypatch, tmp_path
+) -> None:
+    _patch_broker_storage(monkeypatch, _FakeBucket())
+    posted: list[dict] = []
+
+    class Response:
+        ok = True
+
+        def json(self) -> dict:
+            return {
+                "access_token": "desktop-does-not-need-this",
+                "refresh_token": "stored-on-desktop-keyring",
+                "id_token": _test_id_token("member@example.com"),
+                "expires_in": 3600,
+            }
+
+    def post(url: str, *, data: dict, timeout: int):
+        assert url == "https://oauth2.googleapis.com/token"
+        assert timeout == 20
+        posted.append(data)
+        return Response()
+
+    monkeypatch.setattr(upload_broker.requests, "post", post)
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/oauth/token",
+            json={
+                "grant_type": "authorization_code",
+                "code": "one-time-code",
+                "code_verifier": "v" * 64,
+                "redirect_uri": (
+                    "http://127.0.0.1:8765/api/v1/cloud/oauth/callback"
+                ),
+            },
+        )
+
+    assert response.status_code == 200, response.json()
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "id_token": _test_id_token("member@example.com"),
+        "refresh_token": "stored-on-desktop-keyring",
+        "expires_in": 3600,
+    }
+    assert posted[0]["client_id"] == "desktop.apps.googleusercontent.com"
+    assert posted[0]["client_secret"] == "server-private-secret"
+    assert posted[0]["code_verifier"] == "v" * 64
+
+
+def test_upload_broker_rejects_non_loopback_oauth_redirect(
+    monkeypatch, tmp_path
+) -> None:
+    _patch_broker_storage(monkeypatch, _FakeBucket())
+    monkeypatch.setattr(
+        upload_broker.requests,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("禁止向 Google 转发非本机回调"),
+    )
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/oauth/token",
+            json={
+                "grant_type": "authorization_code",
+                "code": "one-time-code",
+                "code_verifier": "v" * 64,
+                "redirect_uri": "https://attacker.example/callback",
+            },
+        )
+
+    assert response.status_code == 422
+    assert "本机回调" in response.json()["detail"]
+
+
+def test_upload_broker_does_not_echo_oauth_credentials_in_error(
+    monkeypatch, tmp_path
+) -> None:
+    _patch_broker_storage(monkeypatch, _FakeBucket())
+
+    class Response:
+        ok = False
+        status_code = 400
+
+        def json(self) -> dict:
+            return {
+                "error": "invalid_grant\n",
+                "error_description": "bad one-time-code server-private-secret",
+            }
+
+    monkeypatch.setattr(
+        upload_broker.requests,
+        "post",
+        lambda *_args, **_kwargs: Response(),
+    )
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/oauth/token",
+            json={
+                "grant_type": "authorization_code",
+                "code": "one-time-code",
+                "code_verifier": "v" * 64,
+                "redirect_uri": (
+                    "http://127.0.0.1:8765/api/v1/cloud/oauth/callback"
+                ),
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_grant"
+    assert "one-time-code" not in response.text
+    assert "server-private-secret" not in response.text
+
+
+def test_upload_broker_requires_whitelisted_google_identity(monkeypatch, tmp_path) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    settings = _broker_settings(tmp_path)
     app = upload_broker.create_upload_broker_app(settings)
     with TestClient(app) as client:
         unauthorized = client.post(
