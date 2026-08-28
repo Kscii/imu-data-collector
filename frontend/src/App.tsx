@@ -92,6 +92,7 @@ type Recording = {
   validation_issues?: string[];
   quality_warnings?: string[];
   upload_state: string;
+  publish_target?: "disabled" | "local" | "broker" | "direct_gcs";
   index_state?: "not_requested" | "pending" | "indexed" | "rejected";
   index_message?: string;
   manifest_generation?: number | null;
@@ -104,10 +105,12 @@ type Recording = {
 
 type BackgroundJob = {
   kind: "finalize" | "publish";
-  state: "queued" | "running" | "retry_wait" | "succeeded" | "failed";
+  state: "queued" | "running" | "waiting_auth" | "retry_wait" | "succeeded" | "failed";
   phase: string;
   attempts: number;
   max_attempts: number;
+  progress_bytes?: number;
+  total_bytes?: number;
   next_attempt_at_utc?: string | null;
   last_error?: string | null;
 };
@@ -219,6 +222,19 @@ type AppConfig = {
   video?: { width: number; height: number; requested_fps: number; bitrate: string };
   local_actor_id?: string;
   catalog_refresh_interval_s?: number;
+  publish?: {
+    mode: "disabled" | "local" | "broker" | "direct_gcs";
+    backend: "local" | "gcs" | "broker";
+    bucket?: string | null;
+    cloud_configured?: boolean;
+  };
+};
+
+type CloudStatus = {
+  configured: boolean;
+  logged_in: boolean;
+  email: string | null;
+  broker_url: string | null;
 };
 
 type Session = {
@@ -554,6 +570,7 @@ function jobStateLabel(job: BackgroundJob) {
   const state: Record<BackgroundJob["state"], string> = {
     queued: "等待执行",
     running: "正在执行",
+    waiting_auth: "等待 Google 登录",
     retry_wait: "等待自动重试",
     succeeded: "已完成",
     failed: "需要人工重试",
@@ -570,11 +587,15 @@ function jobStateLabel(job: BackgroundJob) {
     validating: "校验采集制品",
     committing: "原子提交",
     packaging: "生成发布制品",
+    auth_required: "等待 Google 登录",
     uploading: "上传对象存储",
     verifying: "校验远端制品",
     completed: "完成",
   };
-  return `${state[job.state]} · ${phase[job.phase] ?? job.phase}`;
+  const uploadRole = job.phase.startsWith("uploading:")
+    ? job.phase.slice("uploading:".length)
+    : "";
+  return `${state[job.state]} · ${uploadRole ? `上传 ${uploadRole}` : phase[job.phase] ?? job.phase}`;
 }
 
 function issueLabel(issue: string) {
@@ -666,8 +687,8 @@ export default function App() {
       return [];
     }
   };
-  const refreshCameras = () =>
-    api<{ cameras: Camera[] }>("/api/v1/devices").then((value) => {
+  const refreshCameras = (force = false) =>
+    api<{ cameras: Camera[] }>(`/api/v1/devices${force ? "?refresh_cameras=true" : ""}`).then((value) => {
       setCameras(value.cameras);
       setCameraId((current) => {
         if (value.cameras.some((item) => item.camera_id === current)) return current;
@@ -892,7 +913,12 @@ export default function App() {
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session?.is_admin && <TaxonomyAdminPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
-      {!annotationApplication && tab === "library" && <CaptureLibrary recordings={recordings} onChanged={refreshRecordings} />}
+      {!annotationApplication && tab === "library" && <CaptureLibrary
+        recordings={recordings}
+        onChanged={refreshRecordings}
+        publishMode={config?.publish?.mode ?? "local"}
+        cloudConfigured={Boolean(config?.publish?.cloud_configured)}
+      />}
     </div>
   );
 }
@@ -988,7 +1014,7 @@ function CapturePage(props: any) {
         <label>参与者 UniKey<select value={participant} onChange={(e) => { const next = e.target.value; setParticipant(next); setCollection(defaultCollectionId(next)); }} disabled={interactionBlocked || active || busy}>{allowedUnikeys.map((item: string) => <option value={item} key={item}>{item}</option>)}</select></label>
         <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">测试数据（不进入训练）</option><option value="prod">正式数据（需通过质量门禁）</option></select></label>
         <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
-        <button disabled={interactionBlocked || active || busy} onClick={refreshCameras}>重新扫描摄像头</button>
+        <button disabled={interactionBlocked || active || busy} onClick={() => refreshCameras(true)}>重新扫描摄像头</button>
         <button disabled={interactionBlocked || active || busy || anotherSession || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{previewButtonLabel}</button>
         {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>重试失败设备</button>}
         {!active ? <button className="primary" disabled={interactionBlocked || busy || anotherSession || !cameraId} onClick={start}>{captureOperation === "starting_recording" ? "正在准备…" : "开始录制"}</button> : <button className="danger" disabled={interactionBlocked || busy} onClick={stop}>{captureOperation === "stopping_recording" ? "正在结束…" : "结束录制"}</button>}
@@ -1018,7 +1044,7 @@ function CapturePage(props: any) {
       </section>
       {[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
       {(live.recording?.quality_warnings ?? []).length > 0 && <div className="warning-banner"><strong>上一次录制质量警告（允许发布）</strong>{live.recording.quality_warnings.map((warning: string) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
-      {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div></div>}
+      {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div>{live.device?.error?.hint && <div>{userVisibleMessage(live.device.error.hint)}</div>}</div>}
       {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
       {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0} / 3 次自动重连。</div>}
     </main>
@@ -2301,11 +2327,65 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { s
   </article>;
 }
 
-function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; onChanged: () => void }) {
+function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }: {
+  recordings: Recording[];
+  onChanged: () => void;
+  publishMode: "disabled" | "local" | "broker" | "direct_gcs";
+  cloudConfigured: boolean;
+}) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
   const [incomplete, setIncomplete] = useState<{ relative_path: string; size_bytes: number; reason: string }[]>([]);
+  const [cloud, setCloud] = useState<CloudStatus | null>(null);
+  const [pendingPublish, setPendingPublish] = useState<Recording | null>(null);
+
+  const refreshCloud = async () => {
+    if (!cloudConfigured) return;
+    setCloud(await api<CloudStatus>("/api/v1/cloud/status"));
+  };
+
+  useEffect(() => {
+    if (!cloudConfigured) return;
+    refreshCloud().catch((value) => setError((value as Error).message));
+    const timer = window.setInterval(() => {
+      refreshCloud().catch(() => undefined);
+    }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [cloudConfigured]);
+
+  const loginCloud = async (recording?: Recording) => {
+    setError("");
+    if (recording) setPendingPublish(recording);
+    const popup = window.open("about:blank", "imu-google-oauth", "popup,width=560,height=720");
+    try {
+      const result = await api<{ authorization_url: string }>("/api/v1/cloud/oauth/start", { method: "POST" });
+      if (popup) popup.location.href = result.authorization_url;
+      else window.location.href = result.authorization_url;
+    } catch (value) {
+      popup?.close();
+      if (recording) setPendingPublish(null);
+      setError((value as Error).message);
+    }
+  };
+
+  useEffect(() => {
+    const receiveOAuthResult = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.data !== "imu-oauth-success") return;
+      refreshCloud().then(onChanged).catch((value) => setError((value as Error).message));
+    };
+    window.addEventListener("message", receiveOAuthResult);
+    return () => window.removeEventListener("message", receiveOAuthResult);
+  }, [cloudConfigured]);
+
+  const logoutCloud = async () => {
+    setError("");
+    try {
+      setCloud(await api<CloudStatus>("/api/v1/cloud/logout", { method: "POST" }));
+    } catch (value) {
+      setError((value as Error).message);
+    }
+  };
 
   useEffect(() => {
     const pending = recordings.filter((recording) => recording.index_state === "pending");
@@ -2331,7 +2411,7 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
     };
   }, [recordings.map((item) => `${item.recording_id}:${item.index_state}:${item.finalization_job?.state}:${item.finalization_job?.phase}:${item.upload_job?.state}:${item.upload_job?.phase}`).join("|")]);
 
-  const publish = async (recording: Recording) => {
+  const queuePublish = async (recording: Recording) => {
     setError("");
     setMessage("");
     setBusy(recording.recording_id);
@@ -2339,8 +2419,15 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
       const estimate = await api<{ estimated_bytes: number }>(`/api/v1/recordings/${recording.recording_id}/publish/estimate`);
       const gib = estimate.estimated_bytes / 1024 ** 3;
       if (!window.confirm(`将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。\n预计读取或上传约 ${gib.toFixed(2)} GiB，继续吗？`)) return;
-      await api(`/api/v1/recordings/${recording.recording_id}/publish`, { method: "POST" });
-      setMessage(`已加入后台上传队列：${recording.recording_id}`);
+      const result = await api<{ auth_required?: boolean }>(`/api/v1/recordings/${recording.recording_id}/publish`, { method: "POST" });
+      if (result.auth_required) {
+        setPendingPublish(recording);
+        await loginCloud(recording);
+        return;
+      }
+      setMessage(publishMode === "local"
+        ? `已加入本机归档队列：${recording.recording_id}`
+        : `已加入后台上传队列：${recording.recording_id}`);
       onChanged();
     } catch (e) {
       setError((e as Error).message);
@@ -2348,6 +2435,39 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
     } finally {
       setBusy("");
     }
+  };
+
+  const publish = async (recording: Recording) => {
+    if (publishMode === "broker" && !cloud?.logged_in) {
+      await loginCloud(recording);
+      return;
+    }
+    await queuePublish(recording);
+  };
+
+  useEffect(() => {
+    if (!cloud?.logged_in || !pendingPublish) return;
+    const recording = pendingPublish;
+    setPendingPublish(null);
+    queuePublish(recording).catch((value) => setError((value as Error).message));
+  }, [cloud?.logged_in, pendingPublish?.recording_id]);
+
+  const uploadStateLabel = (recording: Recording) => {
+    if (recording.upload_state === "stored_local") return "仅保存在本机";
+    if (recording.upload_state === "auth_required") return "等待 Google 登录";
+    if (["uploaded", "published"].includes(recording.upload_state)) {
+      return ["broker", "direct_gcs"].includes(recording.publish_target ?? "")
+        ? "已上传团队 Bucket"
+        : "已归档到本机";
+    }
+    const labels: Record<string, string> = {
+      not_requested: "尚未发布",
+      queued: "等待上传",
+      uploading: "正在上传",
+      retry_wait: "等待自动重试",
+      failed: "上传失败",
+    };
+    return labels[recording.upload_state] ?? `发布 ${recording.upload_state}`;
   };
 
   const retryFinalization = async (recording: Recording) => {
@@ -2423,21 +2543,29 @@ function CaptureLibrary({ recordings, onChanged }: { recordings: Recording[]; on
     <section className="panel library">
       <div className="panel-title">本地录制与后台处理</div>
       <p className="stage-help">这里只负责确认采集结果并交给标注存储；同步、标注和训练快照在独立标注平台完成。</p>
+      {publishMode === "local" && <div className="info-banner">本地开发模式：发布只归档到本机，不会上传团队 Bucket。</div>}
+      {publishMode === "broker" && !cloudConfigured && <div className="error-banner">团队上传尚未配置，请更新桌面客户端。</div>}
+      {publishMode === "broker" && cloudConfigured && <div className="save-row">
+        <strong>{cloud?.logged_in ? `${tr("团队云端已登录", "Signed in to team cloud")}${cloud.email ? ` · ${cloud.email}` : ""}` : "发布到团队云端前需要登录"}</strong>
+        {cloud?.logged_in
+          ? <button onClick={logoutCloud}>退出云端账号</button>
+          : <button className="primary" onClick={() => loginCloud()}>使用 Google 账号登录</button>}
+      </div>}
       {recordings.map((recording) => <article key={recording.recording_id}>
         <div><strong>{recording.recording_id}</strong><span>{recording.collection_id} · {recording.participant_id} · {tierLabel(recording.data_tier)} · {seconds(recording.duration_ns)}</span></div>
         <div className="status-grid">
           <span>采集 {stateLabel(recording.state)}</span>
-          <span>{["uploaded", "published"].includes(recording.upload_state) ? "已上传 Bucket" : `上传 ${recording.upload_state}`}</span>
+          <span>{uploadStateLabel(recording)}</span>
           {recording.index_state === "indexed" && <span>标注端已接收</span>}
           {recording.index_state === "pending" && <span>等待标注端接收</span>}
           {recording.index_state === "rejected" && <span className="warning-text">标注端拒绝</span>}
         </div>
         {recording.finalization_job && <p className={recording.finalization_job.state === "failed" ? "warning-text" : "stage-help"}>后台收尾：{jobStateLabel(recording.finalization_job)} · 尝试 {recording.finalization_job.attempts}/{recording.finalization_job.max_attempts}{recording.finalization_job.last_error ? ` · ${recording.finalization_job.last_error}` : ""}</p>}
-        {recording.upload_job && <p className={recording.upload_job.state === "failed" ? "warning-text" : "stage-help"}>后台上传：{jobStateLabel(recording.upload_job)} · 尝试 {recording.upload_job.attempts}/{recording.upload_job.max_attempts}{recording.upload_job.last_error ? ` · ${recording.upload_job.last_error}` : ""}</p>}
+        {recording.upload_job && <p className={recording.upload_job.state === "failed" ? "warning-text" : "stage-help"}>后台上传：{jobStateLabel(recording.upload_job)} · 尝试 {recording.upload_job.attempts}/{recording.upload_job.max_attempts}{(recording.upload_job.total_bytes ?? 0) > 0 ? ` · ${Math.min(100, 100 * (recording.upload_job.progress_bytes ?? 0) / (recording.upload_job.total_bytes ?? 1)).toFixed(0)}%` : ""}{recording.upload_job.last_error ? ` · ${recording.upload_job.last_error}` : ""}</p>}
         {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{recording.index_message}</p>}
         <div className="save-row">
           {recording.h5_path?.endsWith(".partial.h5") && recording.mkv_path?.endsWith(".partial.mkv") && !activeJobStates.has(recording.finalization_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => retryFinalization(recording)}>{busy === recording.recording_id ? "正在提交…" : "重新收尾"}</button>}
-          {recording.state === "ready" && !["uploaded", "published"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在提交…" : recording.upload_job?.state === "failed" ? "重新上传" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并发布"}</button>}
+          {publishMode !== "disabled" && recording.state === "ready" && !["uploaded", "published"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在提交…" : recording.upload_job?.state === "failed" ? "重新上传" : publishMode === "local" ? "归档到本机" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并上传"}</button>}
           <button onClick={() => copyRecordingId(recording.recording_id)}>复制录制 ID</button>
           <button className="danger" disabled={Boolean(busy) || [recording.finalization_job, recording.upload_job].some((job) => job && activeJobStates.has(job.state))} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>

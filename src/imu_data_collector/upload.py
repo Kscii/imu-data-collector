@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from imu_data_collector.config import UploadSettings
+from imu_data_collector.host import background_subprocess_kwargs
 
 
 class RcloneRemoteStore:
@@ -29,6 +30,7 @@ class RcloneRemoteStore:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **background_subprocess_kwargs(),
         )
         stdout, stderr = await process.communicate()
         if process.returncode:

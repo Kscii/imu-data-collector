@@ -14,6 +14,7 @@ from imu_data_collector.characterization import (
     write_characterization_report,
 )
 from imu_data_collector.config import ImuSettings
+from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
 from imu_data_collector.cw12eu import pack_test_frame
 from imu_data_collector.hdf5_store import (
     CaptureH5Writer,
@@ -103,6 +104,7 @@ def build_capture(
     data_tier: DataTier = DataTier.TEST,
     video_interval_ns: int = 33_333_333,
     camera_controls_verified: bool = False,
+    camera_control_policy: str = "observed_fps_gate",
 ) -> Path:
     start_ns = 1_000_000_000
     path = tmp_path / "capture.h5"
@@ -159,6 +161,9 @@ def build_capture(
             else None
         ),
         camera_control_errors=[] if camera_controls_verified else None,
+        camera_control_policy=camera_control_policy,
+        video_backend="ffmpeg_v4l2",
+        timestamp_mapping="source_pts_monotonic",
     )
     writer.write_sync([])
     writer.finish()
@@ -239,6 +244,14 @@ def test_capture_round_trip_and_atomic_annotation_update(tmp_path: Path) -> None
         assert np.isnan(handle["imu/samples/values_si"][:]).all()
         assert handle["sync"].attrs["anchor_clock_domain"] == "recording_relative_ns"
         assert str(handle.attrs["data_tier"]) == "test"
+        assert str(handle.attrs["host_os"]) in {"linux", "windows", "macos"}
+        assert str(handle.attrs["host_architecture"])
+        assert str(handle.attrs["monotonic_implementation"])
+        assert str(handle["imu"].attrs["ble_backend"])
+        assert str(handle["imu"].attrs["local_device_id"])
+        assert handle["video"].attrs["video_backend"] == "ffmpeg_v4l2"
+        assert handle["video"].attrs["timestamp_mapping"] == "source_pts_monotonic"
+        assert handle["video"].attrs["camera_control_policy"] == "observed_fps_gate"
         assert not bool(handle.attrs["training_eligible"])
         assert int(handle["video"].attrs["ffmpeg_diagnostic_count"]) == 1
         assert handle["video/frames/media_time_ns"][:].tolist() == [
@@ -342,7 +355,7 @@ def test_auxiliary_notifications_are_preserved_without_blocking_validation(
     assert report.metrics["auxiliary_notification_count"] == 1
     assert report.metrics["unknown_notification_count"] == 0
     with h5py.File(path, "r") as handle:
-        assert str(handle.attrs["capture_schema_version"]) == "1.5.0"
+        assert str(handle.attrs["capture_schema_version"]) == CAPTURE_SCHEMA_VERSION
         assert handle["imu/packets/packet_kind"][:].tolist() == [1, 2, 1]
         assert handle["imu/packets/parse_valid"][:].tolist() == [True, False, True]
         assert handle["imu/packets/sample_count"][:].tolist() == [1, 0, 1]
@@ -380,8 +393,14 @@ def test_unknown_notification_still_blocks_production_readiness(tmp_path: Path) 
     assert any("parsing failed 1 times" in issue for issue in report.issues)
 
 
-def test_prod_capture_requires_verified_fixed_camera_controls(tmp_path: Path) -> None:
-    path = build_capture(tmp_path, data_tier=DataTier.PROD)
+def test_prod_capture_requires_verified_controls_only_when_policy_is_fixed(
+    tmp_path: Path,
+) -> None:
+    path = build_capture(
+        tmp_path,
+        data_tier=DataTier.PROD,
+        camera_control_policy="fixed_verified",
+    )
 
     report = validate_capture_h5(path, taxonomy())
 

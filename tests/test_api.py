@@ -60,6 +60,54 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
             assert "IMU 数采平台" in frontend.text
 
 
+def test_first_run_creates_missing_data_root_before_health_check(tmp_path: Path) -> None:
+    data_root = tmp_path / "new-user" / "IMUData"
+    assert not data_root.exists()
+    app = create_capture_app(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert data_root.is_dir()
+
+
+def test_device_endpoint_reuses_camera_cache_until_explicit_refresh(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    app = create_capture_app(
+        Settings(
+            data_root=data_root,
+            catalog_path=tmp_path / "catalog.sqlite3",
+            activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        )
+    )
+    calls = 0
+
+    async def list_cameras(*, refresh: bool = False):
+        nonlocal calls
+        calls += 1
+        return [{"camera_id": f"camera-{calls}", "refresh": refresh}]
+
+    app.state.coordinator.list_cameras = list_cameras
+    with TestClient(app) as client:
+        first = client.get("/api/v1/devices")
+        refreshed = client.get("/api/v1/devices?refresh_cameras=true")
+
+    assert first.json()["cameras"] == [{"camera_id": "camera-1", "refresh": False}]
+    assert refreshed.json()["cameras"] == [
+        {"camera_id": "camera-2", "refresh": True}
+    ]
+
+
 def test_start_contract_rejects_non_unikey_participant_before_hardware_access(
     tmp_path: Path,
 ) -> None:

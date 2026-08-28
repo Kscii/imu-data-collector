@@ -6,15 +6,18 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
+
+from imu_data_collector.host import application_root, user_cache_dir, user_data_dir
 
 
 @dataclass(slots=True)
 class ImuSettings:
     name: str = "CW12EU-T"
     address: str = "83:FC:90:14:1E:A4"
+    local_device_id: str | None = None
     notify_uuid: str = "00002ae1-0000-1000-8000-00805f9b34fb"
     expected_rate_hz: float = 25.0
     expected_rate_status: str = "short_probe_observed_2026-08-25_pending_long_run"
@@ -63,6 +66,29 @@ class UploadSettings:
 
 
 @dataclass(slots=True)
+class DesktopCloudSettings:
+    """桌面采集端的最小权限登录与上传代理配置。"""
+
+    broker_url: str | None = None
+    # 上传代理是独立进程，不能复用标注服务的默认 8766 端口。
+    broker_server_host: str = "127.0.0.1"
+    broker_server_port: int = 8770
+    google_oauth_client_id: str | None = None
+    authorization_endpoint: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    token_endpoint: str = "https://oauth2.googleapis.com/token"
+    revocation_endpoint: str = "https://oauth2.googleapis.com/revoke"
+    scopes: tuple[str, ...] = ("openid", "email", "profile")
+    keyring_service: str = "imu-data-collector"
+
+
+@dataclass(slots=True)
+class PublishSettings:
+    """采集端发布目的地；和标注服务自身使用的 storage 后端相互独立。"""
+
+    mode: Literal["disabled", "local", "broker", "direct_gcs"] = "local"
+
+
+@dataclass(slots=True)
 class BackgroundJobSettings:
     """后台收尾和发布的资源及重试策略。"""
 
@@ -75,10 +101,10 @@ class BackgroundJobSettings:
 @dataclass(slots=True)
 class StorageSettings:
     backend: str = "local"
-    root: Path = Path("~/.local/share/imu-data-collector/objects")
+    root: Path = field(default_factory=lambda: user_data_dir() / "objects")
     bucket: str | None = None
     project: str | None = None
-    cache_root: Path = Path("~/.cache/imu-annotation")
+    cache_root: Path = field(default_factory=lambda: user_cache_dir("imu-annotation"))
 
 
 @dataclass(slots=True)
@@ -92,7 +118,9 @@ class AuthSettings:
 class AnnotationSettings:
     server_host: str = "127.0.0.1"
     server_port: int = 8766
-    catalog_path: Path = Path("~/.local/share/imu-annotation/catalog.sqlite3")
+    catalog_path: Path = field(
+        default_factory=lambda: user_data_dir("imu-annotation") / "catalog.sqlite3"
+    )
     catalog_refresh_interval_s: float = 10.0
 
 
@@ -116,7 +144,7 @@ class IdentitySettings:
 @dataclass(slots=True)
 class Settings:
     data_root: Path = Path("~/IMUData")
-    catalog_path: Path = Path("~/.local/share/imu-data-collector/catalog.sqlite3")
+    catalog_path: Path = field(default_factory=lambda: user_data_dir() / "catalog.sqlite3")
     activity_taxonomy_path: Path = Path("configs/activities.yaml")
     calibration_evidence_path: Path = Path("configs/calibration-evidence.yaml")
     server_host: str = "127.0.0.1"
@@ -125,6 +153,8 @@ class Settings:
     imu: ImuSettings = field(default_factory=ImuSettings)
     video: VideoSettings = field(default_factory=VideoSettings)
     upload: UploadSettings = field(default_factory=UploadSettings)
+    publish: PublishSettings = field(default_factory=PublishSettings)
+    cloud: DesktopCloudSettings = field(default_factory=DesktopCloudSettings)
     background_jobs: BackgroundJobSettings = field(default_factory=BackgroundJobSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     auth: AuthSettings = field(default_factory=AuthSettings)
@@ -166,6 +196,11 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     imu = ImuSettings(**imu_values)
     video = VideoSettings(**values.pop("video", {}))
     upload = UploadSettings(**values.pop("upload", {}))
+    publish = PublishSettings(**values.pop("publish", {}))
+    cloud_values = values.pop("cloud", {})
+    if "scopes" in cloud_values:
+        cloud_values["scopes"] = tuple(cloud_values["scopes"])
+    cloud = DesktopCloudSettings(**cloud_values)
     background_job_values = values.pop("background_jobs", {})
     if "retry_delays_seconds" in background_job_values:
         background_job_values["retry_delays_seconds"] = tuple(
@@ -205,6 +240,8 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         imu=imu,
         video=video,
         upload=upload,
+        publish=publish,
+        cloud=cloud,
         background_jobs=background_jobs,
         storage=storage,
         auth=auth,
@@ -215,7 +252,7 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
 
 
 def load_settings(config_path: Path | None = None) -> Settings:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = application_root()
     chosen = config_path or Path(
         os.environ.get("IMU_COLLECTOR_CONFIG", project_root / "configs/default.yaml")
     )

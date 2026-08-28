@@ -27,6 +27,7 @@ from imu_data_collector.cw12eu import (
     parse_notification,
     reconstruct_sample_times,
 )
+from imu_data_collector.host import host_runtime
 from imu_data_collector.models import (
     AnnotationDocument,
     DataTier,
@@ -116,6 +117,7 @@ class CaptureH5Writer:
 
     def _initialize(self) -> None:
         handle = self.handle
+        runtime = host_runtime()
         handle.attrs.update(
             {
                 "capture_schema_name": CAPTURE_SCHEMA_NAME,
@@ -128,7 +130,11 @@ class CaptureH5Writer:
                 "protocol_id": self.request.protocol_id,
                 "started_at_utc": datetime.now(UTC).isoformat(),
                 "recording_start_monotonic_ns": self.recording_start_monotonic_ns,
-                "clock_domain": "linux_clock_monotonic",
+                "clock_domain": runtime.clock_domain,
+                "host_os": runtime.os_name,
+                "host_os_version": runtime.os_version,
+                "host_architecture": runtime.architecture,
+                "monotonic_implementation": runtime.monotonic_implementation,
                 "feature_columns": json.dumps(FEATURE_COLUMNS),
                 "feature_units": json.dumps(FEATURE_UNITS),
                 "calibration_profile_id": self.imu_settings.calibration_profile_id,
@@ -177,6 +183,9 @@ class CaptureH5Writer:
                     "+X wearer-right/interface-opposite; "
                     "+Y head/pendant; +Z body-outside/button"
                 ),
+                "ble_backend": "unknown",
+                "local_device_id": self.imu_settings.local_device_id
+                or self.imu_settings.address,
             }
         )
         if self.imu_settings.calibration_evidence_sha256:
@@ -286,7 +295,15 @@ class CaptureH5Writer:
                 name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(SAMPLE_CHUNK_ROWS,)
             )
 
-        handle.create_group("video").create_group("frames")
+        video = handle.create_group("video")
+        video.attrs.update(
+            {
+                "video_backend": "unknown",
+                "timestamp_mapping": "unknown",
+                "camera_control_policy": "observed_fps_gate",
+            }
+        )
+        video.create_group("frames")
         experiment = handle.create_group("experiment")
         experiment.attrs.update(
             {
@@ -328,6 +345,34 @@ class CaptureH5Writer:
             )
         )
         handle.flush()
+
+    def set_capture_backends(
+        self,
+        *,
+        ble_backend: str,
+        local_device_id: str | None,
+        video_backend: str,
+        video_timestamp_mapping: str,
+        camera_control_policy: str,
+    ) -> None:
+        """在设备连接成功后冻结本机后端和本地设备标识。"""
+
+        self.handle["imu"].attrs.update(
+            {
+                "ble_backend": ble_backend,
+                "local_device_id": local_device_id
+                or self.imu_settings.local_device_id
+                or self.imu_settings.address,
+            }
+        )
+        self.handle["video"].attrs.update(
+            {
+                "video_backend": video_backend,
+                "timestamp_mapping": video_timestamp_mapping,
+                "camera_control_policy": camera_control_policy,
+            }
+        )
+        self.handle.flush()
 
     def append_connection_event(
         self, event: str, time_monotonic_ns: int, notes: str = ""
@@ -554,6 +599,9 @@ class CaptureH5Writer:
         camera_controls_requested: dict[str, int] | None = None,
         camera_controls_effective: dict[str, int] | None = None,
         camera_control_errors: list[str] | None = None,
+        camera_control_policy: str | None = None,
+        video_backend: str | None = None,
+        timestamp_mapping: str | None = None,
     ) -> None:
         video = self.handle["video"]
         frames = video["frames"]
@@ -611,6 +659,12 @@ class CaptureH5Writer:
                 "camera_control_errors_json": json.dumps(
                     camera_control_errors or [], ensure_ascii=False
                 ),
+                "camera_control_policy": camera_control_policy
+                or str(video.attrs.get("camera_control_policy", "observed_fps_gate")),
+                "video_backend": video_backend
+                or str(video.attrs.get("video_backend", "unknown")),
+                "timestamp_mapping": timestamp_mapping
+                or str(video.attrs.get("timestamp_mapping", "unknown")),
             }
         )
         self.handle.flush()

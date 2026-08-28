@@ -17,7 +17,10 @@ from imu_data_collector.config import (
     Settings,
     StorageSettings,
 )
-from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
+from imu_data_collector.constants import (
+    ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS,
+    CAPTURE_SCHEMA_VERSION,
+)
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
@@ -26,6 +29,7 @@ from imu_data_collector.models import (
     CaptureManifestV2,
     DataTier,
     IndexReceipt,
+    PublishTarget,
     RecordingState,
     RecordingSummary,
     ReviewWorkflowState,
@@ -345,9 +349,9 @@ def test_annotation_rejects_manifest_2_0_and_publishes_current_capability(
             "contracts/annotation-capabilities.json"
         )
         assert capabilities["accepted_manifest_schema_versions"] == ["2.1.0"]
-        assert capabilities["accepted_capture_h5_schema_versions"] == [
-            CAPTURE_SCHEMA_VERSION
-        ]
+        assert capabilities["accepted_capture_h5_schema_versions"] == list(
+            ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
+        )
         result = client.post("/api/v1/index/refresh").json()
 
     assert result["imported"] == 0
@@ -408,6 +412,7 @@ async def test_capture_keeps_pending_when_receipt_generation_is_stale(
         state=RecordingState.READY,
         started_at_utc="2026-08-27T00:00:00+00:00",
         upload_state="uploaded",
+        publish_target=PublishTarget.DIRECT_GCS,
         index_state="pending",
         manifest_generation=200,
     )
@@ -809,6 +814,11 @@ def test_cleanup_only_old_capture_groups_without_manifest(tmp_path: Path) -> Non
         {"recording_id": "complete"},
         if_generation_match=0,
     )
+    store.write_json(
+        "_upload_sessions/expired.json",
+        {"upload_id": "expired"},
+        if_generation_match=0,
+    )
     now = datetime(2026, 8, 26, tzinfo=UTC)
     old = (now - timedelta(days=8)).timestamp()
     os.utime(store.resolve("captures/old-orphan/chunk.bin"), (old, old))
@@ -816,6 +826,7 @@ def test_cleanup_only_old_capture_groups_without_manifest(tmp_path: Path) -> Non
     os.utime(store.resolve("captures/complete/manifest.json"), (old, old))
     os.utime(store.resolve("index-receipts/old-orphan.json"), (old, old))
     os.utime(store.resolve("index-receipts/complete.json"), (old, old))
+    os.utime(store.resolve("_upload_sessions/expired.json"), (old, old))
     recent = (now - timedelta(days=1)).timestamp()
     os.utime(store.resolve("captures/recent-orphan/chunk.bin"), (recent, recent))
     service = create_annotation_app(settings, store).state.annotation_service
@@ -823,14 +834,16 @@ def test_cleanup_only_old_capture_groups_without_manifest(tmp_path: Path) -> Non
     preview = service.cleanup_orphan_uploads(now=now, dry_run=True)
     assert preview["orphan_recordings"] == 1
     assert preview["orphan_receipts"] == 1
-    assert preview["candidate_objects"] == 2
+    assert preview["orphan_upload_sessions"] == 1
+    assert preview["candidate_objects"] == 3
     assert store.stat("captures/old-orphan/chunk.bin") is not None
     assert store.stat("index-receipts/old-orphan.json") is not None
 
     deleted = service.cleanup_orphan_uploads(now=now)
-    assert deleted["deleted_objects"] == 2
+    assert deleted["deleted_objects"] == 3
     assert store.stat("captures/old-orphan/chunk.bin") is None
     assert store.stat("index-receipts/old-orphan.json") is None
+    assert store.stat("_upload_sessions/expired.json") is None
     assert store.stat("captures/recent-orphan/chunk.bin") is not None
     assert store.stat("captures/complete/chunk.bin") is not None
     assert store.stat("index-receipts/complete.json") is not None

@@ -1,0 +1,22 @@
+[Unit]
+Description=CW12EU-T 桌面采集上传代理
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kscii
+Group=kscii
+WorkingDirectory=/opt/imu-annotation/current
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/imu-annotation/current/.venv/bin/imu-upload-broker --config /etc/imu-annotation/config.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/imu-annotation
+
+[Install]
+WantedBy=multi-user.target

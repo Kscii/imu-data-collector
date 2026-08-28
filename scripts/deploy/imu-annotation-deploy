@@ -127,16 +127,21 @@ install -m 0644 "${release_dir}/configs/systemd/imu-annotation-gc.service" \
   /etc/systemd/system/imu-annotation-gc.service
 install -m 0644 "${release_dir}/configs/systemd/imu-annotation-gc.timer" \
   /etc/systemd/system/imu-annotation-gc.timer
+install -m 0644 "${release_dir}/configs/systemd/imu-upload-broker.service" \
+  /etc/systemd/system/imu-upload-broker.service
 
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl daemon-reload
 systemctl enable --now imu-annotation-gc.timer
 systemctl restart imu-annotation.service
+systemctl enable imu-upload-broker.service
+systemctl restart imu-upload-broker.service
 
 healthy=false
 for _attempt in $(seq 1 20); do
-  if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null; then
+  if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null \
+    && curl --fail --silent http://127.0.0.1:8770/health >/dev/null; then
     healthy=true
     break
   fi
@@ -148,6 +153,11 @@ if [[ ${healthy} != true ]]; then
     ln -s "${previous}" "${current_link}.failed"
     mv -Tf "${current_link}.failed" "${current_link}"
     systemctl restart imu-annotation.service
+    if [[ -x ${previous}/.venv/bin/imu-upload-broker ]]; then
+      systemctl restart imu-upload-broker.service
+    else
+      systemctl stop imu-upload-broker.service
+    fi
   fi
   echo "新版本健康检查失败，已尝试切回上一版本" >&2
   exit 1

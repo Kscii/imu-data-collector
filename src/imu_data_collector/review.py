@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -11,6 +10,7 @@ from pathlib import Path
 
 import h5py
 
+from imu_data_collector.file_lock import exclusive_file_lock
 from imu_data_collector.hdf5_store import read_annotations, sha256_file
 from imu_data_collector.models import (
     AnnotationDocument,
@@ -141,12 +141,8 @@ def _atomic_write(path: Path, document: ReviewDocument) -> None:
 @contextmanager
 def _exclusive_lock(path: Path) -> Iterator[None]:
     lock_path = path.with_name(f".{path.name}.lock")
-    with lock_path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with exclusive_file_lock(lock_path):
+        yield
 
 
 def load_review(h5_path: Path, mkv_path: Path, taxonomy: dict) -> ReviewDocument:

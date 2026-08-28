@@ -7,11 +7,55 @@ from imu_data_collector.config import VideoSettings
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
     PreviewFrameHub,
+    _choose_profile,
+    _parse_dshow_profiles,
+    _parse_v4l2_profiles,
     apply_video_controls,
     discover_video_devices,
     normalize_video_timeline,
     select_video_device,
 )
+
+
+def test_profile_selection_uses_highest_resolution_that_reaches_30_fps() -> None:
+    profiles = [
+        {"width": 3840, "height": 2160, "fps": 15.0, "input_format": "mjpeg"},
+        {"width": 1920, "height": 1080, "fps": 30.0, "input_format": "mjpeg"},
+        {"width": 1280, "height": 720, "fps": 60.0, "input_format": "mjpeg"},
+    ]
+
+    assert _choose_profile(profiles, VideoSettings()) == profiles[1]
+
+
+def test_camera_profile_parsers_preserve_ffmpeg_pixel_format_names() -> None:
+    v4l2 = _parse_v4l2_profiles(
+        "[0]: 'YUYV'\nSize: Discrete 1280x720\n"
+        "Interval: Discrete 0.033s (30.000 fps)\n"
+    )
+    assert v4l2[0]["input_format"] == "yuyv422"
+
+    dshow = _parse_dshow_profiles(
+        "pixel_format=yuyv422 min s=640x480 fps=30 max s=1920x1080 fps=30\n"
+    )
+    assert dshow[0] == {
+        "width": 640,
+        "height": 480,
+        "fps": 30.0,
+        "input_format": "yuyv422",
+    }
+
+
+def test_directshow_parser_keeps_none_typed_virtual_camera_for_diagnostics() -> None:
+    devices = video_module._parse_dshow_devices(
+        '[dshow] "OBS Virtual Camera" (none)\n'
+        '[dshow]   Alternative name "@device_sw_{example}"\n'
+        '[dshow] "Microphone" (audio)\n'
+        '[dshow]   Alternative name "@device_cm_{audio}"\n'
+    )
+
+    assert devices == [
+        {"name": "OBS Virtual Camera", "alternative": "@device_sw_{example}"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -118,6 +162,37 @@ def test_preview_only_recorder_has_no_file_output(tmp_path) -> None:
     assert "source {n} {pts} {tb}" in command
 
 
+def test_windows_recorder_uses_directshow_and_selected_profile(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(video_module, "platform_id", lambda: "windows")
+    monkeypatch.setattr(video_module, "resolve_executable", lambda name: f"{name}.exe")
+    command = FFmpegVideoRecorder(
+        VideoSettings(vaapi_device=None),
+        "Integrated Camera",
+        tmp_path / "capture.mkv",
+        profile={
+            "width": 1280,
+            "height": 720,
+            "fps": 30.0,
+            "input_format": "mjpeg",
+        },
+    ).command()
+
+    assert command[0] == "ffmpeg.exe"
+    assert command[command.index("-f") + 1] == "dshow"
+    assert "video=Integrated Camera" in command
+    assert "1280x720" in command
+    assert "/dev/video0" not in command
+
+
+def test_macos_recorder_uses_avfoundation(monkeypatch) -> None:
+    monkeypatch.setattr(video_module, "platform_id", lambda: "macos")
+    monkeypatch.setattr(video_module, "resolve_executable", lambda name: name)
+    command = FFmpegVideoRecorder(VideoSettings(vaapi_device=None), "0", None).command()
+
+    assert command[command.index("-f") + 1] == "avfoundation"
+    assert "0:none" in command
+
+
 @pytest.mark.asyncio
 async def test_manual_camera_controls_are_applied_and_read_back(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
@@ -138,6 +213,7 @@ async def test_manual_camera_controls_are_applied_and_read_back(monkeypatch) -> 
         return 0, "", ""
 
     monkeypatch.setattr(video_module, "_run_capture", fake_run)
+    monkeypatch.setattr(video_module, "platform_id", lambda: "linux")
     state = await apply_video_controls(
         VideoSettings(manual_controls_enabled=True), "/dev/video4"
     )
@@ -205,6 +281,7 @@ async def test_discovery_skips_metadata_and_keeps_capture_nodes(
         )
 
     monkeypatch.setattr(video_module, "_run_capture", fake_run)
+    monkeypatch.setattr(video_module, "platform_id", lambda: "linux")
 
     devices = await discover_video_devices(VideoSettings())
 

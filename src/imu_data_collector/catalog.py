@@ -52,6 +52,7 @@ class RecordingCatalog:
                     validation_issues_json TEXT NOT NULL DEFAULT '[]',
                     quality_warnings_json TEXT NOT NULL DEFAULT '[]',
                     upload_state TEXT NOT NULL DEFAULT 'not_requested',
+                    publish_target TEXT NOT NULL DEFAULT 'disabled',
                     index_state TEXT NOT NULL DEFAULT 'not_requested',
                     index_message TEXT NOT NULL DEFAULT '',
                     manifest_generation INTEGER
@@ -76,6 +77,8 @@ class RecordingCatalog:
                     max_attempts INTEGER NOT NULL DEFAULT 4,
                     next_attempt_at_utc TEXT,
                     last_error TEXT,
+                    progress_bytes INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     created_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL,
@@ -101,10 +104,23 @@ class RecordingCatalog:
                 ("manifest_generation", "INTEGER"),
                 ("validation_issues_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("quality_warnings_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("publish_target", "TEXT NOT NULL DEFAULT 'disabled'"),
             ):
                 if name not in columns:
                     connection.execute(
                         f"ALTER TABLE recordings ADD COLUMN {name} {definition}"
+                    )
+            job_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(recording_jobs)"
+                ).fetchall()
+            }
+            for name in ("progress_bytes", "total_bytes"):
+                if name not in job_columns:
+                    connection.execute(
+                        f"ALTER TABLE recording_jobs ADD COLUMN {name} "
+                        "INTEGER NOT NULL DEFAULT 0"
                     )
             # 旧库把运行故障和验证结论混在 issues_json。这里只迁移本次策略
             # 明确重分类的旧文本，其余未知问题全部按运行故障保留。
@@ -139,8 +155,9 @@ class RecordingCatalog:
                     recording_id, collection_id, participant_id, data_tier, state,
                     started_at_utc, ended_at_utc, duration_ns, h5_path, mkv_path,
                     issues_json, validation_issues_json, quality_warnings_json,
-                    upload_state, index_state, index_message, manifest_generation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    upload_state, publish_target, index_state, index_message,
+                    manifest_generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recording_id) DO UPDATE SET
                     collection_id=excluded.collection_id,
                     participant_id=excluded.participant_id,
@@ -155,6 +172,7 @@ class RecordingCatalog:
                     validation_issues_json=excluded.validation_issues_json,
                     quality_warnings_json=excluded.quality_warnings_json,
                     upload_state=excluded.upload_state,
+                    publish_target=excluded.publish_target,
                     index_state=excluded.index_state,
                     index_message=excluded.index_message,
                     manifest_generation=excluded.manifest_generation
@@ -174,6 +192,7 @@ class RecordingCatalog:
                     json.dumps(payload["validation_issues"], ensure_ascii=False),
                     json.dumps(payload["quality_warnings"], ensure_ascii=False),
                     payload["upload_state"],
+                    payload["publish_target"],
                     payload["index_state"],
                     payload["index_message"],
                     payload["manifest_generation"],
@@ -229,6 +248,8 @@ class RecordingCatalog:
             max_attempts=row["max_attempts"],
             next_attempt_at_utc=row["next_attempt_at_utc"],
             last_error=row["last_error"],
+            progress_bytes=row["progress_bytes"],
+            total_bytes=row["total_bytes"],
             created_at_utc=row["created_at_utc"],
             updated_at_utc=row["updated_at_utc"],
         )
@@ -244,6 +265,13 @@ class RecordingCatalog:
         if row is None:
             return None
         return self._job_status(row), json.loads(row["payload_json"])
+
+    def delete_job(self, recording_id: str, kind: BackgroundJobKind) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM recording_jobs WHERE recording_id=? AND kind=?",
+                (recording_id, kind.value),
+            )
 
     def enqueue_job(
         self,
@@ -276,13 +304,15 @@ class RecordingCatalog:
                 """
                 INSERT INTO recording_jobs (
                     recording_id, kind, state, phase, attempts, max_attempts,
-                    next_attempt_at_utc, last_error, payload_json,
+                    next_attempt_at_utc, last_error, progress_bytes, total_bytes,
+                    payload_json,
                     created_at_utc, updated_at_utc
-                ) VALUES (?, ?, 'queued', 'queued', 0, ?, NULL, NULL, ?, ?, ?)
+                ) VALUES (?, ?, 'queued', 'queued', 0, ?, NULL, NULL, 0, 0, ?, ?, ?)
                 ON CONFLICT(recording_id, kind) DO UPDATE SET
                     state='queued', phase='queued', attempts=0,
                     max_attempts=excluded.max_attempts,
                     next_attempt_at_utc=NULL, last_error=NULL,
+                    progress_bytes=0, total_bytes=0,
                     payload_json=excluded.payload_json,
                     updated_at_utc=excluded.updated_at_utc
                 """,
@@ -355,13 +385,78 @@ class RecordingCatalog:
                 ),
             )
 
+    def update_job_progress(
+        self,
+        recording_id: str,
+        kind: BackgroundJobKind,
+        progress_bytes: int,
+        total_bytes: int,
+        phase: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE recording_jobs
+                SET phase=?, progress_bytes=?, total_bytes=?, updated_at_utc=?
+                WHERE recording_id=? AND kind=? AND state='running'
+                """,
+                (
+                    phase,
+                    max(0, progress_bytes),
+                    max(0, total_bytes),
+                    datetime.now(UTC).isoformat(),
+                    recording_id,
+                    kind.value,
+                ),
+            )
+
+    def wait_for_auth(self, recording_id: str) -> BackgroundJobStatus:
+        """暂停发布任务且不消耗自动重试次数。"""
+
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE recording_jobs
+                SET state='waiting_auth', phase='auth_required',
+                    attempts=MAX(0, attempts - 1), next_attempt_at_utc=NULL,
+                    last_error=NULL, updated_at_utc=?
+                WHERE recording_id=? AND kind='publish' AND state='running'
+                """,
+                (now, recording_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM recording_jobs WHERE recording_id=? AND kind='publish'",
+                (recording_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError((recording_id, "publish"))
+        return self._job_status(row)
+
+    def resume_waiting_auth_jobs(self) -> list[str]:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT recording_id FROM recording_jobs "
+                "WHERE kind='publish' AND state='waiting_auth'"
+            ).fetchall()
+            connection.execute(
+                """
+                UPDATE recording_jobs
+                SET state='queued', phase='queued', updated_at_utc=?
+                WHERE kind='publish' AND state='waiting_auth'
+                """,
+                (now,),
+            )
+        return [str(row["recording_id"]) for row in rows]
+
     def complete_job(self, recording_id: str, kind: BackgroundJobKind) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE recording_jobs
                 SET state='succeeded', phase='completed', next_attempt_at_utc=NULL,
-                    last_error=NULL, updated_at_utc=?
+                    last_error=NULL, progress_bytes=total_bytes, updated_at_utc=?
                 WHERE recording_id=? AND kind=?
                 """,
                 (datetime.now(UTC).isoformat(), recording_id, kind.value),
@@ -381,7 +476,7 @@ class RecordingCatalog:
                     started_at_utc=?, ended_at_utc=?, duration_ns=?, h5_path=?,
                     mkv_path=?, issues_json=?, validation_issues_json=?,
                     quality_warnings_json=?, upload_state=?, index_state=?,
-                    index_message=?, manifest_generation=?
+                    index_message=?, manifest_generation=?, publish_target=?
                 WHERE recording_id=?
                 """,
                 (
@@ -401,6 +496,7 @@ class RecordingCatalog:
                     payload["index_state"],
                     payload["index_message"],
                     payload["manifest_generation"],
+                    payload["publish_target"],
                     payload["recording_id"],
                 ),
             )
@@ -495,7 +591,13 @@ class RecordingCatalog:
         return row is not None
 
     def job_counts(self) -> dict[str, int]:
-        output = {"queued": 0, "running": 0, "retry_wait": 0, "failed": 0}
+        output = {
+            "queued": 0,
+            "running": 0,
+            "retry_wait": 0,
+            "waiting_auth": 0,
+            "failed": 0,
+        }
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -550,6 +652,7 @@ class RecordingCatalog:
             validation_issues=json.loads(row["validation_issues_json"]),
             quality_warnings=json.loads(row["quality_warnings_json"]),
             upload_state=row["upload_state"],
+            publish_target=row["publish_target"],
             index_state=row["index_state"],
             index_message=row["index_message"],
             manifest_generation=row["manifest_generation"],

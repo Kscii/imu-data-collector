@@ -39,6 +39,11 @@ fi
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl restart imu-annotation.service
+if [[ -x ${release_dir}/.venv/bin/imu-upload-broker ]]; then
+  systemctl restart imu-upload-broker.service
+else
+  systemctl stop imu-upload-broker.service
+fi
 
 for _attempt in $(seq 1 20); do
   if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null; then
@@ -52,6 +57,11 @@ if [[ -n ${previous} ]]; then
   ln -s "${previous}" "${current_link}.failed"
   mv -Tf "${current_link}.failed" "${current_link}"
   systemctl restart imu-annotation.service
+  if [[ -x ${previous}/.venv/bin/imu-upload-broker ]]; then
+    systemctl restart imu-upload-broker.service
+  else
+    systemctl stop imu-upload-broker.service
+  fi
 fi
 echo "回滚版本健康检查失败" >&2
 exit 1

@@ -51,11 +51,26 @@ class PublishState(StrEnum):
     """采集制品从本机交付到标注存储的状态。"""
 
     NOT_REQUESTED = "not_requested"
+    STORED_LOCAL = "stored_local"
+    AUTH_REQUIRED = "auth_required"
+    QUEUED = "queued"
     PACKAGING = "packaging"
     UPLOADING = "uploading"
     VERIFYING = "verifying"
+    UPLOADED = "uploaded"
     PUBLISHED = "published"
+    RETRY_WAIT = "retry_wait"
+    VERIFIED = "verified"
     FAILED = "failed"
+
+
+class PublishTarget(StrEnum):
+    """发布目的地必须显式配置，禁止把本地对象目录冒充团队 Bucket。"""
+
+    DISABLED = "disabled"
+    LOCAL = "local"
+    BROKER = "broker"
+    DIRECT_GCS = "direct_gcs"
 
 
 class BackgroundJobKind(StrEnum):
@@ -71,6 +86,7 @@ class BackgroundJobState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     RETRY_WAIT = "retry_wait"
+    WAITING_AUTH = "waiting_auth"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -481,6 +497,8 @@ class BackgroundJobStatus(BaseModel):
     max_attempts: int = Field(default=4, ge=1)
     next_attempt_at_utc: str | None = None
     last_error: str | None = None
+    progress_bytes: int = Field(default=0, ge=0)
+    total_bytes: int = Field(default=0, ge=0)
     created_at_utc: str
     updated_at_utc: str
 
@@ -501,7 +519,8 @@ class RecordingSummary(BaseModel):
     issues: list[str] = Field(default_factory=list)
     validation_issues: list[str] = Field(default_factory=list)
     quality_warnings: list[str] = Field(default_factory=list)
-    upload_state: str = "not_requested"
+    upload_state: PublishState = PublishState.NOT_REQUESTED
+    publish_target: PublishTarget = PublishTarget.DISABLED
     index_state: Literal["not_requested", "pending", "indexed", "rejected"] = (
         "not_requested"
     )
