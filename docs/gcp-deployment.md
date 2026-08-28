@@ -62,9 +62,10 @@ contracts/annotation-capabilities.json
 
 bucket 开启 uniform bucket-level access、public access prevention 和 7 天 soft delete。原始媒体
 不进 Git/Git LFS。服务器每 10 秒扫描一次新的完整 manifest，管理员也可从页面立即刷新。
-benchmark 使用同一个 bucket，但只读取 `benchmark-datasets/` 前缀；组员不需要访问参与者视频
-或可变 review。team HDF5 和 manifest 使用不可变 snapshot 前缀，只有 `current.json` 会用对象
-generation 前置条件推进。
+benchmark 使用同一个 bucket；`benchmark-datasets/` 已创建为 managed folder，组员的
+`roles/storage.objectViewer` 只绑定到该资源，因此不需要也不应访问参与者视频或可变 review。
+team HDF5 和 manifest 使用不可变 snapshot 前缀，只有 `current.json` 会用对象 generation
+前置条件推进。
 
 ## GitHub Actions
 

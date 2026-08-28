@@ -39,9 +39,9 @@ sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
 - 视频：标注与质量证据，不进入训练快照，不提交 Git/Git LFS；
 - 训练快照：只包含对齐后的 25 Hz IMU H5，不包含视频；另发布合并 HDF5 给 benchmark。
 
-benchmark 组员只需读取同一 bucket 的 `benchmark-datasets/` 前缀。不要为了简化权限而授予
-整个 bucket 的对象查看权，否则会同时暴露原始视频、review 和身份相关元数据。具体 IAM 成员
-仍须在拿到团队 Google 账号清单后由管理员配置，账号不能写进仓库。
+benchmark 组员只需读取同一 bucket 中已启用的 `benchmark-datasets/` managed folder。不要为了
+简化权限而授予整个 bucket 的对象查看权，否则会同时暴露原始视频、review 和身份相关元数据。
+具体 IAM 成员仍须在拿到团队 Google 账号清单后由管理员配置，账号不能写进仓库。
 
 成员会看到参与者影像、IMU 数据和标注，因此账号不得共享。人体采集前必须另行完成知情同意、
 动作安全、摄像范围和数据保留约定；代码的 MIT License 不等于参与者数据开放授权。
