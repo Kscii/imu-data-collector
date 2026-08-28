@@ -237,6 +237,29 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .library article.current-snapshot { border: 1px solid #2563eb; border-radius: 10px; padding: 14px; background: #102142; }
 .snapshot-history { border-top: 1px solid #27364f; padding-top: 12px; }
 .snapshot-history > summary { color: #c7d2e4; font-weight: 700; }
+.dataset-catalog { display: grid; gap: 18px; }
+.dataset-catalog-heading, .dataset-collection-heading, .dataset-snapshot-heading, .dataset-file-heading { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.dataset-catalog-heading .panel-title { margin-bottom: 5px; }
+.dataset-catalog-heading p { margin: 0; max-width: 1040px; }
+.dataset-collection { display: grid; gap: 11px; border-top: 1px solid #27364f; padding-top: 15px; }
+.dataset-collection-heading h2 { margin: 0 0 3px; font-size: 18px; }
+.dataset-collection-heading span { color: #8fa2bd; font: 11px ui-monospace, monospace; }
+.dataset-availability { border: 1px solid #854d0e; border-radius: 999px; padding: 5px 9px; color: #fde68a; font-size: 11px; }
+.dataset-availability.available { border-color: #166534; color: #86efac; }
+.dataset-snapshot { display: grid; gap: 11px; border: 1px solid #27364f; border-radius: 10px; padding: 13px; background: #0d192b; }
+.dataset-snapshot.current-snapshot { border-color: #2563eb; background: #102142; }
+.dataset-snapshot-heading > div { display: grid; gap: 4px; min-width: 0; }
+.dataset-snapshot-heading span { color: #8fa2bd; font-size: 11px; }
+.dataset-checks { color: #9eb0c8; font-size: 11px; }
+.dataset-checks code, .dataset-file details code { display: block; margin-top: 5px; overflow-wrap: anywhere; user-select: all; }
+.dataset-file-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 9px; }
+.dataset-file { display: grid; gap: 7px; min-width: 0; padding: 11px; border: 1px solid #2b3e5d; border-radius: 9px; background: #0b1525; }
+.dataset-file-heading span, .dataset-file p { color: #91a4bd; font-size: 11px; }
+.dataset-file p { margin: 0; line-height: 1.45; }
+.dataset-file details { color: #8fa2bd; font-size: 10px; }
+.dataset-file .button-link { justify-self: start; margin-top: 3px; }
+.dataset-history { display: grid; gap: 10px; }
+.dataset-history > summary { cursor: pointer; }
 .library ul { grid-column: 1 / -1; color: #fbbf24; margin: 0; }
 .characterization-intro { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
 .characterization-intro p, .stage-help { color: #9eb0c8; line-height: 1.55; margin: 6px 0 14px; }

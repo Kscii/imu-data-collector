@@ -21,7 +21,7 @@ Windows 10 与 Windows 11 共用 WinRT、DirectShow 和 x64 安装包代码路�
 
 - Bleak 回调进入进程时立即读取 Python `monotonic_ns()`；原始通知、约 25 Hz 样本和接收时间不重采样。
 - 视频保留 FFmpeg 报告的真实逐帧 PTS；Windows/macOS 把第一帧源 PTS 映射到本次 FFmpeg 启动时的主机单调时钟，Linux 继续保存 V4L2 的单调 PTS。
-- 严格 30 Hz 只在同步、标注完成后的 `aligned30.h5` 中派生，不能覆盖原始 H5。
+- 严格 25 Hz 只在同步、标注完成后的 `aligned.h5` 中派生，不能覆盖原始 H5。
 - 一次录制仍是同名 H5/MKV 原子文件对，不因操作系统改变目录层级或 manifest 2.1 合同。
 
 capture H5 schema 1.6 新增或冻结以下运行时事实：

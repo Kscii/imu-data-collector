@@ -13,7 +13,8 @@ from imu_data_collector.artifacts import (
     _annotation_rows,
     create_capture_package,
     create_training_snapshot_archive,
-    export_aligned30,
+    export_aligned,
+    merge_training_exports,
 )
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.hdf5_store import sha256_file
@@ -197,26 +198,28 @@ def test_capture_package_excludes_mutable_review_sidecar(tmp_path: Path) -> None
         assert archive.getnames() == ["manifest.json", "capture.h5", "video.mkv"]
 
 
-def test_aligned30_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) -> None:
+def test_aligned_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) -> None:
     h5_path, mkv_path = write_source_pair(tmp_path)
-    output = export_aligned30(
+    output = export_aligned(
         completed_review(h5_path, mkv_path),
         h5_path,
         mkv_path,
-        tmp_path / "aligned30.h5",
+        tmp_path / "aligned.h5",
         ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
         taxonomy(),
     )
 
     with h5py.File(output, "r") as handle:
         assert set(handle.keys()) == {"samples", "sequences", "annotations"}
-        assert handle.attrs["imu_schema_version"] == "3.0.0"
-        assert handle["samples"].shape == (59, 6)
+        assert handle.attrs["imu_schema_version"] == "3.1.0"
+        assert handle.attrs["sampling_rate_hz"] == 25.0
+        assert handle.attrs["evaluation_role"] == "training_only"
+        assert handle["samples"].shape == (50, 6)
         assert handle["samples"].dtype == np.dtype("float32")
         assert handle["sequences"][0]["supervision_kind"].decode() == "temporal"
         annotation = handle["annotations"][0]
         assert annotation["kind"].decode() == "activity"
-        assert (annotation["start_sample"], annotation["stop_sample"]) == (0, 59)
+        assert (annotation["start_sample"], annotation["stop_sample"]) == (0, 50)
 
 
 def test_fall_onset_is_derived_from_segment_start_and_impact_is_preserved(
@@ -329,13 +332,29 @@ def test_aligned_grid_keeps_derived_onset_equal_to_fall_activity_start(
         taxonomy_version="1.0.0",
         segments=[
             ActivitySegment(
+                segment_id="seg_000",
+                start_ns=0,
+                end_ns=410_000_000,
+                binary_label=BinaryLabel.NON_FALL,
+                activity_code="walking",
+                annotator_id="xfan0282",
+            ),
+            ActivitySegment(
                 segment_id="seg_001",
                 start_ns=410_000_000,
                 end_ns=1_500_000_000,
                 binary_label=BinaryLabel.FALL,
                 activity_code="forward_fall",
                 annotator_id="xfan0282",
-            )
+            ),
+            ActivitySegment(
+                segment_id="seg_002",
+                start_ns=1_500_000_000,
+                end_ns=4_000_000_000,
+                binary_label=BinaryLabel.NON_FALL,
+                activity_code="walking",
+                annotator_id="xfan0282",
+            ),
         ],
         events=[
             AnnotationEvent(
@@ -358,28 +377,32 @@ def test_aligned_grid_keeps_derived_onset_equal_to_fall_activity_start(
     )
 
     rows = _annotation_rows(review, grid_origin_ns=0, sample_count=100)
-    activity = next(row for row in rows if row["kind"] == "activity")
+    activity = next(
+        row
+        for row in rows
+        if row["kind"] == "activity" and row["code"] == "forward_fall"
+    )
     onset = next(row for row in rows if row["kind"] == "onset")
 
-    assert int(activity["start_sample"]) == 13
+    assert int(activity["start_sample"]) == 11
     assert int(onset["start_sample"]) == int(activity["start_sample"])
 
 
-def test_aligned30_export_is_blocked_without_verified_calibration(tmp_path: Path) -> None:
+def test_aligned_export_is_blocked_without_verified_calibration(tmp_path: Path) -> None:
     h5_path, mkv_path = write_source_pair(tmp_path)
     with pytest.raises(ValueError, match="校准"):
-        export_aligned30(
+        export_aligned(
             completed_review(h5_path, mkv_path),
             h5_path,
             mkv_path,
-            tmp_path / "aligned30.h5",
+            tmp_path / "aligned.h5",
             ImuSettings(),
             taxonomy(),
         )
 
 
 def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path) -> None:
-    aligned = tmp_path / "aligned30.h5"
+    aligned = tmp_path / "aligned.h5"
     aligned.write_bytes(b"aligned")
 
     output = create_training_snapshot_archive(
@@ -390,17 +413,41 @@ def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path
     with tarfile.open(output, "r:") as archive:
         assert archive.getnames() == [
             "manifest.json",
-            "recordings/xfan0282/recording-1/aligned30.h5",
+            "recordings/xfan0282/recording-1/aligned.h5",
         ]
         manifest_stream = archive.extractfile("manifest.json")
         assert manifest_stream is not None
         manifest = json.loads(manifest_stream.read())
-        assert manifest["schema_version"] == "1.0.0"
+        assert manifest["schema_version"] == "2.0.0"
         assert manifest["dataset_id"] == "cw12eu"
+        assert manifest["hdf5_schema_version"] == "3.1.0"
+        assert manifest["sampling_rate_hz"] == 25
         assert manifest["files"] == [
             {
-                "path": "recordings/xfan0282/recording-1/aligned30.h5",
+                "path": "recordings/xfan0282/recording-1/aligned.h5",
                 "size_bytes": len(b"aligned"),
                 "sha256": sha256_file(aligned),
             }
         ]
+
+
+def test_merge_training_exports_creates_benchmark_shard(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    aligned = export_aligned(
+        completed_review(h5_path, mkv_path),
+        h5_path,
+        mkv_path,
+        tmp_path / "aligned.h5",
+        ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
+        taxonomy(),
+    )
+    merged = merge_training_exports(
+        [("xfan0282", "recording-1", aligned)], tmp_path / "cw12eu.h5"
+    )
+    with h5py.File(merged, "r") as handle:
+        assert handle.attrs["dataset_id"] == "cw12eu"
+        assert handle.attrs["imu_schema_version"] == "3.1.0"
+        assert handle.attrs["evaluation_role"] == "training_only"
+        assert handle.attrs["sampling_rate_hz"] == 25.0
+        assert handle.attrs["sequence_count"] == 1
+        assert handle.attrs["sample_count"] == 50

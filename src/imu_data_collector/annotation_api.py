@@ -7,7 +7,7 @@ import logging
 import re
 import threading
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -24,6 +24,7 @@ from imu_data_collector.auth import (
 )
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
+from imu_data_collector.dataset_catalog import DatasetCatalog
 from imu_data_collector.host import resource_path
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
@@ -57,6 +58,7 @@ def create_annotation_app(
         active.storage.project,
     )
     service = AnnotationService(active, object_store)
+    dataset_catalog = DatasetCatalog(object_store)
     authenticator = Authenticator(active, token_verifier)
     refresh_stop = threading.Event()
 
@@ -166,6 +168,83 @@ def create_annotation_app(
     @app.get("/api/v1/session")
     def session(request: Request) -> dict[str, Any]:
         return current_actor(request).public_dict()
+
+    @app.get("/api/v1/dataset-catalog")
+    def dataset_catalog_summary() -> dict[str, Any]:
+        return dataset_catalog.summary()
+
+    @app.get(
+        "/api/v1/dataset-catalog/{kind}/{snapshot_id}/manifest/download"
+    )
+    def dataset_catalog_manifest_download(
+        kind: Literal["base", "team"], snapshot_id: str
+    ) -> Response:
+        try:
+            payload, filename = dataset_catalog.manifest_download(kind, snapshot_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该数据集快照") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return Response(
+            payload,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "private, max-age=300",
+            },
+        )
+
+    @app.get(
+        "/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download"
+    )
+    def dataset_catalog_h5_download(
+        kind: Literal["base", "team"],
+        snapshot_id: str,
+        dataset_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> StreamingResponse:
+        try:
+            entry, info = dataset_catalog.dataset_download(
+                kind, snapshot_id, dataset_id
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该数据文件") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        start, end, status_code = 0, info.size_bytes - 1, 200
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
+            if not match:
+                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else end
+            if start > end or end >= info.size_bytes:
+                raise HTTPException(status_code=416, detail="H5 Range 越界")
+            status_code = 206
+
+        def stream():
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(info.key, cursor, chunk_end)
+                cursor = chunk_end + 1
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
+            "Cache-Control": "private, max-age=300",
+            "X-Content-SHA256": str(entry["sha256"]),
+        }
+        if status_code == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{info.size_bytes}"
+        return StreamingResponse(
+            stream(),
+            status_code=status_code,
+            media_type="application/x-hdf5",
+            headers=headers,
+        )
 
     @app.get("/api/v1/taxonomy")
     def taxonomy(
@@ -469,8 +548,9 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
-    def aligned30_download(recording_id: str) -> StreamingResponse:
+    def aligned_download_response(
+        recording_id: str, *, legacy_30hz_only: bool
+    ) -> StreamingResponse:
         manifest = required(recording_id)
         if manifest.data_tier.value != "prod":
             raise HTTPException(
@@ -483,6 +563,11 @@ def create_annotation_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        if legacy_30hz_only and reference.sampling_rate_hz != 30.0:
+            raise HTTPException(
+                status_code=410,
+                detail="该录制已经使用 25 Hz 新合同；请使用通用训练 HDF5 下载入口",
+            )
         key = reference.object_key
 
         def stream():
@@ -497,12 +582,22 @@ def create_annotation_app(
             media_type="application/x-hdf5",
             headers={
                 "Content-Disposition": (
-                    f'attachment; filename="{recording_id}.aligned30.h5"'
+                    f'attachment; filename="{recording_id}.{reference.filename}"'
                 ),
                 "Content-Length": str(info.size_bytes),
                 "Cache-Control": "private, no-store",
             },
         )
+
+    @app.get("/api/v1/recordings/{recording_id}/aligned/download")
+    def aligned_download(recording_id: str) -> StreamingResponse:
+        return aligned_download_response(recording_id, legacy_30hz_only=False)
+
+    @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
+    def aligned30_download(recording_id: str) -> StreamingResponse:
+        """只为已经存在的历史 30 Hz 导出保留读取能力。"""
+
+        return aligned_download_response(recording_id, legacy_30hz_only=True)
 
     @app.delete("/api/v1/recordings/{recording_id}")
     def delete_recording(
@@ -534,6 +629,11 @@ def create_annotation_app(
     def create_training_snapshot(request: Request) -> dict[str, Any]:
         try:
             return service.create_training_snapshot(current_actor(request).unikey)
+        except ObjectConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="训练数据 current pointer 被其他发布操作更新，请刷新后重试",
+            ) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -583,6 +683,36 @@ def create_annotation_app(
             status_code=status_code,
             media_type="application/x-tar",
             headers=headers,
+        )
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download")
+    def benchmark_snapshot_download(snapshot_id: str) -> StreamingResponse:
+        try:
+            _payload, artifact = service.benchmark_snapshot_download(snapshot_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        def stream():
+            cursor = 0
+            while cursor < artifact.size_bytes:
+                end = min(artifact.size_bytes - 1, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(artifact.key, cursor, end)
+                cursor = end + 1
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/x-hdf5",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="cw12eu_{snapshot_id}.h5"'
+                ),
+                "Content-Length": str(artifact.size_bytes),
+                "Cache-Control": "private, no-store",
+            },
         )
 
     @app.delete("/api/v1/training-snapshots/{snapshot_id}")
