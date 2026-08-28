@@ -252,6 +252,16 @@ type TrainingSnapshot = {
   archive_sha256: string;
   archive_size_bytes: number;
   recording_count: number;
+  benchmark?: {
+    snapshot_id: string;
+    hdf5_object_key: string;
+    hdf5_sha256: string;
+    logical_content_sha256: string;
+    hdf5_size_bytes: number;
+    manifest_object_key: string;
+    manifest_sha256: string;
+    current_object_key: string;
+  } | null;
   created?: boolean;
 };
 
@@ -267,6 +277,10 @@ type ReviewDocument = {
   };
   annotations: AnnotationDocument;
   active_export: {
+    export_schema_version?: "1.0.0" | "2.0.0";
+    hdf5_schema_version?: string;
+    sampling_rate_hz?: number;
+    filename?: string;
     source_review_revision: number;
     object_key: string;
     sha256: string;
@@ -2293,7 +2307,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             {taskTab === "data" && review && <div className="panel compact-panel workflow-panel">
               <div className="panel-title">下载与录制管理</div>
               <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
-              <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned30/download`} download>训练 aligned30.h5</a>}</div>
+              <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned/download`} download>训练 aligned25.h5</a>}</div>
               <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
             </div>}
           </div>
@@ -2341,7 +2355,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
   };
 
   const deleteSnapshot = async (snapshotId: string) => {
-    const confirmation = window.prompt(`清理后需要重新构建才能下载。请输入：\nDELETE ${snapshotId}`);
+    const confirmation = window.prompt(`清理后平台将不再提供 TAR；已经发布的不可变 benchmark H5 不受影响。请输入：\nDELETE ${snapshotId}`);
     if (confirmation === null) return;
     setBusy(true);
     setError("");
@@ -2365,7 +2379,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
       <div className="panel-title">训练快照</div>
-      <p className="stage-help">点击时冻结当前所有已完成的正式数据。相同内容复用同一个 TAR；构建期间的后续标注变化不会改变本次快照。</p>
+      <p className="stage-help">点击时冻结当前所有已完成的正式数据，同时生成逐录制 TAR、合并 cw12eu.h5，并原子更新 benchmark 的团队当前版本指针。相同内容会复用同一个不可变快照。</p>
       <div className="save-row">
         <button className="primary" disabled={busy} onClick={createSnapshot}>{busy ? "正在处理…" : "生成当前训练快照"}</button>
         <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>刷新列表</button>
@@ -2387,10 +2401,11 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { s
     <div>
       <strong>{current ? "当前训练快照" : "历史训练快照"} · {snapshot.snapshot_id}</strong>
       <span>{snapshot.recording_count} 条录制 · {(snapshot.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · 创建者 {snapshot.created_by ?? "未知"}</span>
-      <details><summary>校验信息</summary><span>SHA-256 {snapshot.archive_sha256}</span></details>
+      <details><summary>校验信息</summary><span>TAR SHA-256 {snapshot.archive_sha256}</span>{snapshot.benchmark && <span> · HDF5 SHA-256 {snapshot.benchmark.hdf5_sha256} · current {snapshot.benchmark.current_object_key}</span>}</details>
     </div>
     <div className="save-row">
       <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>下载 TAR</a>
+      {snapshot.benchmark && <a className="button-link" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/benchmark-h5/download`} download>下载 benchmark H5</a>}
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
     </div>
   </article>;

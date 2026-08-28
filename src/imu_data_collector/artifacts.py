@@ -1,4 +1,4 @@
-"""生成不可变源包与经过门禁的 30 Hz 训练 HDF5。"""
+"""生成不可变源包与经过门禁的 25 Hz 训练 HDF5。"""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ from imu_data_collector.review import verify_source_artifacts
 from imu_data_collector.sync import assess_conditional_fixed_offset
 from imu_data_collector.validation import validate_annotations
 
-TRAINING_SCHEMA_VERSION = "3.0.0"
-TARGET_RATE_HZ = 30
+TRAINING_SCHEMA_VERSION = "3.1.0"
+TARGET_RATE_HZ = 25
 NANOSECONDS_PER_SECOND = 1_000_000_000
 
 
@@ -77,13 +77,13 @@ def create_training_snapshot_archive(
     """把逐录制训练文件打包成一个不可变 TAR。"""
 
     if not files:
-        raise ValueError("没有已完成的 aligned30.h5 可加入训练快照")
+        raise ValueError("没有已完成的 aligned25.h5 可加入训练快照")
     manifest_files = []
     archive_items: list[tuple[str, Path]] = []
     for participant_id, recording_id, path in sorted(files):
         if not path.is_file():
             raise ValueError(f"训练文件缺失：{path}")
-        archive_path = f"recordings/{participant_id}/{recording_id}/aligned30.h5"
+        archive_path = f"recordings/{participant_id}/{recording_id}/aligned25.h5"
         archive_items.append((archive_path, path))
         manifest_files.append(
             {
@@ -93,8 +93,10 @@ def create_training_snapshot_archive(
             }
         )
     manifest = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "dataset_id": "cw12eu",
+        "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+        "sampling_rate_hz": TARGET_RATE_HZ,
         "files": manifest_files,
     }
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
@@ -173,16 +175,60 @@ def _annotation_rows(
     activity_by_segment = {
         item.segment_id: item.activity_code for item in document.annotations.segments
     }
+    activities: list[tuple[int, int, str, BinaryLabel]] = []
     for segment in document.annotations.segments:
         start = max(0, min(sample_count, _ceil_grid_index(segment.start_ns - grid_origin_ns)))
         stop = max(0, min(sample_count, _ceil_grid_index(segment.end_ns - grid_origin_ns)))
         if start < stop:
-            rows.append((0, "activity", start, stop, segment.activity_code))
+            activities.append((start, stop, segment.activity_code, segment.binary_label))
+    exclusions: list[tuple[int, int, str]] = []
     for exclusion in document.annotations.exclusions:
         start = max(0, min(sample_count, _ceil_grid_index(exclusion.start_ns - grid_origin_ns)))
         stop = max(0, min(sample_count, _ceil_grid_index(exclusion.end_ns - grid_origin_ns)))
         if start < stop:
-            rows.append((0, "exclude", start, stop, exclusion.reason.value))
+            exclusions.append((start, stop, exclusion.reason.value))
+    for start, stop, _code, label in activities:
+        if label == BinaryLabel.FALL and any(
+            start < excluded_stop and stop > excluded_start
+            for excluded_start, excluded_stop, _reason in exclusions
+        ):
+            raise ValueError("排除区间不能与跌倒区间重叠")
+
+    boundaries = {0, sample_count}
+    for start, stop, _code, _label in activities:
+        boundaries.update((start, stop))
+    for start, stop, _reason in exclusions:
+        boundaries.update((start, stop))
+    ordered = sorted(boundaries)
+    interval_rows: list[tuple[int, str, int, int, str]] = []
+    for start, stop in zip(ordered, ordered[1:], strict=False):
+        if start == stop:
+            continue
+        excluded = [
+            reason
+            for excluded_start, excluded_stop, reason in exclusions
+            if excluded_start <= start and stop <= excluded_stop
+        ]
+        if len(excluded) > 1:
+            raise ValueError("排除区间不能互相重叠")
+        if excluded:
+            kind, code = "exclude", excluded[0]
+        else:
+            covering = [
+                code
+                for activity_start, activity_stop, code, _label in activities
+                if activity_start <= start and stop <= activity_stop
+            ]
+            if len(covering) != 1:
+                raise ValueError("活动与排除区间必须完整且无重叠地覆盖训练时间轴")
+            kind, code = "activity", covering[0]
+        if interval_rows and interval_rows[-1][1] == kind and interval_rows[-1][4] == code:
+            previous = interval_rows[-1]
+            interval_rows[-1] = (0, kind, previous[2], stop, code)
+        else:
+            interval_rows.append((0, kind, start, stop, code))
+    rows.extend(interval_rows)
+
     for event in document.annotations.events:
         relative_ns = event.time_ns - grid_origin_ns
         index = (
@@ -190,16 +236,17 @@ def _annotation_rows(
             if event.kind.value == "onset"
             else _nearest_grid_index_half_up(relative_ns)
         )
-        if 0 <= index < sample_count:
-            rows.append(
-                (
-                    0,
-                    event.kind.value,
-                    index,
-                    index,
-                    activity_by_segment[event.segment_id],
-                )
+        if not 0 <= index < sample_count:
+            raise ValueError("跌倒事件点位于 IMU 与视频公共训练时间轴之外")
+        rows.append(
+            (
+                0,
+                event.kind.value,
+                index,
+                index,
+                activity_by_segment[event.segment_id],
             )
+        )
     kind_order = {"activity": 0, "onset": 1, "impact": 2, "exclude": 3}
     rows.sort(key=lambda item: (item[2], kind_order[item[1]], item[3], item[4]))
     return np.asarray(rows, dtype=_annotation_dtype())
@@ -207,27 +254,33 @@ def _annotation_rows(
 
 def _logical_digest(
     values: np.ndarray,
-    sequence: np.ndarray,
+    sequences: np.ndarray,
     annotations: np.ndarray,
 ) -> str:
-    row = sequence[0]
-
     def text(value: object) -> str:
         return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
     metadata = {
         "dataset_id": "cw12eu",
-        "source_file": text(row["source_file"]),
-        "participant_id": text(row["participant_id"]),
-        "recording_id": text(row["recording_id"]),
-        "body_location": text(row["body_location"]),
-        "activity": text(row["activity_code"]),
-        "is_fall": bool(row["is_fall"]),
-        "sampling_rate_hz": 30.0,
-        "original_sampling_rate_hz": float(row["source_sampling_rate_hz"]),
-        "supervision_kind": text(row["supervision_kind"]),
+        "sampling_rate_hz": float(TARGET_RATE_HZ),
+        "sequences": [
+            {
+                "sample_start": int(row["sample_start"]),
+                "sample_stop": int(row["sample_stop"]),
+                "source_file": text(row["source_file"]),
+                "participant_id": text(row["participant_id"]),
+                "recording_id": text(row["recording_id"]),
+                "body_location": text(row["body_location"]),
+                "activity": text(row["activity_code"]),
+                "is_fall": bool(row["is_fall"]),
+                "original_sampling_rate_hz": float(row["source_sampling_rate_hz"]),
+                "supervision_kind": text(row["supervision_kind"]),
+            }
+            for row in sequences
+        ],
         "annotations": [
             {
+                "sequence_index": int(item["sequence_index"]),
                 "kind": text(item["kind"]),
                 "start_sample": int(item["start_sample"]),
                 "stop_sample": int(item["stop_sample"]),
@@ -246,7 +299,142 @@ def _logical_digest(
     return digest.hexdigest()
 
 
-def export_aligned30(
+def merge_training_exports(
+    files: list[tuple[str, str, Path]], output_path: Path
+) -> Path:
+    """把同一快照的逐录制导出合并为 benchmark 可直接读取的 cw12eu.h5。"""
+
+    if not files:
+        raise ValueError("没有训练导出可合并")
+    samples_parts: list[np.ndarray] = []
+    sequence_rows: list[tuple[object, ...]] = []
+    annotation_rows: list[tuple[object, ...]] = []
+    sample_offset = 0
+    sequence_offset = 0
+    for _participant_id, _recording_id, path in sorted(files):
+        with h5py.File(path, "r") as source:
+            if (
+                str(source.attrs.get("imu_schema_version", "")) != TRAINING_SCHEMA_VERSION
+                or float(source.attrs.get("sampling_rate_hz", 0.0)) != TARGET_RATE_HZ
+                or str(source.attrs.get("evaluation_role", "")) != "training_only"
+            ):
+                raise ValueError(f"训练导出合同不匹配：{path}")
+            values = np.asarray(source["samples"], dtype=np.float32)
+            sequences = np.asarray(source["sequences"])
+            annotations = np.asarray(source["annotations"])
+        samples_parts.append(values)
+        for row in sequences:
+            sequence_rows.append(
+                (
+                    int(row["sample_start"]) + sample_offset,
+                    int(row["sample_stop"]) + sample_offset,
+                    row["source_file"],
+                    row["participant_id"],
+                    row["recording_id"],
+                    row["body_location"],
+                    row["activity_code"],
+                    bool(row["is_fall"]),
+                    row["supervision_kind"],
+                    float(row["source_sampling_rate_hz"]),
+                )
+            )
+        for row in annotations:
+            annotation_rows.append(
+                (
+                    int(row["sequence_index"]) + sequence_offset,
+                    row["kind"],
+                    int(row["start_sample"]),
+                    int(row["stop_sample"]),
+                    row["code"],
+                )
+            )
+        sample_offset += len(values)
+        sequence_offset += len(sequences)
+
+    values = np.concatenate(samples_parts, axis=0)
+    sequences = np.asarray(sequence_rows, dtype=_sequence_dtype())
+    annotations = np.asarray(annotation_rows, dtype=_annotation_dtype())
+    logical_digest = _logical_digest(values, sequences, annotations)
+    feature_columns = json.dumps(
+        [
+            "acceleration_x_mps2",
+            "acceleration_y_mps2",
+            "acceleration_z_mps2",
+            "angular_velocity_x_rad_s",
+            "angular_velocity_y_rad_s",
+            "angular_velocity_z_rad_s",
+        ]
+    )
+    feature_units = json.dumps(
+        ["m/s^2", "m/s^2", "m/s^2", "rad/s", "rad/s", "rad/s"]
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.partial")
+    try:
+        with h5py.File(temporary, "w", libver=("earliest", "v114")) as output:
+            output.attrs.update(
+                {
+                    "imu_schema_version": TRAINING_SCHEMA_VERSION,
+                    "dataset_id": "cw12eu",
+                    "sampling_rate_hz": float(TARGET_RATE_HZ),
+                    "axis_frame": "sensor_local",
+                    "hdf5_compatibility": "1.14",
+                    "evaluation_role": "training_only",
+                    "feature_columns": feature_columns,
+                    "sequence_count": len(sequences),
+                    "sample_count": len(values),
+                    "annotation_count": len(annotations),
+                    "logical_content_sha256": logical_digest,
+                    "source_sampling_kind": "timestamped_device_capture",
+                    "resampling_method": (
+                        "monotonic timestamp linear interpolation to a regular 25 Hz grid; "
+                        "no extrapolation"
+                    ),
+                    "license_status": "first_party_team_capture",
+                }
+            )
+            sample_dataset = output.create_dataset(
+                "samples",
+                data=values,
+                maxshape=(None, 6),
+                chunks=(4096, 6),
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+                fletcher32=True,
+            )
+            output.create_dataset(
+                "sequences",
+                data=sequences,
+                maxshape=(None,),
+                chunks=(max(1, min(1024, len(sequences))),),
+            )
+            output.create_dataset(
+                "annotations",
+                data=annotations,
+                maxshape=(None,),
+                chunks=(max(1, min(1024, max(1, len(annotations)))),),
+            )
+            sample_dataset.attrs.update(
+                {
+                    "columns": feature_columns,
+                    "units": feature_units,
+                    "axis_frame": "sensor_local",
+                }
+            )
+            output["sequences"].attrs["interval_semantics"] = (
+                "sample_start inclusive, sample_stop exclusive"
+            )
+            output["annotations"].attrs["point_semantics"] = (
+                "onset/impact have start_sample == stop_sample"
+            )
+        temporary.replace(output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output_path
+
+
+def export_aligned(
     document: ReviewDocument,
     h5_path: Path,
     mkv_path: Path,
@@ -296,14 +484,14 @@ def export_aligned30(
         body_location = str(source.attrs["body_location"])
 
     if len(raw) < 2 or len(video_time_ns) < 2:
-        raise ValueError("IMU 或视频样本不足，无法生成公共 30 Hz 时间轴")
+        raise ValueError("IMU 或视频样本不足，无法生成公共 25 Hz 时间轴")
     start_ns = max(int(imu_time_ns[0]), int(video_time_ns[0]))
     stop_ns = min(int(imu_time_ns[-1]), int(video_time_ns[-1]))
     if stop_ns <= start_ns:
         raise ValueError("IMU 与视频没有公共有效时间区间")
     sample_count = (stop_ns - start_ns) * TARGET_RATE_HZ // NANOSECONDS_PER_SECOND + 1
     if sample_count < 2:
-        raise ValueError("IMU 与视频公共有效区间不足两个 30 Hz 样本")
+        raise ValueError("IMU 与视频公共有效区间不足两个 25 Hz 样本")
     relative_grid_ns = (
         np.arange(sample_count, dtype=np.int64) * NANOSECONDS_PER_SECOND // TARGET_RATE_HZ
     )
@@ -352,14 +540,15 @@ def export_aligned30(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.partial")
     try:
-        with h5py.File(temporary, "w", libver="latest") as output:
+        with h5py.File(temporary, "w", libver=("earliest", "v114")) as output:
             output.attrs.update(
                 {
                     "imu_schema_version": TRAINING_SCHEMA_VERSION,
                     "dataset_id": "cw12eu",
-                    "sampling_rate_hz": 30.0,
+                    "sampling_rate_hz": float(TARGET_RATE_HZ),
                     "axis_frame": "sensor_local",
                     "hdf5_compatibility": "1.14",
+                    "evaluation_role": "training_only",
                     "feature_columns": json.dumps(
                         [
                             "acceleration_x_mps2",
@@ -372,7 +561,11 @@ def export_aligned30(
                     ),
                     "recording_id": recording_id,
                     "grid_origin_recording_time_ns": start_ns,
-                    "grid_definition": "row k occurs at exactly k/30 seconds",
+                    "grid_definition": "row k occurs at exactly k/25 seconds",
+                    "resampling_method": (
+                        "monotonic timestamp linear interpolation to a regular 25 Hz grid; "
+                        "no extrapolation"
+                    ),
                     "sequence_count": 1,
                     "sample_count": sample_count,
                     "annotation_count": len(annotations),

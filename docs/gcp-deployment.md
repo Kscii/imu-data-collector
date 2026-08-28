@@ -51,8 +51,10 @@ sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
 ```text
 captures/<recording_id>/{capture.h5,video.mkv,preview.mp4,manifest.json}
 reviews/<recording_id>/review.json
-exports/<recording_id>/review-<revision>/aligned30-<digest>.h5
+exports/<recording_id>/review-<revision>/aligned25-<digest>.h5
 training-snapshots/<snapshot_id>/{cw12eu_<snapshot_id>.tar,manifest.json}
+benchmark-datasets/team/cw12eu/<snapshot_id>/{datasets/cw12eu.h5,manifest.json}
+benchmark-datasets/team/cw12eu/current.json
 calibration-evidence/<profile_id>/<recording_id>/
 index-receipts/<recording_id>.json
 contracts/annotation-capabilities.json
@@ -60,6 +62,9 @@ contracts/annotation-capabilities.json
 
 bucket 开启 uniform bucket-level access、public access prevention 和 7 天 soft delete。原始媒体
 不进 Git/Git LFS。服务器每 10 秒扫描一次新的完整 manifest，管理员也可从页面立即刷新。
+benchmark 使用同一个 bucket，但只读取 `benchmark-datasets/` 前缀；组员不需要访问参与者视频
+或可变 review。team HDF5 和 manifest 使用不可变 snapshot 前缀，只有 `current.json` 会用对象
+generation 前置条件推进。
 
 ## GitHub Actions
 

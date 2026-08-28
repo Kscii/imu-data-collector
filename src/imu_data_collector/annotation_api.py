@@ -469,8 +469,9 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
-    def aligned30_download(recording_id: str) -> StreamingResponse:
+    def aligned_download_response(
+        recording_id: str, *, legacy_30hz_only: bool
+    ) -> StreamingResponse:
         manifest = required(recording_id)
         if manifest.data_tier.value != "prod":
             raise HTTPException(
@@ -483,6 +484,11 @@ def create_annotation_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        if legacy_30hz_only and reference.sampling_rate_hz != 30.0:
+            raise HTTPException(
+                status_code=410,
+                detail="该录制已经使用 25 Hz 新合同；请使用通用训练 HDF5 下载入口",
+            )
         key = reference.object_key
 
         def stream():
@@ -497,12 +503,22 @@ def create_annotation_app(
             media_type="application/x-hdf5",
             headers={
                 "Content-Disposition": (
-                    f'attachment; filename="{recording_id}.aligned30.h5"'
+                    f'attachment; filename="{recording_id}.{reference.filename}"'
                 ),
                 "Content-Length": str(info.size_bytes),
                 "Cache-Control": "private, no-store",
             },
         )
+
+    @app.get("/api/v1/recordings/{recording_id}/aligned/download")
+    def aligned_download(recording_id: str) -> StreamingResponse:
+        return aligned_download_response(recording_id, legacy_30hz_only=False)
+
+    @app.get("/api/v1/recordings/{recording_id}/aligned30/download")
+    def aligned30_download(recording_id: str) -> StreamingResponse:
+        """只为已经存在的历史 30 Hz 导出保留读取能力。"""
+
+        return aligned_download_response(recording_id, legacy_30hz_only=True)
 
     @app.delete("/api/v1/recordings/{recording_id}")
     def delete_recording(
@@ -534,6 +550,11 @@ def create_annotation_app(
     def create_training_snapshot(request: Request) -> dict[str, Any]:
         try:
             return service.create_training_snapshot(current_actor(request).unikey)
+        except ObjectConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="训练数据 current pointer 被其他发布操作更新，请刷新后重试",
+            ) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -583,6 +604,36 @@ def create_annotation_app(
             status_code=status_code,
             media_type="application/x-tar",
             headers=headers,
+        )
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download")
+    def benchmark_snapshot_download(snapshot_id: str) -> StreamingResponse:
+        try:
+            _payload, artifact = service.benchmark_snapshot_download(snapshot_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        def stream():
+            cursor = 0
+            while cursor < artifact.size_bytes:
+                end = min(artifact.size_bytes - 1, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(artifact.key, cursor, end)
+                cursor = end + 1
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/x-hdf5",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="cw12eu_{snapshot_id}.h5"'
+                ),
+                "Content-Length": str(artifact.size_bytes),
+                "Cache-Control": "private, no-store",
+            },
         )
 
     @app.delete("/api/v1/training-snapshots/{snapshot_id}")

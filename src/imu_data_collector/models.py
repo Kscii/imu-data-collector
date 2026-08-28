@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -307,6 +308,10 @@ class SourceArtifact(BaseModel):
 class TrainingExportReference(BaseModel):
     """当前 review 唯一有效的不可变训练导出。"""
 
+    export_schema_version: Literal["1.0.0", "2.0.0"] = "1.0.0"
+    hdf5_schema_version: str = "3.0.0"
+    sampling_rate_hz: float = 30.0
+    filename: str = "aligned30.h5"
     source_review_revision: int = Field(ge=0)
     object_key: str = Field(min_length=1, max_length=1024)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -315,6 +320,14 @@ class TrainingExportReference(BaseModel):
     calibration_profile_id: str = Field(min_length=1, max_length=160)
     calibration_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at_utc: str
+
+    @model_validator(mode="after")
+    def validate_export_contract(self) -> TrainingExportReference:
+        if self.sampling_rate_hz not in {25.0, 30.0}:
+            raise ValueError("训练导出采样率必须为 25 Hz 或历史 30 Hz")
+        if Path(self.filename).name != self.filename or not self.filename.endswith(".h5"):
+            raise ValueError("训练导出 filename 无效")
+        return self
 
 
 class ReviewWorkflow(BaseModel):

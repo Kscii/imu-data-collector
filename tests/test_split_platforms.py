@@ -4,6 +4,8 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import h5py
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -150,11 +152,68 @@ def _publish_fixture(
 
 
 def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> None:
-    aligned = tmp_path / f"{recording_id}.aligned.h5"
-    aligned.write_bytes(b"aligned")
-    digest = sha256_file(aligned)
     logical_digest = "b" * 64
-    key = f"exports/{recording_id}/review-0/aligned30-{logical_digest[:16]}.h5"
+    aligned = tmp_path / f"{recording_id}.aligned25.h5"
+    text = h5py.string_dtype(encoding="utf-8")
+    sequence_dtype = np.dtype(
+        [
+            ("sample_start", "<i8"),
+            ("sample_stop", "<i8"),
+            ("source_file", text),
+            ("participant_id", text),
+            ("recording_id", text),
+            ("body_location", text),
+            ("activity_code", text),
+            ("is_fall", "?"),
+            ("supervision_kind", text),
+            ("source_sampling_rate_hz", "<f8"),
+        ]
+    )
+    annotation_dtype = np.dtype(
+        [
+            ("sequence_index", "<i4"),
+            ("kind", text),
+            ("start_sample", "<i8"),
+            ("stop_sample", "<i8"),
+            ("code", text),
+        ]
+    )
+    with h5py.File(aligned, "w") as handle:
+        handle.attrs.update(
+            {
+                "imu_schema_version": "3.1.0",
+                "sampling_rate_hz": 25.0,
+                "evaluation_role": "training_only",
+                "logical_content_sha256": logical_digest,
+            }
+        )
+        handle.create_dataset("samples", data=np.zeros((2, 6), dtype=np.float32))
+        handle.create_dataset(
+            "sequences",
+            data=np.asarray(
+                [
+                    (
+                        0,
+                        2,
+                        "capture.h5",
+                        "cw12eu:xfan0282",
+                        f"cw12eu:{recording_id}",
+                        "chest",
+                        "walking",
+                        False,
+                        "temporal",
+                        25.0,
+                    )
+                ],
+                dtype=sequence_dtype,
+            ),
+        )
+        handle.create_dataset(
+            "annotations",
+            data=np.asarray([(0, "activity", 0, 2, "walking")], dtype=annotation_dtype),
+        )
+    digest = sha256_file(aligned)
+    key = f"exports/{recording_id}/review-0/aligned25-{logical_digest[:16]}.h5"
     info = store.put_file(
         aligned,
         key,
@@ -164,6 +223,8 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
             "logical_content_sha256": logical_digest,
             "recording_id": recording_id,
             "source_review_revision": "0",
+            "hdf5_schema_version": "3.1.0",
+            "sampling_rate_hz": "25",
         },
     )
     service = app.state.annotation_service
@@ -179,6 +240,10 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
                 }
             ),
             "active_export": TrainingExportReference(
+                export_schema_version="2.0.0",
+                hdf5_schema_version="3.1.0",
+                sampling_rate_hz=25.0,
+                filename="aligned25.h5",
                 source_review_revision=0,
                 object_key=key,
                 sha256=digest,
