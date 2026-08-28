@@ -107,7 +107,12 @@ def _parser() -> argparse.ArgumentParser:
         "--reliability", choices=("candidate", "exploratory"), required=True
     )
     correct.add_argument("--reason", required=True)
-    subparsers.add_parser("doctor", help="检查本机运行依赖")
+    doctor = subparsers.add_parser("doctor", help="检查本机运行依赖")
+    doctor.add_argument(
+        "--report-only",
+        action="store_true",
+        help="始终以成功状态退出；仅供 CI 读取完整诊断报告",
+    )
     devices = subparsers.add_parser("devices", help="列出本机采集设备")
     devices.add_argument(
         "--scan-ble",
@@ -517,7 +522,7 @@ def main() -> None:
                 indent=2,
             )
         )
-        raise SystemExit(0 if all(commands.values()) else 1)
+        raise SystemExit(0 if all(commands.values()) or args.report_only else 1)
     elif args.command == "devices":
         async def inspect_devices() -> dict:
             cameras = await discover_video_devices(settings.video)

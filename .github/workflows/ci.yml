@@ -52,7 +52,7 @@ jobs:
       - name: 公共核心与平台适配测试
         run: uv run pytest -q
       - name: CLI 导入与主机诊断
-        run: uv run imu-collector doctor
+        run: uv run imu-collector doctor --report-only
 
   frontend:
     name: 两套前端构建

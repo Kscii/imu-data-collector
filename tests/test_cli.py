@@ -6,7 +6,14 @@ from pathlib import Path
 import yaml
 
 from imu_data_collector.annotation_cli import _manage_member
-from imu_data_collector.cli import _estimate_batched_sample_rate
+from imu_data_collector.cli import _estimate_batched_sample_rate, _parser
+
+
+def test_doctor_report_only_is_an_explicit_ci_mode() -> None:
+    args = _parser().parse_args(["doctor", "--report-only"])
+
+    assert args.command == "doctor"
+    assert args.report_only is True
 
 
 def test_batched_sample_rate_includes_one_packet_interval_of_coverage() -> None:
