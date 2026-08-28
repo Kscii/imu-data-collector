@@ -2240,16 +2240,16 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
               <button title="Shift+," onClick={() => stepFrame(-5)} disabled={!frameTimes || currentFrame <= 0}>−5</button>
               <button title="," onClick={() => stepFrame(-1)} disabled={!frameTimes || currentFrame <= 0}>−1</button>
               <strong>{currentTime.toFixed(3)} s</strong>
-              <span>帧 {currentFrame} / {frameTimes ? frameTimes.frame_count - 1 : "—"}</span>
+              <span>{tr("帧", "Frame")} {currentFrame} / {frameTimes ? frameTimes.frame_count - 1 : "—"}</span>
               <button title="." onClick={() => stepFrame(1)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>+1</button>
               <button title="Shift+." onClick={() => stepFrame(5)} disabled={!frameTimes || currentFrame >= frameTimes.frame_count - 1}>+5</button>
-              {taskTab === "sync" && <button className="primary" title={editDisabledReason || "选择当前视频帧并分析附近 IMU 响应"} onClick={loadExperimentWindow} disabled={!canMutate || !frameTimes || experimentBusy}>设为{syncRole === "start_tap" ? "开始" : "结束"}轻拍接触帧</button>}
-              <details className="shortcut-help"><summary>快捷键</summary><span>{tr(",/. 一帧 · Shift+,/. 五帧 · I/O 区间 · 2 撞击 · F/N/X 类型 · E 所选区间结尾 · Ctrl+S 重试保存", ",/. one frame · Shift+,/. five frames · I/O interval · 2 impact · F/N/X type · E selected interval end · Ctrl+S retry save")}</span></details>
+              {taskTab === "sync" && <button className="primary" title={editDisabledReason || tr("选择当前视频帧并分析附近 IMU 响应", "Select the current video frame and analyze the nearby IMU response")} onClick={loadExperimentWindow} disabled={!canMutate || !frameTimes || experimentBusy}>{syncRole === "start_tap" ? tr("设为开始轻拍接触帧", "Set as start-tap contact frame") : tr("设为结束轻拍接触帧", "Set as end-tap contact frame")}</button>}
+              <details className="shortcut-help"><summary>{tr("快捷键", "Shortcuts")}</summary><span>{tr(",/. 一帧 · Shift+,/. 五帧 · I/O 区间 · 2 撞击 · F/N/X 类型 · E 所选区间结尾 · Ctrl+S 重试保存", ",/. one frame · Shift+,/. five frames · I/O interval · 2 impact · F/N/X type · E selected interval end · Ctrl+S retry save")}</span></details>
             </div>
           </div>
 
           <div className="panel full-timeline-panel workbench-timeline">
-            <div className="timeline-heading"><div><span>完整录制 IMU</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} 个显示点</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{currentTime.toFixed(3)} s</strong></div></div>
+            <div className="timeline-heading"><div><span>{tr("完整录制 IMU", "Full-recording IMU")}</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} {tr("个显示点", "display points")}</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{currentTime.toFixed(3)} s</strong></div></div>
             {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} markers={timelineMarkers} regions={timelineRegions} selectionLabels={currentAnnotationLabels} controlledCursor showMarkerKey={false} height={190} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} onSelectLabel={locateAnnotationInterval} />}
           </div>
         </section>
@@ -2290,7 +2290,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
                   <div className="save-row"><button className="primary" disabled={!canMutate || experimentImuSample === null || !selectedExperimentIsCandidate || experimentBusy} onClick={confirmFormalAnchor}>确认{syncRole === "start_tap" ? "开始" : "结束"}锚点</button><button onClick={() => { setExperimentWindow(null); setExperimentImuSample(null); }}>取消</button></div>
                   {selectedExperimentCandidate && <details><summary>候选技术数据</summary><p className="stage-help">事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)} · 样本突变 {selectedExperimentCandidate.robust_z.toFixed(1)} · 推荐分数 {selectedExperimentCandidate.recommendation_score.toFixed(3)} · 时间先验 {recommendationOffsetSource === "formal_anchor" ? "已确认锚点" : "共同主机时钟"}</p></details>}
                 </>}
-                <div className="anchor-list">{sync?.anchors.map((anchor) => <div key={anchor.role}><button onClick={() => jumpToRecordingTime(anchor.video_time_ns)}>{anchor.role === "start_tap" ? "开始" : "结束"} · 帧 {anchor.source_video_frame ?? "—"} · {seconds(anchor.video_time_ns)}</button><button disabled={!canMutate} onClick={() => removeSyncAnchor(anchor.role)}>删除</button></div>)}</div>
+                <div className="anchor-list">{sync?.anchors.map((anchor) => <div key={anchor.role}><button onClick={() => jumpToRecordingTime(anchor.video_time_ns)}>{anchor.role === "start_tap" ? tr("开始", "Start") : tr("结束", "End")} · {tr("帧", "Frame")} {anchor.source_video_frame ?? "—"} · {seconds(anchor.video_time_ns)}</button><button disabled={!canMutate} onClick={() => removeSyncAnchor(anchor.role)}>{tr("删除", "Delete")}</button></div>)}</div>
               </div>
               <div className="panel compact-panel">
                 <div className="panel-title">同步结论</div>
@@ -2485,31 +2485,31 @@ function DatasetCatalogPage() {
     <section className="panel dataset-catalog">
       <div className="dataset-catalog-heading">
         <div>
-          <div className="panel-title">只读数据集目录</div>
-          <p className="stage-help">这里展示 benchmark 当前版本和不可变历史版本。网页下载适合检查单个文件；正式训练仍推荐在 benchmark 仓库运行 <code>./benchmark data pull</code>，由命令统一校验并原子激活。</p>
+          <div className="panel-title">{tr("只读数据集目录", "Read-only dataset catalog")}</div>
+          <p className="stage-help">{tr("这里展示 benchmark 当前版本和不可变历史版本。网页下载适合检查单个文件；正式训练仍推荐在 benchmark 仓库运行", "This page shows the current benchmark version and immutable historical versions. Web downloads are suitable for inspecting individual files; for formal training, run")} <code>./benchmark data pull</code> {tr("，由命令统一校验并原子激活。", "in the benchmark repository so the command can verify and atomically activate the snapshot.")}</p>
         </div>
-        <button disabled={busy} onClick={refresh}>{busy ? "正在刷新…" : "刷新目录"}</button>
+        <button disabled={busy} onClick={refresh}>{busy ? tr("正在刷新…", "Refreshing…") : tr("刷新目录", "Refresh catalog")}</button>
       </div>
-      {!catalog && !error && <span className="muted">正在读取数据集目录…</span>}
+      {!catalog && !error && <span className="muted">{tr("正在读取数据集目录…", "Loading dataset catalog…")}</span>}
       {catalog?.collections.map((collection) => <DatasetCollection key={collection.kind} collection={collection} />)}
     </section>
   </main>;
 }
 
 function DatasetCollection({ collection }: { collection: DatasetCatalogCollection }) {
-  const title = collection.kind === "base" ? "公共交叉验证数据" : "团队训练数据";
+  const title = collection.kind === "base" ? tr("公共交叉验证数据", "Public cross-validation data") : tr("团队训练数据", "Team training data");
   return <section className="dataset-collection">
     <div className="dataset-collection-heading">
       <div>
         <h2>{title}</h2>
         <span>{collection.kind === "base" ? "cross_validation" : "training_only"}</span>
       </div>
-      <span className={`dataset-availability ${collection.available ? "available" : ""}`}>{collection.available ? "当前版本可用" : "尚未发布"}</span>
+      <span className={`dataset-availability ${collection.available ? "available" : ""}`}>{collection.available ? tr("当前版本可用", "Current version available") : tr("尚未发布", "Not published")}</span>
     </div>
     {collection.warnings.map((warning) => <div className="warning-banner compact-banner" key={warning}>{warning}</div>)}
     {collection.current && <DatasetSnapshot snapshot={collection.current} />}
     {collection.history.length > 0 && <details className="snapshot-history dataset-history">
-      <summary>历史版本（{collection.history.length}）</summary>
+      <summary>{tr("历史版本", "Historical versions")}（{collection.history.length}）</summary>
       {collection.history.map((snapshot) => <DatasetSnapshot key={snapshot.snapshot_id} snapshot={snapshot} />)}
     </details>}
   </section>;
@@ -2520,12 +2520,12 @@ function DatasetSnapshot({ snapshot }: { snapshot: DatasetCatalogSnapshot }) {
   return <article className={`dataset-snapshot ${snapshot.current ? "current-snapshot" : ""}`}>
     <div className="dataset-snapshot-heading">
       <div>
-        <strong>{snapshot.current ? "当前版本" : "历史版本"} · {snapshot.snapshot_id}</strong>
-        <span>{snapshot.files.length} 个 H5 · schema 3.1.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
+        <strong>{snapshot.current ? tr("当前版本", "Current version") : tr("历史版本", "Historical version")} · {snapshot.snapshot_id}</strong>
+        <span>{snapshot.files.length} {tr("个 H5", "H5 files")} · schema 3.1.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
       </div>
-      <a className="button-link" href={`${base}/manifest/download`} download>下载 manifest</a>
+      <a className="button-link" href={`${base}/manifest/download`} download>{tr("下载 manifest", "Download manifest")}</a>
     </div>
-    <details className="dataset-checks"><summary>版本校验信息</summary><code>contract {snapshot.contract_version}</code><code>manifest SHA-256 {snapshot.manifest_sha256}</code></details>
+    <details className="dataset-checks"><summary>{tr("版本校验信息", "Version verification")}</summary><code>contract {snapshot.contract_version}</code><code>manifest SHA-256 {snapshot.manifest_sha256}</code></details>
     <div className="dataset-file-grid">
       {snapshot.files.map((file) => <DatasetFile key={file.dataset_id} snapshot={snapshot} file={file} />)}
     </div>
@@ -2534,13 +2534,13 @@ function DatasetSnapshot({ snapshot }: { snapshot: DatasetCatalogSnapshot }) {
 
 function DatasetFile({ snapshot, file }: { snapshot: DatasetCatalogSnapshot; file: DatasetCatalogFile }) {
   const counts = [
-    `${file.sequences.toLocaleString()} 序列`,
-    `${file.rows.toLocaleString()} 行`,
-    `${file.annotations.toLocaleString()} 标注`,
-    `${(file.events ?? 0).toLocaleString()} 事件`,
-    `${(file.segments ?? 0).toLocaleString()} 区间`,
-    `${(file.fall_sequences ?? 0).toLocaleString()} 跌倒序列`,
-    `${(file.participants ?? 0).toLocaleString()} 参与者`,
+    `${file.sequences.toLocaleString()} ${tr("序列", "sequences")}`,
+    `${file.rows.toLocaleString()} ${tr("行", "rows")}`,
+    `${file.annotations.toLocaleString()} ${tr("标注", "annotations")}`,
+    `${(file.events ?? 0).toLocaleString()} ${tr("事件", "events")}`,
+    `${(file.segments ?? 0).toLocaleString()} ${tr("区间", "intervals")}`,
+    `${(file.fall_sequences ?? 0).toLocaleString()} ${tr("跌倒序列", "fall sequences")}`,
+    `${(file.participants ?? 0).toLocaleString()} ${tr("参与者", "participants")}`,
   ];
   const locations = Object.entries(file.body_locations ?? {}).map(([name, count]) => `${name} ${count}`).join(" · ") || "—";
   const supervision = Object.entries(file.supervision ?? {}).map(([name, count]) => `${name} ${count}`).join(" · ") || "—";
@@ -2548,10 +2548,10 @@ function DatasetFile({ snapshot, file }: { snapshot: DatasetCatalogSnapshot; fil
   return <section className="dataset-file">
     <div className="dataset-file-heading"><strong>{file.dataset_id}</strong><span>{formatDatasetBytes(file.size_bytes)}</span></div>
     <p>{counts.join(" · ")}</p>
-    <p>位置 {locations}</p>
-    <p>监督 {supervision} · {file.evaluation_role}</p>
-    <details><summary>文件指纹</summary><code>SHA-256 {file.sha256}</code><code>logical {file.logical_content_sha256}</code></details>
-    <a className="button-link primary" href={url} download>下载 {file.filename}</a>
+    <p>{tr("位置", "Locations")} {locations}</p>
+    <p>{tr("监督", "Supervision")} {supervision} · {file.evaluation_role}</p>
+    <details><summary>{tr("文件指纹", "File fingerprints")}</summary><code>SHA-256 {file.sha256}</code><code>logical {file.logical_content_sha256}</code></details>
+    <a className="button-link primary" href={url} download>{tr("下载", "Download")} {file.filename}</a>
   </section>;
 }
 
