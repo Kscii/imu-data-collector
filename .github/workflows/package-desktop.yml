@@ -59,7 +59,13 @@ jobs:
       - name: 构建 onedir
         run: uv run --group package pyinstaller --noconfirm --clean packaging/imu_collector.spec
       - name: 安装 Inno Setup
-        run: choco install innosetup --version=6.4.3 --no-progress -y
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path $iscc)) { throw "没有找到 Inno Setup 6 编译器" }
       - name: 构建安装器
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" packaging\windows\imu-data-collector.iss'
