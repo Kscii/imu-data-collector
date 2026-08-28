@@ -261,6 +261,8 @@ def load_settings(config_path: Path | None = None) -> Settings:
     settings = _construct_settings(payload)
     if data_root := os.environ.get("IMU_COLLECTOR_DATA_ROOT"):
         settings.data_root = Path(data_root)
+    if google_oauth_client_id := os.environ.get("IMU_GOOGLE_OAUTH_CLIENT_ID"):
+        settings.cloud.google_oauth_client_id = google_oauth_client_id
     settings.resolve_paths(project_root)
     return settings
 

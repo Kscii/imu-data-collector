@@ -9,6 +9,7 @@ User=kscii
 Group=kscii
 WorkingDirectory=/opt/imu-annotation/current
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/imu-annotation/upload-broker.env
 ExecStart=/opt/imu-annotation/current/.venv/bin/imu-upload-broker --config /etc/imu-annotation/config.yaml
 Restart=on-failure
 RestartSec=5
