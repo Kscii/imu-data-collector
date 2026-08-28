@@ -15,6 +15,7 @@ from imu_data_collector.config import (
     IdentitySettings,
     Settings,
     StorageSettings,
+    load_settings,
 )
 from imu_data_collector.desktop_auth import DesktopOAuthManager
 from imu_data_collector.models import ArtifactDescriptor, CaptureManifestV2
@@ -23,6 +24,24 @@ from imu_data_collector.models import ArtifactDescriptor, CaptureManifestV2
 def _test_id_token(email: str) -> str:
     payload = base64.urlsafe_b64encode(json.dumps({"email": email}).encode()).rstrip(b"=")
     return f"header.{payload.decode()}.signature"
+
+
+def test_google_oauth_client_id_can_be_isolated_from_shared_yaml(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "IMU_GOOGLE_OAUTH_CLIENT_ID",
+        "desktop.apps.googleusercontent.com",
+    )
+
+    settings = load_settings(config_path)
+
+    assert (
+        settings.cloud.google_oauth_client_id
+        == "desktop.apps.googleusercontent.com"
+    )
 
 
 def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monkeypatch) -> None:

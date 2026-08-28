@@ -65,12 +65,22 @@ storage:
 cloud:
   broker_server_host: "127.0.0.1"
   broker_server_port: 8770
-  google_oauth_client_id: "<desktop-client-id>.apps.googleusercontent.com"
 
 identity:
   email_to_unikey:
     member@example.com: rkim6933
 ```
+
+生产环境不要把新版本专用的 OAuth 字段写入标注服务和上传代理共用的 YAML，否则旧版本在
+部署回滚预检时可能无法解析。Client ID 由仅上传代理读取的
+`/etc/imu-annotation/upload-broker.env` 提供：
+
+```dotenv
+IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com
+```
+
+systemd 单元通过 `EnvironmentFile=-/etc/imu-annotation/upload-broker.env` 加载该文件；减号表示
+开发环境中该文件缺失时仍允许启动，但生产环境必须配置并由验收检查确认。
 
 邮箱映射和项目私有值不提交仓库。Desktop OAuth client ID 是公开标识，可以进入安装包；Desktop
 客户端不使用 client secret。代理 VM 的服务账号至少需要创建对象、读取对象与读取对象 metadata
@@ -84,7 +94,8 @@ identity:
 代理入口：
 
 ```bash
-uv run imu-upload-broker --config /etc/imu-annotation/config.yaml
+IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com \
+  uv run imu-upload-broker --config /etc/imu-annotation/config.yaml
 ```
 
 默认监听 `127.0.0.1:8770`，与标注服务的 `8766` 分离；外部只暴露 HTTPS
