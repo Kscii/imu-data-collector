@@ -77,10 +77,13 @@ identity:
 
 ```dotenv
 IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com
+IMU_UPLOAD_BROKER_HOST=0.0.0.0
 ```
 
 systemd 单元通过 `EnvironmentFile=-/etc/imu-annotation/upload-broker.env` 加载该文件；减号表示
-开发环境中该文件缺失时仍允许启动，但生产环境必须配置并由验收检查确认。
+开发环境中该文件缺失时仍允许启动，但生产环境必须配置并由验收检查确认。生产进程监听
+`0.0.0.0:8770` 是为了接收负载均衡器从 VM 内网地址发来的请求；GCP 防火墙仍只允许负载均衡
+和健康检查来源访问该端口，不把 8770 直接开放给公网。
 
 邮箱映射和项目私有值不提交仓库。Desktop OAuth client ID 是公开标识，可以进入安装包；Desktop
 客户端不使用 client secret。代理 VM 的服务账号至少需要创建对象、读取对象与读取对象 metadata
@@ -98,8 +101,8 @@ IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com \
   uv run imu-upload-broker --config /etc/imu-annotation/config.yaml
 ```
 
-默认监听 `127.0.0.1:8770`，与标注服务的 `8766` 分离；外部只暴露 HTTPS
-反向代理或负载均衡入口，不直接开放这个回环端口。
+本地默认监听 `127.0.0.1:8770`，与标注服务的 `8766` 分离；生产环境通过上述专属环境变量
+监听 VM 网卡，并且外部只暴露 HTTPS 负载均衡入口。
 
 部署时应由 HTTPS 负载均衡或反向代理终止 TLS，进程本身继续监听回环地址。生产验收至少包括：
 

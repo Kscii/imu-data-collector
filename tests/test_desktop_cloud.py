@@ -35,6 +35,8 @@ def test_google_oauth_client_id_can_be_isolated_from_shared_yaml(
         "IMU_GOOGLE_OAUTH_CLIENT_ID",
         "desktop.apps.googleusercontent.com",
     )
+    monkeypatch.setenv("IMU_UPLOAD_BROKER_HOST", "0.0.0.0")
+    monkeypatch.setenv("IMU_UPLOAD_BROKER_PORT", "9876")
 
     settings = load_settings(config_path)
 
@@ -42,6 +44,8 @@ def test_google_oauth_client_id_can_be_isolated_from_shared_yaml(
         settings.cloud.google_oauth_client_id
         == "desktop.apps.googleusercontent.com"
     )
+    assert settings.cloud.broker_server_host == "0.0.0.0"
+    assert settings.cloud.broker_server_port == 9876
 
 
 def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monkeypatch) -> None:

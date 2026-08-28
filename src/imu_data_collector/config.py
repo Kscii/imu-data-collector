@@ -263,6 +263,10 @@ def load_settings(config_path: Path | None = None) -> Settings:
         settings.data_root = Path(data_root)
     if google_oauth_client_id := os.environ.get("IMU_GOOGLE_OAUTH_CLIENT_ID"):
         settings.cloud.google_oauth_client_id = google_oauth_client_id
+    if broker_server_host := os.environ.get("IMU_UPLOAD_BROKER_HOST"):
+        settings.cloud.broker_server_host = broker_server_host
+    if broker_server_port := os.environ.get("IMU_UPLOAD_BROKER_PORT"):
+        settings.cloud.broker_server_port = int(broker_server_port)
     settings.resolve_paths(project_root)
     return settings
 

@@ -45,6 +45,7 @@ jobs:
         id: bundle
         run: |
           bundle="imu-annotation-${GITHUB_SHA}.tar.gz"
+          deployer="imu-annotation-deploy-${GITHUB_SHA}"
           tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
             --exclude='*/__pycache__' --exclude='*.pyc' -czf "${bundle}" \
             LICENSE README.md pyproject.toml uv.lock \
@@ -54,9 +55,13 @@ jobs:
             configs/systemd/imu-annotation-gc.timer \
             configs/systemd/imu-upload-broker.service \
             frontend/dist-annotation src
+          install -m 0755 scripts/deploy/imu-annotation-deploy "${deployer}"
           digest="$(sha256sum "${bundle}" | cut -d ' ' -f 1)"
+          deployer_digest="$(sha256sum "${deployer}" | cut -d ' ' -f 1)"
           echo "path=${bundle}" >> "${GITHUB_OUTPUT}"
           echo "sha256=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "deployer_path=${deployer}" >> "${GITHUB_OUTPUT}"
+          echo "deployer_sha256=${deployer_digest}" >> "${GITHUB_OUTPUT}"
       - uses: google-github-actions/auth@v3
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
@@ -69,16 +74,28 @@ jobs:
         env:
           BUNDLE: ${{ steps.bundle.outputs.path }}
           BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
+          DEPLOYER: ${{ steps.bundle.outputs.deployer_path }}
+          DEPLOYER_SHA256: ${{ steps.bundle.outputs.deployer_sha256 }}
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           ZONE: ${{ vars.GCP_ZONE }}
           VM: ${{ vars.GCP_VM }}
         run: |
           gcloud compute scp --quiet --tunnel-through-iap --scp-flag=-O \
             --project "${PROJECT_ID}" --zone "${ZONE}" \
-            "${BUNDLE}" "${VM}:/tmp/${BUNDLE}"
+            "${BUNDLE}" "${DEPLOYER}" "${VM}:/tmp/"
           gcloud compute ssh --quiet --tunnel-through-iap \
             --project "${PROJECT_ID}" --zone "${ZONE}" "${VM}" \
-            --command "sudo /usr/local/sbin/imu-annotation-deploy /tmp/${BUNDLE} ${GITHUB_SHA} ${BUNDLE_SHA256}"
+            --command "set -euo pipefail; \
+              echo '${DEPLOYER_SHA256}  /tmp/${DEPLOYER}' | sha256sum --check --strict; \
+              sudo install -o root -g root -m 0755 /tmp/${DEPLOYER} /usr/local/sbin/imu-annotation-deploy.next; \
+              echo '${DEPLOYER_SHA256}  /usr/local/sbin/imu-annotation-deploy.next' | sudo sha256sum --check --strict; \
+              if sudo /usr/local/sbin/imu-annotation-deploy.next /tmp/${BUNDLE} ${GITHUB_SHA} ${BUNDLE_SHA256}; then \
+                sudo mv -f /usr/local/sbin/imu-annotation-deploy.next /usr/local/sbin/imu-annotation-deploy; \
+                rm -f /tmp/${DEPLOYER}; \
+              else \
+                sudo rm -f /usr/local/sbin/imu-annotation-deploy.next; \
+                exit 1; \
+              fi"
       - name: 验证公网入口
         run: |
           curl --fail --silent --show-error --output /dev/null https://imu.kscii.tech/api/v1/health
