@@ -7,6 +7,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "bleak>=2.0.0",
     "cachecontrol>=0.14.3",
+    # 46.0.3 仍提供 macOS universal2 wheel，避免 Intel 打包时源码链接 Runner 的 OpenSSL。
+    "cryptography==46.0.3",
     "dbus-fast>=5.0.22 ; sys_platform == 'linux'",
     "fastapi>=0.116.0",
     "google-cloud-storage>=3.13.1",
