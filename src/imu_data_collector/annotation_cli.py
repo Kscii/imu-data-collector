@@ -112,7 +112,8 @@ def _manage_member(args: argparse.Namespace) -> None:
             # 成员管理通常通过 sudo 修改 root:service-group 的私有配置。
             # 原子替换不仅要保留 mode，也必须保留 owner/group，否则服务
             # 用户会在下一次重启时失去配置读取权限。
-            os.chown(temporary, original.st_uid, original.st_gid)
+            if hasattr(os, "chown"):
+                os.chown(temporary, original.st_uid, original.st_gid)
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)

@@ -34,6 +34,26 @@ jobs:
       - name: SOFT3888 temporal v3 合同
         run: uv run pytest -q tests/test_review_artifacts.py::test_aligned30_export_uses_three_root_datasets_and_exact_grid
 
+  desktop-portability:
+    name: 桌面兼容性 · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 安装锁定依赖
+        run: uv sync --frozen --dev
+      - name: 公共核心与平台适配测试
+        run: uv run pytest -q
+      - name: CLI 导入与主机诊断
+        run: uv run imu-collector doctor --report-only
+
   frontend:
     name: 两套前端构建
     runs-on: ubuntu-latest

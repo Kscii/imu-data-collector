@@ -18,7 +18,7 @@ from pathlib import Path
 import h5py
 import uvicorn
 
-from imu_data_collector.ble import CW12EUBleSource
+from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.capture_api import create_capture_app
 from imu_data_collector.characterization import (
     correct_characterization_stage,
@@ -33,6 +33,7 @@ from imu_data_collector.cw12eu import (
     classify_notification,
     parse_notification,
 )
+from imu_data_collector.host import find_executable, platform_id
 from imu_data_collector.models import (
     CharacterizationStage,
     CharacterizationStageRequest,
@@ -106,7 +107,12 @@ def _parser() -> argparse.ArgumentParser:
         "--reliability", choices=("candidate", "exploratory"), required=True
     )
     correct.add_argument("--reason", required=True)
-    subparsers.add_parser("doctor", help="检查本机运行依赖")
+    doctor = subparsers.add_parser("doctor", help="检查本机运行依赖")
+    doctor.add_argument(
+        "--report-only",
+        action="store_true",
+        help="始终以成功状态退出；仅供 CI 读取完整诊断报告",
+    )
     devices = subparsers.add_parser("devices", help="列出本机采集设备")
     devices.add_argument(
         "--scan-ble",
@@ -312,6 +318,7 @@ async def _probe_video(
             settings.video,
             str(preferred["device"]),
             path,
+            profile=dict(preferred.get("selected_profile") or {}),
         )
         await recorder.start()
         try:
@@ -320,7 +327,11 @@ async def _probe_video(
             await recorder.stop()
         if recorder.started_monotonic_ns is None:
             raise RuntimeError("视频录制器没有记录启动时刻")
-        table = await probe_video_frames(path, recorder.started_monotonic_ns)
+        table = await probe_video_frames(
+            path,
+            recorder.started_monotonic_ns,
+            pts_are_monotonic=(recorder.timestamp_mapping == "source_pts_monotonic"),
+        )
         span_seconds = (
             (int(table.pts_monotonic_ns[-1]) - int(table.pts_monotonic_ns[0])) / 1e9
             if len(table.pts_monotonic_ns) > 1
@@ -334,7 +345,8 @@ async def _probe_video(
             "device": preferred["device"],
             "product": preferred["product"],
             "requested_profile": (
-                f"{settings.video.width}x{settings.video.height}"
+                f"{preferred['selected_profile']['width']}x"
+                f"{preferred['selected_profile']['height']}"
                 f"@{settings.video.requested_fps}"
             ),
             "codec": table.codec,
@@ -484,9 +496,14 @@ def main() -> None:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "doctor":
+        platform_commands = {
+            "linux": ("bluetoothctl", "v4l2-ctl"),
+            "windows": (),
+            "macos": (),
+        }.get(platform_id(), ())
         commands = {
-            name: shutil.which(name)
-            for name in ("bluetoothctl", "ffmpeg", "ffprobe", "v4l2-ctl", "rclone")
+            name: find_executable(name) if name in {"ffmpeg", "ffprobe"} else shutil.which(name)
+            for name in (*platform_commands, "ffmpeg", "ffprobe")
         }
         print(
             json.dumps(
@@ -495,23 +512,42 @@ def main() -> None:
                     "data_root": str(settings.data_root),
                     "catalog_path": str(settings.catalog_path),
                     "taxonomy": str(settings.activity_taxonomy_path),
-                    "upload_configured": bool(
-                        settings.upload.enabled and settings.upload.remote_root
+                    "publish_mode": settings.publish.mode,
+                    "cloud_configured": bool(
+                        settings.cloud.broker_url
+                        and settings.cloud.google_oauth_client_id
                     ),
+                    "platform": platform_id(),
                 },
                 indent=2,
             )
         )
-        raise SystemExit(0 if all(commands.values()) else 1)
+        raise SystemExit(0 if all(commands.values()) or args.report_only else 1)
     elif args.command == "devices":
         async def inspect_devices() -> dict:
             cameras = await discover_video_devices(settings.video)
-            ble = (
-                await CW12EUBleSource.discover(settings=settings.imu)
-                if args.scan_ble
-                else []
-            )
-            return {"cameras": cameras, "ble": ble}
+            if not args.scan_ble:
+                return {"cameras": cameras, "ble": [], "ble_scan": {"requested": False}}
+            try:
+                diagnostics = await CW12EUBleSource.discover_with_diagnostics(
+                    settings=settings.imu
+                )
+                ble = list(diagnostics.pop("devices"))
+            except BleOperationError as error:
+                ble = []
+                diagnostics = {
+                    "requested": True,
+                    "adapter_state": (
+                        "unavailable"
+                        if error.code == "ble_adapter_unavailable"
+                        else "error"
+                    ),
+                    "target_name": settings.imu.name,
+                    "target_address": settings.imu.address,
+                    "target_found": False,
+                    "error": error.as_detail(),
+                }
+            return {"cameras": cameras, "ble": ble, "ble_scan": diagnostics}
 
         print(json.dumps(asyncio.run(inspect_devices()), indent=2, ensure_ascii=False))
     elif args.command == "probe-imu":

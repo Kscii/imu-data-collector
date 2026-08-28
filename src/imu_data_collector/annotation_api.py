@@ -7,7 +7,6 @@ import logging
 import re
 import threading
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -25,6 +24,7 @@ from imu_data_collector.auth import (
 )
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
+from imu_data_collector.host import resource_path
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
     ActivityTaxonomyUpdateRequest,
@@ -646,7 +646,7 @@ def create_annotation_app(
             headers=headers,
         )
 
-    frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist-annotation"
+    frontend = resource_path("frontend/dist-annotation")
     if frontend.is_dir():
         assets = frontend / "assets"
         if assets.is_dir():

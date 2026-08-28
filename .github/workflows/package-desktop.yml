@@ -1,0 +1,148 @@
+name: 构建桌面安装包
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows 10/11 x64 单安装器
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 构建采集 WebUI
+        working-directory: frontend
+        run: npm ci && npm run build:capture
+      - name: 准备固定版本 FFmpeg
+        shell: pwsh
+        run: ./packaging/windows/prepare-ffmpeg.ps1
+      - name: 安装锁定依赖
+        run: uv sync --frozen --dev --group package
+      - name: 生成团队桌面配置
+        shell: pwsh
+        env:
+          BROKER_URL: ${{ vars.DESKTOP_UPLOAD_BROKER_URL }}
+          OAUTH_CLIENT_ID: ${{ vars.DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+        run: |
+          if (-not $env:BROKER_URL) { throw "缺少仓库变量 DESKTOP_UPLOAD_BROKER_URL" }
+          if (-not $env:OAUTH_CLIENT_ID) { throw "缺少仓库变量 DESKTOP_GOOGLE_OAUTH_CLIENT_ID" }
+          uv run python scripts/prepare_desktop_config.py --output build/desktop-config --broker-url $env:BROKER_URL --oauth-client-id $env:OAUTH_CLIENT_ID
+          "IMU_DESKTOP_CONFIG_DIR=$((Resolve-Path build/desktop-config).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Windows 单元与平台适配测试
+        run: uv run pytest -q
+      - name: 解析安装器版本
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/desktop-v*") {
+            $version = $env:GITHUB_REF_NAME -replace '^desktop-v', ''
+          } else {
+            $version = "0.1.0-dev.$env:GITHUB_RUN_NUMBER"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?$') {
+            throw "无效的桌面版本：$version"
+          }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: 构建 onedir
+        run: uv run --group package pyinstaller --noconfirm --clean packaging/imu_collector.spec
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path $iscc)) { throw "没有找到 Inno Setup 6 编译器" }
+      - name: 构建安装器
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" packaging\windows\imu-data-collector.iss'
+      - name: 静默安装与打包 CLI 冒烟
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist-installer\*.exe | Select-Object -First 1
+          $target = Join-Path $env:RUNNER_TEMP "IMUDataCollector"
+          $process = Start-Process $installer.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$target" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "安装器退出码：$($process.ExitCode)" }
+          & (Join-Path $target "imu-collector.exe") doctor
+      - name: 生成 SHA-256
+        shell: pwsh
+        run: Get-FileHash dist-installer\*.exe -Algorithm SHA256 | Format-List | Out-File dist-installer\SHA256SUMS.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: imu-data-collector-windows-x64-unsigned
+          path: dist-installer/*
+
+  macos:
+    name: macOS 实验性命令行包
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 构建采集 WebUI
+        working-directory: frontend
+        run: npm ci && npm run build:capture
+      - name: 安装锁定依赖
+        run: uv sync --frozen --group package
+      - name: 生成团队桌面配置
+        env:
+          BROKER_URL: ${{ vars.DESKTOP_UPLOAD_BROKER_URL }}
+          OAUTH_CLIENT_ID: ${{ vars.DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+        run: |
+          test -n "${BROKER_URL}" || { echo "缺少仓库变量 DESKTOP_UPLOAD_BROKER_URL" >&2; exit 1; }
+          test -n "${OAUTH_CLIENT_ID}" || { echo "缺少仓库变量 DESKTOP_GOOGLE_OAUTH_CLIENT_ID" >&2; exit 1; }
+          uv run python scripts/prepare_desktop_config.py --output build/desktop-config --broker-url "${BROKER_URL}" --oauth-client-id "${OAUTH_CLIENT_ID}"
+          echo "IMU_DESKTOP_CONFIG_DIR=$(pwd)/build/desktop-config" >> "${GITHUB_ENV}"
+      - name: 构建实验性 onedir
+        run: uv run --group package pyinstaller --noconfirm --clean packaging/imu_collector.spec
+      - name: 打包并生成 SHA-256
+        run: |
+          tar -C dist -czf imu-data-collector-macos-experimental.tar.gz imu-collector
+          shasum -a 256 imu-data-collector-macos-experimental.tar.gz > SHA256SUMS-macos.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: imu-data-collector-macos-experimental
+          path: |
+            imu-data-collector-macos-experimental.tar.gz
+            SHA256SUMS-macos.txt
+
+  release:
+    name: 发布 Windows 稳定 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: imu-data-collector-windows-x64-unsigned
+          path: release-artifacts
+      - name: 创建稳定 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}" release-artifacts/*
+          --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}"
+          --latest
+          --notes "Windows 10/11 x64 小组内部稳定版。安装器尚未签名，首次安装可能出现 SmartScreen 提示。"

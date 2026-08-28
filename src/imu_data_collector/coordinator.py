@@ -14,7 +14,11 @@ from typing import Any
 import h5py
 import numpy as np
 
-from imu_data_collector.ble import CW12EUBleSource
+from imu_data_collector.ble import BleOperationError, CW12EUBleSource
+from imu_data_collector.broker_client import (
+    publish_recording_via_broker,
+    read_index_receipt_via_broker,
+)
 from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
@@ -23,6 +27,7 @@ from imu_data_collector.cw12eu import (
     classify_notification,
     parse_notification,
 )
+from imu_data_collector.desktop_auth import DesktopOAuthManager, OAuthLoginRequired
 from imu_data_collector.finalization import (
     cleanup_partial_inputs,
     finalize_recording,
@@ -43,6 +48,8 @@ from imu_data_collector.models import (
     DeviceSessionState,
     IndexReceipt,
     PreviewStartRequest,
+    PublishState,
+    PublishTarget,
     RecordingStartRequest,
     RecordingState,
     RecordingSummary,
@@ -61,9 +68,16 @@ from imu_data_collector.video import (
 logger = logging.getLogger(__name__)
 
 
+class AuthenticationRequiredError(RuntimeError):
+    """后台发布等待用户完成桌面 Google 登录。"""
+
+
 class RecordingCoordinator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        # 首次安装的 Windows/macOS 用户尚没有数据目录；健康接口需要在录制前
+        # 就能统计磁盘空间，因此由应用启动负责创建，而不是等第一条录制。
+        self.settings.data_root.mkdir(parents=True, exist_ok=True)
         self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.catalog = RecordingCatalog(settings.catalog_path)
         self.remote = RcloneRemoteStore(settings.upload)
@@ -73,6 +87,10 @@ class RecordingCoordinator:
             settings.storage.bucket,
             settings.storage.project,
         )
+        self.cloud_auth = DesktopOAuthManager(settings.cloud)
+        # 目的地不一致必须在服务启动时暴露，不能等用户录完后才失败。
+        _ = self.publish_target
+        self._reconcile_legacy_publication_states()
         self.state = RecordingState.IDLE
         self.current: RecordingSummary | None = None
         self.ble: CW12EUBleSource | None = None
@@ -93,6 +111,7 @@ class RecordingCoordinator:
         self._first_packet_ns: int | None = None
         self._monitoring_requested = False
         self._preview_camera_id: str | None = None
+        self._preview_camera_profile: dict[str, Any] | None = None
         self.preview_stream = PreviewFrameHub()
         self.preview_error: str | None = None
         self.device_state = DeviceSessionState.IDLE
@@ -112,6 +131,55 @@ class RecordingCoordinator:
         self._stop_jobs = asyncio.Event()
         self._jobs_changed = asyncio.Event()
         self._active_job: dict[str, str] | None = None
+        self._camera_cache: list[dict[str, Any]] = []
+        self._camera_cache_lock = asyncio.Lock()
+
+    @property
+    def publish_target(self) -> PublishTarget:
+        target = PublishTarget(self.settings.publish.mode)
+        if target == PublishTarget.BROKER and not self.cloud_auth.configured:
+            raise RuntimeError("broker 发布模式缺少上传代理 URL 或 Google OAuth client ID")
+        if target == PublishTarget.LOCAL and self.settings.storage.backend != "local":
+            raise RuntimeError("local 发布模式要求 storage.backend=local")
+        if target == PublishTarget.DIRECT_GCS and (
+            self.settings.storage.backend != "gcs" or not self.settings.storage.bucket
+        ):
+            raise RuntimeError("direct_gcs 发布模式要求配置 GCS Bucket")
+        return target
+
+    def _reconcile_legacy_publication_states(self) -> None:
+        """首个桌面正式版把旧本地“已上传”误报恢复为可云端发布。"""
+
+        configured = PublishTarget(self.settings.publish.mode)
+        for summary in self.catalog.list():
+            if summary.publish_target != PublishTarget.DISABLED:
+                continue
+            if summary.upload_state not in {
+                PublishState.UPLOADED,
+                PublishState.PUBLISHED,
+            }:
+                continue
+            if configured == PublishTarget.DIRECT_GCS:
+                self.catalog.upsert(
+                    summary.model_copy(
+                        update={"publish_target": PublishTarget.DIRECT_GCS}
+                    )
+                )
+                continue
+            self.catalog.delete_job(summary.recording_id, BackgroundJobKind.PUBLISH)
+            self.catalog.upsert(
+                summary.model_copy(
+                    update={
+                        "upload_state": PublishState.STORED_LOCAL,
+                        "publish_target": PublishTarget.LOCAL,
+                        "index_state": "not_requested",
+                        "index_message": (
+                            "旧版本只写入了本机对象目录；登录后可重新上传到团队云端"
+                        ),
+                        "manifest_generation": None,
+                    }
+                )
+            )
 
     def _require_allowed_unikey(self, value: str, field_name: str) -> None:
         if value not in self.settings.identity.allowed_unikeys:
@@ -120,8 +188,16 @@ class RecordingCoordinator:
     async def _resolve_camera(
         self, requested_camera_id: str | None = None
     ) -> dict[str, Any]:
-        devices = await discover_video_devices(self.settings.video)
+        devices = await self.list_cameras()
         return select_video_device(devices, self.settings.video, requested_camera_id)
+
+    async def list_cameras(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+        """复用本次后端会话的摄像头枚举；只有人工重扫才强制运行 FFmpeg 探测。"""
+
+        async with self._camera_cache_lock:
+            if refresh or not self._camera_cache:
+                self._camera_cache = await discover_video_devices(self.settings.video)
+            return [dict(item) for item in self._camera_cache]
 
     def _check_disk(self) -> None:
         self.settings.data_root.mkdir(parents=True, exist_ok=True)
@@ -164,10 +240,16 @@ class RecordingCoordinator:
         retryable: bool,
         fallback: str = "设备操作失败",
     ) -> None:
+        if isinstance(error, BleOperationError):
+            code = error.code
+            component = "ble"
+            hint = error.hint
+            retryable = error.retryable
         message = self._error_message(error, fallback)
         self.device_error = {
             "code": code,
             "component": component,
+            "phase": error.phase if isinstance(error, BleOperationError) else None,
             "message": message,
             "hint": hint,
             "retryable": retryable,
@@ -215,21 +297,29 @@ class RecordingCoordinator:
         return process is None or process.returncode is None
 
     def _new_video_recorder(
-        self, device: str, output_path: Path | None
+        self, camera: dict[str, Any] | str, output_path: Path | None
     ) -> FFmpegVideoRecorder:
         """创建视频进程；浏览器预览通道独立于具体 FFmpeg 进程。"""
+
+        if isinstance(camera, dict):
+            device = str(camera["device"])
+            profile = dict(camera.get("selected_profile") or {})
+        else:
+            device = camera
+            profile = dict(self._preview_camera_profile or {})
 
         return FFmpegVideoRecorder(
             self.settings.video,
             device,
             output_path,
             preview_hub=self.preview_stream,
+            profile=profile or None,
         )
 
     async def _require_prod_camera_preflight(
         self, video: FFmpegVideoRecorder, data_tier: DataTier
     ) -> None:
-        """正式数据必须在落盘前证明固定控制生效且真实输入接近 30 FPS。"""
+        """正式数据必须在落盘前证明真实输入接近 30 FPS。"""
 
         if data_tier != DataTier.PROD:
             return
@@ -238,7 +328,7 @@ class RecordingCoordinator:
             await asyncio.sleep(0.1)
         if not video.control_state.ready:
             details = "；".join(video.control_state.errors) or "控制值未完整读回"
-            raise RuntimeError(f"正式录制摄像头固定曝光预检失败：{details}")
+            raise RuntimeError(f"正式录制摄像头控制预检失败：{details}")
         if video.source_fps < self.settings.video.prod_min_source_fps:
             raise RuntimeError(
                 "正式录制摄像头输入帧率不足："
@@ -276,7 +366,7 @@ class RecordingCoordinator:
         """只启动摄像头；BLE 会话在视频切换时保持不变。"""
 
         camera = await self._resolve_camera(camera_id)
-        video = self._new_video_recorder(str(camera["device"]), None)
+        video = self._new_video_recorder(camera, None)
         try:
             await asyncio.wait_for(video.start(), timeout=5.0)
         except BaseException:
@@ -385,10 +475,18 @@ class RecordingCoordinator:
                 self._imu_state = "error"
                 self.device_state = DeviceSessionState.ERROR
                 self._set_device_error(
-                    code="imu_reconnect_exhausted",
+                    code=(
+                        last_error.code
+                        if isinstance(last_error, BleOperationError)
+                        else "imu_reconnect_exhausted"
+                    ),
                     component="ble",
                     error=last_error,
-                    hint="摄像头会继续预览；确认 IMU 电量与占用状态后重新连接设备",
+                    hint=(
+                        last_error.hint
+                        if isinstance(last_error, BleOperationError)
+                        else "摄像头会继续预览；确认 IMU 电量与占用状态后重新连接设备"
+                    ),
                     retryable=True,
                     fallback="IMU 自动重连三次均失败",
                 )
@@ -432,6 +530,9 @@ class RecordingCoordinator:
                     accepted = True
                     self.video = replacement
                     self._preview_camera_id = str(camera["camera_id"])
+                    self._preview_camera_profile = dict(
+                        camera.get("selected_profile") or {}
+                    )
                     self._video_state = "live"
                     self._video_transition = None
                     self._video_reconnect_attempt = 0
@@ -584,6 +685,9 @@ class RecordingCoordinator:
                 if new_video is not None and camera is not None:
                     self.video = new_video
                     self._preview_camera_id = str(camera["camera_id"])
+                    self._preview_camera_profile = dict(
+                        camera.get("selected_profile") or {}
+                    )
                 if self.ble and (self._consumer is None or self._consumer.done()):
                     self._stop_consumer.clear()
                     self._consumer = asyncio.create_task(self._consume_imu())
@@ -642,6 +746,7 @@ class RecordingCoordinator:
             self._preview_watchdog = None
             previous_video = self.video
             previous_id = self._preview_camera_id
+            previous_profile = self._preview_camera_profile
             previous_device = previous_video.device if previous_video else None
             self.video = None
             self._video_state = "switching"
@@ -665,6 +770,7 @@ class RecordingCoordinator:
                 if operation_id == self._device_operation_id:
                     self.video = rollback
                     self._preview_camera_id = previous_id
+                    self._preview_camera_profile = previous_profile
                     self._video_state = "live" if rollback else "error"
                     self._video_transition = None
                     self.device_state = (
@@ -688,6 +794,9 @@ class RecordingCoordinator:
             if not cancelled:
                 self.video = replacement
                 self._preview_camera_id = camera_id
+                self._preview_camera_profile = dict(
+                    camera.get("selected_profile") or {}
+                )
                 self._video_state = "live"
                 self._video_transition = None
                 self.device_state = DeviceSessionState.CONNECTED
@@ -717,6 +826,7 @@ class RecordingCoordinator:
         if not preserve_request:
             self._monitoring_requested = False
             self._preview_camera_id = None
+            self._preview_camera_profile = None
             self.preview_stream.deactivate()
             self._imu_state = "idle"
             self._video_state = "idle"
@@ -809,6 +919,21 @@ class RecordingCoordinator:
                     await self._run_publish_job(recording_id)
             except asyncio.CancelledError:
                 raise
+            except (AuthenticationRequiredError, OAuthLoginRequired):
+                await asyncio.to_thread(self.catalog.wait_for_auth, recording_id)
+                summary = self.catalog.get(recording_id)
+                if summary is not None:
+                    self.catalog.upsert(
+                        summary.model_copy(
+                            update={
+                                "upload_state": PublishState.AUTH_REQUIRED,
+                                "publish_target": PublishTarget.BROKER,
+                                "index_state": "not_requested",
+                                "index_message": "等待 Google 登录后自动继续上传",
+                            }
+                        )
+                    )
+                logger.info("后台发布等待 Google 登录：%s", recording_id)
             except Exception as error:
                 message = self._error_message(error, "后台任务失败")
                 status = await asyncio.to_thread(
@@ -887,7 +1012,12 @@ class RecordingCoordinator:
             # 最终制品和目录索引已经原子提交；遗留 partial 只占空间，不能把
             # 已成功的收尾重新标成失败。维护扫描可随后清理它。
             logger.warning("收尾成功但清理 partial 失败：%s", recording_id, exc_info=True)
-        if state == RecordingState.READY and updated.data_tier == DataTier.PROD:
+        configured_target = PublishTarget(self.settings.publish.mode)
+        if (
+            state == RecordingState.READY
+            and updated.data_tier == DataTier.PROD
+            and configured_target != PublishTarget.DISABLED
+        ):
             try:
                 self.catalog.enqueue_job(
                     recording_id,
@@ -897,7 +1027,12 @@ class RecordingCoordinator:
                     ),
                 )
                 self.catalog.upsert(
-                    updated.model_copy(update={"upload_state": "queued"})
+                    updated.model_copy(
+                        update={
+                            "upload_state": PublishState.QUEUED,
+                            "publish_target": configured_target,
+                        }
+                    )
                 )
                 self._wake_background_jobs()
             except Exception:
@@ -912,33 +1047,71 @@ class RecordingCoordinator:
         summary = self._required_summary(recording_id)
         if summary.state != RecordingState.READY:
             raise ValueError("只有通过采集验证的 ready 录制可以发布")
+        target = self.publish_target
+        if target == PublishTarget.DISABLED:
+            raise ValueError("当前配置已禁用发布")
+        if target == PublishTarget.BROKER and not self.cloud_auth.logged_in:
+            raise AuthenticationRequiredError("尚未登录 Google")
         self.catalog.update_job_phase(
             recording_id, BackgroundJobKind.PUBLISH, "packaging"
         )
-        summary = summary.model_copy(update={"upload_state": "packaging"})
+        summary = summary.model_copy(
+            update={
+                "upload_state": PublishState.PACKAGING,
+                "publish_target": target,
+            }
+        )
         self.catalog.upsert(summary)
         self.catalog.update_job_phase(
             recording_id, BackgroundJobKind.PUBLISH, "uploading"
         )
-        summary = summary.model_copy(update={"upload_state": "uploading"})
+        summary = summary.model_copy(update={"upload_state": PublishState.UPLOADING})
         self.catalog.upsert(summary)
-        manifest, manifest_generation = await publish_recording(
-            summary, self.settings, self.object_store
-        )
+
+        def progress(current: int, total: int, role: str) -> None:
+            self.catalog.update_job_progress(
+                recording_id,
+                BackgroundJobKind.PUBLISH,
+                current,
+                total,
+                f"uploading:{role}",
+            )
+
+        if target == PublishTarget.BROKER:
+            manifest, manifest_generation = await publish_recording_via_broker(
+                summary,
+                self.settings,
+                self.cloud_auth,
+                progress,
+            )
+        else:
+            manifest, manifest_generation = await publish_recording(
+                summary, self.settings, self.object_store
+            )
         self.catalog.update_job_phase(
             recording_id, BackgroundJobKind.PUBLISH, "verifying"
         )
-        manifest_key = f"captures/{recording_id}/manifest.json"
-        if await asyncio.to_thread(self.object_store.stat, manifest_key) is None:
-            raise RuntimeError("远端 manifest 验证失败")
-        updated = summary.model_copy(
-            update={
-                "upload_state": "uploaded",
-                "index_state": "pending",
-                "index_message": "已上传 Bucket，等待标注端扫描并回执",
+        if target in {PublishTarget.LOCAL, PublishTarget.DIRECT_GCS}:
+            manifest_key = f"captures/{recording_id}/manifest.json"
+            if await asyncio.to_thread(self.object_store.stat, manifest_key) is None:
+                raise RuntimeError("发布目标 manifest 验证失败")
+        if target == PublishTarget.LOCAL:
+            update = {
+                "upload_state": PublishState.STORED_LOCAL,
+                "publish_target": target,
+                "index_state": "not_requested",
+                "index_message": "已保存到本机对象目录，尚未上传团队云端",
                 "manifest_generation": manifest_generation,
             }
-        )
+        else:
+            update = {
+                "upload_state": PublishState.UPLOADED,
+                "publish_target": target,
+                "index_state": "pending",
+                "index_message": "团队云端已接收，等待标注端扫描并回执",
+                "manifest_generation": manifest_generation,
+            }
+        updated = summary.model_copy(update=update)
         self.catalog.upsert(updated)
         self.catalog.complete_job(recording_id, BackgroundJobKind.PUBLISH)
         logger.info("后台发布完成：%s (%s)", recording_id, manifest.schema_version)
@@ -1027,6 +1200,9 @@ class RecordingCoordinator:
                     self.preview_stream.activate()
             self._monitoring_requested = True
             self._preview_camera_id = str(camera["camera_id"])
+            self._preview_camera_profile = dict(
+                camera.get("selected_profile") or {}
+            )
             self.preview_error = None
             self.mode = "capture"
             self.device_state = DeviceSessionState.CONNECTING
@@ -1043,9 +1219,7 @@ class RecordingCoordinator:
                 if self._consumer is None or self._consumer.done():
                     self._consumer = asyncio.create_task(self._consume_imu())
                 if not camera_was_previewed:
-                    camera_probe = self._new_video_recorder(
-                        str(camera["device"]), None
-                    )
+                    camera_probe = self._new_video_recorder(camera, None)
                     self.video = camera_probe
                     await asyncio.wait_for(camera_probe.start(), timeout=5.0)
                     await self._require_prod_camera_preflight(
@@ -1087,6 +1261,22 @@ class RecordingCoordinator:
                 self.settings.imu,
                 self.taxonomy,
             )
+            self.writer.set_capture_backends(
+                ble_backend=str(getattr(self.ble, "backend_name", "test_unknown")),
+                local_device_id=getattr(self.ble, "device_identifier", None),
+                video_backend=str(camera.get("backend", "ffmpeg_unknown")),
+                video_timestamp_mapping=(
+                    "source_pts_monotonic"
+                    if str(camera.get("backend")) == "ffmpeg_v4l2"
+                    else "first_source_pts_to_host_monotonic"
+                ),
+                camera_control_policy=(
+                    "fixed_verified"
+                    if self.settings.video.manual_controls_enabled
+                    and str(camera.get("backend")) == "ffmpeg_v4l2"
+                    else "observed_fps_gate"
+                ),
+            )
             self.writer.handle["video"].attrs.update(
                 {
                     "camera_id": str(camera["camera_id"]),
@@ -1095,9 +1285,7 @@ class RecordingCoordinator:
                     "usb_interface": str(camera["interface"]),
                 }
             )
-            self.video = self._new_video_recorder(
-                str(camera["device"]), mkv_partial
-            )
+            self.video = self._new_video_recorder(camera, mkv_partial)
             self._video_state = "switching"
             self._video_transition = "arming_recording"
             try:
@@ -1385,6 +1573,17 @@ class RecordingCoordinator:
                 "camera_control_errors": list(
                     getattr(capture_video.control_state, "errors", [])
                 ),
+                "camera_control_policy": getattr(
+                    capture_video.control_state, "policy", "observed_fps_gate"
+                ),
+                "video_backend": getattr(
+                    capture_video, "backend_name", "test_unknown"
+                ),
+                "video_timestamp_mapping": getattr(
+                    capture_video,
+                    "timestamp_mapping",
+                    "source_pts_monotonic",
+                ),
             }
             recording = recording.model_copy(
                 update={
@@ -1417,6 +1616,9 @@ class RecordingCoordinator:
                 )
                 self.video = preview_video
                 self._preview_camera_id = str(camera["camera_id"])
+                self._preview_camera_profile = dict(
+                    camera.get("selected_profile") or {}
+                )
                 self._video_state = "live"
                 self._video_transition = None
             except Exception as error:
@@ -1828,6 +2030,9 @@ class RecordingCoordinator:
     async def publish(self, recording_id: str) -> dict[str, Any]:
         """把发布请求持久化入队；实际上传不阻塞 HTTP 请求。"""
 
+        target = self.publish_target
+        if target == PublishTarget.DISABLED:
+            raise ValueError("当前配置已禁用发布")
         summary = self._required_summary(recording_id)
         if summary.state != RecordingState.READY:
             raise ValueError("只有通过采集验证的 ready 录制可以发布")
@@ -1841,6 +2046,10 @@ class RecordingCoordinator:
         reset = bool(
             existing and existing[0].state == BackgroundJobState.FAILED
         )
+        if summary.publish_target != target and existing is not None:
+            self.catalog.delete_job(recording_id, BackgroundJobKind.PUBLISH)
+            existing = None
+            reset = False
         job = self.catalog.enqueue_job(
             recording_id,
             BackgroundJobKind.PUBLISH,
@@ -1851,13 +2060,52 @@ class RecordingCoordinator:
             BackgroundJobState.QUEUED,
             BackgroundJobState.RETRY_WAIT,
         }:
-            self.catalog.upsert(summary.model_copy(update={"upload_state": "queued"}))
+            upload_state = (
+                PublishState.AUTH_REQUIRED
+                if target == PublishTarget.BROKER and not self.cloud_auth.logged_in
+                else PublishState.QUEUED
+            )
+            self.catalog.upsert(
+                summary.model_copy(
+                    update={
+                        "upload_state": upload_state,
+                        "publish_target": target,
+                        "index_state": "not_requested",
+                        "index_message": (
+                            "等待 Google 登录后自动继续上传"
+                            if upload_state == PublishState.AUTH_REQUIRED
+                            else ""
+                        ),
+                    }
+                )
+            )
             self._wake_background_jobs()
         return {
             "recording_id": recording_id,
             "accepted": True,
             "job": job.model_dump(mode="json"),
+            "auth_required": (
+                target == PublishTarget.BROKER and not self.cloud_auth.logged_in
+            ),
         }
+
+    def resume_uploads_after_login(self) -> list[str]:
+        recording_ids = self.catalog.resume_waiting_auth_jobs()
+        for recording_id in recording_ids:
+            summary = self.catalog.get(recording_id)
+            if summary is not None:
+                self.catalog.upsert(
+                    summary.model_copy(
+                        update={
+                            "upload_state": PublishState.QUEUED,
+                            "publish_target": PublishTarget.BROKER,
+                            "index_message": "",
+                        }
+                    )
+                )
+        if recording_ids:
+            self._wake_background_jobs()
+        return recording_ids
 
     async def retry_finalization(self, recording_id: str) -> dict[str, Any]:
         """人工确认后重新收尾尚未发布的 partial 制品。"""
@@ -1926,6 +2174,11 @@ class RecordingCoordinator:
         summary = self._required_summary(recording_id)
         if summary.upload_state not in {"uploaded", "published"}:
             return summary
+        if summary.publish_target not in {
+            PublishTarget.BROKER,
+            PublishTarget.DIRECT_GCS,
+        }:
+            return summary
         if summary.manifest_generation is None:
             updated = summary.model_copy(
                 update={
@@ -1937,15 +2190,29 @@ class RecordingCoordinator:
             return updated
         key = f"index-receipts/{recording_id}.json"
         try:
-            payload, _generation = await asyncio.to_thread(
-                self.object_store.read_json, key
-            )
+            if summary.publish_target == PublishTarget.BROKER:
+                payload = await read_index_receipt_via_broker(
+                    recording_id,
+                    self.settings,
+                    self.cloud_auth,
+                )
+            else:
+                payload, _generation = await asyncio.to_thread(
+                    self.object_store.read_json, key
+                )
             receipt = IndexReceipt.model_validate(payload)
         except FileNotFoundError:
             updated = summary.model_copy(
                 update={
                     "index_state": "pending",
-                    "index_message": "已上传 Bucket，等待标注端扫描",
+                    "index_message": "团队云端已接收，等待标注端扫描",
+                }
+            )
+        except RuntimeError as error:
+            updated = summary.model_copy(
+                update={
+                    "index_state": "pending",
+                    "index_message": f"需要登录后刷新标注端回执：{error}",
                 }
             )
         except ValueError as error:

@@ -52,6 +52,7 @@ jobs:
             configs/systemd/imu-annotation.service \
             configs/systemd/imu-annotation-gc.service \
             configs/systemd/imu-annotation-gc.timer \
+            configs/systemd/imu-upload-broker.service \
             frontend/dist-annotation src
           digest="$(sha256sum "${bundle}" | cut -d ' ' -f 1)"
           echo "path=${bundle}" >> "${GITHUB_OUTPUT}"
@@ -79,4 +80,6 @@ jobs:
             --project "${PROJECT_ID}" --zone "${ZONE}" "${VM}" \
             --command "sudo /usr/local/sbin/imu-annotation-deploy /tmp/${BUNDLE} ${GITHUB_SHA} ${BUNDLE_SHA256}"
       - name: 验证公网入口
-        run: curl --fail --silent --show-error --output /dev/null https://imu.kscii.tech/api/v1/health
+        run: |
+          curl --fail --silent --show-error --output /dev/null https://imu.kscii.tech/api/v1/health
+          curl --fail --silent --show-error --output /dev/null https://upload.imu.kscii.tech/health

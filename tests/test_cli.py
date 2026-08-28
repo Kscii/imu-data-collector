@@ -6,7 +6,14 @@ from pathlib import Path
 import yaml
 
 from imu_data_collector.annotation_cli import _manage_member
-from imu_data_collector.cli import _estimate_batched_sample_rate
+from imu_data_collector.cli import _estimate_batched_sample_rate, _parser
+
+
+def test_doctor_report_only_is_an_explicit_ci_mode() -> None:
+    args = _parser().parse_args(["doctor", "--report-only"])
+
+    assert args.command == "doctor"
+    assert args.report_only is True
 
 
 def test_batched_sample_rate_includes_one_packet_interval_of_coverage() -> None:
@@ -52,13 +59,18 @@ def test_member_management_is_preview_first_and_preserves_config_metadata(
     path.chmod(0o640)
     original = path.stat()
     chown_calls: list[tuple[Path, int, int]] = []
-    real_chown = os.chown
+    real_chown = getattr(os, "chown", None)
 
     def record_chown(target, uid: int, gid: int) -> None:
         chown_calls.append((Path(target), uid, gid))
-        real_chown(target, uid, gid)
+        if real_chown is not None:
+            real_chown(target, uid, gid)
 
-    monkeypatch.setattr("imu_data_collector.annotation_cli.os.chown", record_chown)
+    monkeypatch.setattr(
+        "imu_data_collector.annotation_cli.os.chown",
+        record_chown,
+        raising=False,
+    )
 
     _manage_member(_member_args(path, "member-add", apply=False))
     preview = json.loads(capsys.readouterr().out)
@@ -73,12 +85,15 @@ def test_member_management_is_preview_first_and_preserves_config_metadata(
     assert yaml.safe_load(path.read_text())["identity"]["email_to_unikey"] == {
         "member@example.com": "rkim6933"
     }
-    assert chown_calls[-1][1:] == (original.st_uid, original.st_gid)
-    assert path.stat().st_mode & 0o777 == 0o640
-    assert (path.stat().st_uid, path.stat().st_gid) == (
-        original.st_uid,
-        original.st_gid,
-    )
+    if real_chown is not None:
+        assert chown_calls[-1][1:] == (original.st_uid, original.st_gid)
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o640
+    if real_chown is not None:
+        assert (path.stat().st_uid, path.stat().st_gid) == (
+            original.st_uid,
+            original.st_gid,
+        )
 
     _manage_member(_member_args(path, "member-remove", apply=True))
     removed = json.loads(capsys.readouterr().out)

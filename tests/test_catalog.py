@@ -224,3 +224,59 @@ def test_final_paths_and_job_completion_commit_atomically(tmp_path: Path) -> Non
     assert completed.h5_path == "/data/atomic-1.h5"
     assert completed.finalization_job is not None
     assert completed.finalization_job.state == BackgroundJobState.SUCCEEDED
+
+
+def test_publish_job_waits_for_login_without_consuming_retry_budget(
+    tmp_path: Path,
+) -> None:
+    catalog = RecordingCatalog(tmp_path / "catalog.sqlite3")
+    summary = RecordingSummary(
+        recording_id="auth-1",
+        collection_id="collection-1",
+        participant_id="xfan0282",
+        data_tier="prod",
+        state=RecordingState.READY,
+        started_at_utc="2026-08-28T00:00:00Z",
+    )
+    catalog.upsert(summary)
+    catalog.enqueue_job(summary.recording_id, BackgroundJobKind.PUBLISH)
+    claimed = catalog.claim_next_job()
+    assert claimed is not None
+    assert claimed[1].attempts == 1
+
+    waiting = catalog.wait_for_auth(summary.recording_id)
+    assert waiting.state == BackgroundJobState.WAITING_AUTH
+    assert waiting.attempts == 0
+    assert catalog.claim_next_job() is None
+
+    assert catalog.resume_waiting_auth_jobs() == [summary.recording_id]
+    resumed = catalog.claim_next_job()
+    assert resumed is not None
+    assert resumed[1].attempts == 1
+
+
+def test_publish_job_progress_is_persisted(tmp_path: Path) -> None:
+    catalog = RecordingCatalog(tmp_path / "catalog.sqlite3")
+    summary = RecordingSummary(
+        recording_id="progress-1",
+        collection_id="collection-1",
+        participant_id="xfan0282",
+        data_tier="test",
+        state=RecordingState.READY,
+        started_at_utc="2026-08-28T00:00:00Z",
+    )
+    catalog.upsert(summary)
+    catalog.enqueue_job(summary.recording_id, BackgroundJobKind.PUBLISH)
+    assert catalog.claim_next_job() is not None
+    catalog.update_job_progress(
+        summary.recording_id,
+        BackgroundJobKind.PUBLISH,
+        progress_bytes=25,
+        total_bytes=100,
+        phase="uploading",
+    )
+
+    job = catalog.get(summary.recording_id)
+    assert job is not None and job.upload_job is not None
+    assert job.upload_job.progress_bytes == 25
+    assert job.upload_job.total_bytes == 100

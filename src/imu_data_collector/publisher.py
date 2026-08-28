@@ -13,6 +13,7 @@ import h5py
 
 from imu_data_collector.config import Settings
 from imu_data_collector.hdf5_store import sha256_file
+from imu_data_collector.host import background_subprocess_kwargs, resolve_executable
 from imu_data_collector.models import (
     AnnotationCapabilities,
     ArtifactDescriptor,
@@ -43,7 +44,7 @@ async def build_preview_mp4(
     if nice_value and shutil.which("nice"):
         command.extend(("nice", "-n", str(nice_value)))
     command.extend((
-        "ffmpeg",
+        resolve_executable("ffmpeg"),
         "-hide_banner",
         "-loglevel",
         "error",
@@ -64,6 +65,7 @@ async def build_preview_mp4(
         *command,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
+        **background_subprocess_kwargs(),
     )
     try:
         _stdout, stderr = await asyncio.wait_for(
@@ -159,12 +161,11 @@ def _require_annotation_capabilities(
     return capabilities
 
 
-async def publish_recording(
+async def prepare_publication(
     summary: RecordingSummary,
     settings: Settings,
-    store: ObjectStore,
-) -> tuple[CaptureManifestV2, int]:
-    """先上传三个制品，最后写 manifest 作为原子可见标记。"""
+) -> tuple[CaptureManifestV2, dict[str, Path]]:
+    """校验冻结身份，并生成发布所需的三个不可变制品描述。"""
 
     if not summary.h5_path or not summary.mkv_path:
         raise ValueError("录制缺少 H5 或 MKV")
@@ -231,12 +232,6 @@ async def publish_recording(
                 else None
             ),
         )
-    if settings.storage.backend == "gcs":
-        await asyncio.to_thread(
-            _require_annotation_capabilities,
-            store,
-            source_schema,
-        )
     proxy_path = await build_preview_mp4(
         mkv_path,
         h5_path.parent / "preview.mp4",
@@ -275,6 +270,24 @@ async def publish_recording(
         calibration=calibration,
         artifacts=artifacts,
     )
+    return manifest, paths
+
+
+async def publish_recording(
+    summary: RecordingSummary,
+    settings: Settings,
+    store: ObjectStore,
+) -> tuple[CaptureManifestV2, int]:
+    """先上传三个制品，最后写 manifest 作为原子可见标记。"""
+
+    manifest, paths = await prepare_publication(summary, settings)
+    if settings.storage.backend == "gcs":
+        await asyncio.to_thread(
+            _require_annotation_capabilities,
+            store,
+            manifest.source_h5_schema_version,
+        )
+    artifacts = manifest.artifacts
     for artifact in artifacts:
         await asyncio.to_thread(
             _put_idempotent,

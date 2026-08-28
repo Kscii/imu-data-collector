@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from imu_data_collector.api_errors import structured_http_error_handler
-from imu_data_collector.ble import CW12EUBleSource
+from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
+from imu_data_collector.host import resource_path
 from imu_data_collector.models import (
     CharacterizationStageRequest,
     CharacterizationStartRequest,
@@ -25,7 +27,6 @@ from imu_data_collector.models import (
     RecordingStartRequest,
 )
 from imu_data_collector.validation import validate_capture_h5
-from imu_data_collector.video import discover_video_devices
 
 
 def _mjpeg_part(jpeg: bytes) -> bytes:
@@ -49,6 +50,31 @@ def _operation_error_detail(
         "hint": hint,
         "retryable": True,
     }
+
+
+def _oauth_result_page(
+    request: Request,
+    *,
+    ok: bool,
+    zh: str,
+    en: str,
+) -> str:
+    language = request.headers.get("accept-language", "").lower()
+    message = en if language.startswith("en") else zh
+    title = (
+        ("Google sign-in succeeded" if ok else "Google sign-in failed")
+        if language.startswith("en")
+        else ("Google 登录成功" if ok else "Google 登录失败")
+    )
+    event = "imu-oauth-success" if ok else "imu-oauth-failed"
+    return f"""<!doctype html>
+<html lang=\"{'en' if language.startswith('en') else 'zh-CN'}\"><meta charset=\"utf-8\">
+<title>{html.escape(title)}</title>
+<body><h1>{html.escape(title)}</h1><p>{html.escape(message)}</p>
+<script>
+if (window.opener) window.opener.postMessage({event!r}, window.location.origin);
+if ({str(ok).lower()}) window.setTimeout(() => window.close(), 600);
+</script></body></html>"""
 
 
 def create_capture_app(settings: Settings | None = None) -> FastAPI:
@@ -102,7 +128,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
             "default_data_tier": "test",
             "background_jobs": {
                 "allow_during_recording": active.background_jobs.allow_during_recording,
-                "automatic_prod_publish": True,
+                "automatic_prod_publish": active.publish.mode != "disabled",
                 "max_attempts": len(active.background_jobs.retry_delays_seconds) + 1,
             },
             "imu": {
@@ -127,10 +153,79 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
                 "prod_min_span_fps": active.video.prod_min_span_fps,
             },
             "publish": {
-                "backend": active.storage.backend,
+                "mode": active.publish.mode,
+                "backend": (
+                    "broker"
+                    if active.publish.mode == "broker"
+                    else active.storage.backend
+                ),
                 "bucket": active.storage.bucket,
+                "cloud_configured": coordinator.cloud_auth.configured,
             },
         }
+
+    @app.get("/api/v1/cloud/status")
+    async def cloud_status() -> dict[str, Any]:
+        return await asyncio.to_thread(coordinator.cloud_auth.status)
+
+    @app.post("/api/v1/cloud/oauth/start")
+    async def cloud_oauth_start() -> dict[str, str]:
+        redirect_uri = (
+            f"http://127.0.0.1:{active.server_port}/api/v1/cloud/oauth/callback"
+        )
+        try:
+            url = await asyncio.to_thread(coordinator.cloud_auth.begin, redirect_uri)
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"authorization_url": url}
+
+    @app.get("/api/v1/cloud/oauth/callback", response_class=HTMLResponse)
+    async def cloud_oauth_callback(
+        request: Request,
+        state: str,
+        code: str | None = None,
+        error: str | None = None,
+    ) -> HTMLResponse:
+        if error or not code:
+            return HTMLResponse(
+                _oauth_result_page(
+                    request,
+                    ok=False,
+                    zh="Google 登录未完成，请关闭此窗口后重试。",
+                    en="Google sign-in was not completed. Close this window and try again.",
+                ),
+                status_code=400,
+            )
+        try:
+            await asyncio.to_thread(
+                coordinator.cloud_auth.complete,
+                state=state,
+                code=code,
+            )
+        except RuntimeError as caught:
+            return HTMLResponse(
+                _oauth_result_page(
+                    request,
+                    ok=False,
+                    zh=f"Google 登录失败：{caught}",
+                    en=f"Google sign-in failed: {caught}",
+                ),
+                status_code=400,
+            )
+        await asyncio.to_thread(coordinator.resume_uploads_after_login)
+        return HTMLResponse(
+            _oauth_result_page(
+                request,
+                ok=True,
+                zh="Google 登录成功，待上传任务将自动继续。",
+                en="Google sign-in succeeded. Pending uploads will resume automatically.",
+            )
+        )
+
+    @app.post("/api/v1/cloud/logout")
+    async def cloud_logout() -> dict[str, Any]:
+        await asyncio.to_thread(coordinator.cloud_auth.logout)
+        return await asyncio.to_thread(coordinator.cloud_auth.status)
 
     @app.get("/api/v1/taxonomy")
     async def taxonomy() -> dict[str, Any]:
@@ -139,15 +234,53 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/devices")
     async def devices(
         scan_ble: Annotated[bool, Query(description="执行五秒主动 BLE 扫描")] = False,
+        refresh_cameras: Annotated[
+            bool, Query(description="忽略会话缓存并重新枚举摄像头")
+        ] = False,
     ) -> dict[str, Any]:
-        cameras = await discover_video_devices(active.video)
+        cameras = await coordinator.list_cameras(refresh=refresh_cameras)
         ble: list[dict[str, Any]] = []
+        ble_scan: dict[str, Any] = {
+            "requested": False,
+            "adapter_state": "unknown",
+            "target_name": active.imu.name,
+            "target_address": active.imu.address,
+            "target_found": False,
+            "elapsed_ms": 0.0,
+            "error": None,
+        }
         if scan_ble:
             try:
-                ble = await CW12EUBleSource.discover(settings=active.imu)
+                ble_scan = await CW12EUBleSource.discover_with_diagnostics(
+                    settings=active.imu
+                )
+                ble = list(ble_scan.pop("devices"))
+            except BleOperationError as error:
+                ble_scan.update(
+                    {
+                        "requested": True,
+                        "adapter_state": (
+                            "unavailable"
+                            if error.code == "ble_adapter_unavailable"
+                            else "error"
+                        ),
+                        "error": error.as_detail(),
+                    }
+                )
             except Exception as error:
-                ble = [{"error": str(error)}]
-        return {"cameras": cameras, "ble": ble}
+                ble_scan.update(
+                    {
+                        "requested": True,
+                        "adapter_state": "error",
+                        "error": _operation_error_detail(
+                            error,
+                            code="ble_scan_failed",
+                            component="ble",
+                            hint="请检查 Windows 蓝牙服务和适配器状态后重试",
+                        ),
+                    }
+                )
+        return {"cameras": cameras, "ble": ble, "ble_scan": ble_scan}
 
     @app.post("/api/v1/recordings/start")
     async def start(request: RecordingStartRequest) -> dict[str, Any]:
@@ -178,14 +311,15 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         try:
             return await coordinator.start_preview(request)
         except Exception as error:
+            detail = coordinator.device_error or _operation_error_detail(
+                error,
+                code="preview_start_failed",
+                component="ble_video",
+                hint="确认 IMU 未被手机占用并处于可连接状态",
+            )
             raise HTTPException(
                 status_code=409,
-                detail=_operation_error_detail(
-                    error,
-                    code="preview_start_failed",
-                    component="ble_video",
-                    hint="确认 IMU 未被手机占用并处于可连接状态",
-                ),
+                detail=detail,
             ) from error
 
     @app.post("/api/v1/preflight/stop")
@@ -401,7 +535,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         except (WebSocketDisconnect, RuntimeError):
             return
 
-    frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist-capture"
+    frontend = resource_path("frontend/dist-capture")
     if frontend.is_dir():
         assets = frontend / "assets"
         if assets.is_dir():

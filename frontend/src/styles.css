@@ -67,6 +67,7 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .warning-banner { background: #422006; border: 1px solid #a16207; color: #fde68a; padding: 12px 15px; border-radius: 9px; margin-bottom: 14px; }
 .error-banner code, .warning-banner code { font: 12px ui-monospace, monospace; user-select: all; }
 .success-banner { background: #052e16; border: 1px solid #166534; color: #bbf7d0; padding: 12px 15px; border-radius: 9px; margin-bottom: 14px; }
+.info-banner { background: #0b2948; border: 1px solid #24598a; color: #bfdbfe; padding: 12px 15px; border-radius: 9px; margin-bottom: 14px; }
 .status-grid { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0; }
 .status-grid span { border: 1px solid #334155; border-radius: 999px; color: #cbd5e1; padding: 5px 9px; font-size: 12px; }
 .annotation-layout { grid-template-columns: 280px minmax(0, 1fr); align-items: start; }

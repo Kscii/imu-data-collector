@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
@@ -31,7 +30,8 @@ from imu_data_collector.config import (
     load_activity_taxonomy,
     load_calibration_evidence,
 )
-from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
+from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
+from imu_data_collector.file_lock import exclusive_file_lock
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
@@ -237,19 +237,17 @@ class AnnotationService:
 
         lock_path = self.cache_root / "locks" / f"{digest}.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with exclusive_file_lock(lock_path):
+            yield
 
     def publish_capabilities(self) -> AnnotationCapabilities:
         """公布采集端上传前必须核对的生产能力合同。"""
 
         capabilities = AnnotationCapabilities(
             accepted_manifest_schema_versions=list(ACCEPTED_MANIFEST_SCHEMA_VERSIONS),
-            accepted_capture_h5_schema_versions=[CAPTURE_SCHEMA_VERSION],
+            accepted_capture_h5_schema_versions=list(
+                ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
+            ),
             annotation_build_id=ANNOTATION_API_BUILD_ID,
             generated_at_utc=datetime.now(UTC).isoformat(),
         )
@@ -362,7 +360,10 @@ class AnnotationService:
                             "manifest",
                             "manifest recording_id 与对象键不一致",
                         )
-                    if manifest.source_h5_schema_version != CAPTURE_SCHEMA_VERSION:
+                    if (
+                        manifest.source_h5_schema_version
+                        not in ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
+                    ):
                         raise ManifestIndexError(
                             "unsupported_h5_schema",
                             "manifest",
@@ -1746,6 +1747,7 @@ class AnnotationService:
         orphan_exports = 0
         orphan_snapshots = 0
         orphan_receipts = 0
+        orphan_upload_sessions = 0
         candidate_objects = 0
         candidate_bytes = 0
         deleted_objects = 0
@@ -1849,6 +1851,17 @@ class AnnotationService:
                 info.key, if_generation_match=info.generation
             ):
                 deleted_objects += 1
+
+        for info in self.store.list("_upload_sessions/"):
+            if info.updated_at_utc is None or info.updated_at_utc > cutoff:
+                continue
+            orphan_upload_sessions += 1
+            candidate_objects += 1
+            candidate_bytes += info.size_bytes
+            if not dry_run and self.store.delete(
+                info.key, if_generation_match=info.generation
+            ):
+                deleted_objects += 1
         result = {
             "dry_run": dry_run,
             "cutoff_utc": cutoff.isoformat(),
@@ -1856,6 +1869,7 @@ class AnnotationService:
             "orphan_exports": orphan_exports,
             "orphan_snapshots": orphan_snapshots,
             "orphan_receipts": orphan_receipts,
+            "orphan_upload_sessions": orphan_upload_sessions,
             "candidate_objects": candidate_objects,
             "candidate_bytes": candidate_bytes,
             "deleted_objects": deleted_objects,

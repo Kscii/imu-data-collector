@@ -175,6 +175,10 @@ async def finalize_recording(
         source_table = await probe_video_frames(
             partial_mkv,
             writer.recording_start_monotonic_ns,
+            pts_are_monotonic=(
+                context.get("video_timestamp_mapping", "source_pts_monotonic")
+                == "source_pts_monotonic"
+            ),
             timeout_seconds=probe_timeout,
             nice_value=settings.background_jobs.subprocess_nice,
         )
@@ -221,6 +225,13 @@ async def finalize_recording(
             camera_controls_requested=requested,
             camera_controls_effective=effective,
             camera_control_errors=control_errors,
+            camera_control_policy=str(
+                context.get("camera_control_policy", "observed_fps_gate")
+            ),
+            video_backend=str(context.get("video_backend", "unknown")),
+            timestamp_mapping=str(
+                context.get("video_timestamp_mapping", "source_pts_monotonic")
+            ),
         )
         writer.handle["video"].attrs["finalization_context_source"] = (
             "capture_runtime" if context.get("camera_controls_requested") else "recovered"

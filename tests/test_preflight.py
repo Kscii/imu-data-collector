@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 import pytest
 
-from imu_data_collector.ble import NotificationPacket
+from imu_data_collector.ble import BleOperationError, NotificationPacket
 from imu_data_collector.config import Settings
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.cw12eu import pack_test_frame
@@ -373,6 +373,64 @@ async def test_initial_ble_failure_keeps_camera_preview_and_schedules_retry(
 
 
 @pytest.mark.asyncio
+async def test_initial_ble_failure_preserves_stable_scan_error(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    video = _FakeVideo("/dev/video-new")
+
+    async def open_ble():
+        raise BleOperationError(
+            "imu_not_advertising",
+            "在 15 秒扫描期内未发现 CW12EU-T",
+            phase="scan",
+            hint="重新上电并进入匹配状态",
+        )
+
+    async def open_video(_camera_id: str | None):
+        return {"camera_id": "fixture", "device": video.device}, video
+
+    coordinator._open_preview_ble = open_ble  # type: ignore[method-assign]
+    coordinator._open_preview_video = open_video  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="未发现 CW12EU-T"):
+        await coordinator.start_preview(PreviewStartRequest(camera_id="fixture"))
+
+    assert coordinator.device_error is not None
+    assert coordinator.device_error["code"] == "imu_not_advertising"
+    assert coordinator.device_error["component"] == "ble"
+    assert coordinator.device_error["phase"] == "scan"
+    assert coordinator.device_error["hint"] == "重新上电并进入匹配状态"
+    await coordinator.stop_preview()
+
+
+@pytest.mark.asyncio
+async def test_camera_discovery_is_cached_until_forced_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    calls = 0
+
+    async def discover(_settings):
+        nonlocal calls
+        calls += 1
+        return [{"camera_id": f"camera-{calls}"}]
+
+    monkeypatch.setattr(
+        "imu_data_collector.coordinator.discover_video_devices", discover
+    )
+
+    first = await coordinator.list_cameras()
+    second = await coordinator.list_cameras()
+    refreshed = await coordinator.list_cameras(refresh=True)
+
+    assert first == second == [{"camera_id": "camera-1"}]
+    assert refreshed == [{"camera_id": "camera-2"}]
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_imu_preview_parses_in_memory_without_creating_capture_files(
     tmp_path: Path,
 ) -> None:
@@ -432,7 +490,8 @@ async def test_switch_preview_camera_keeps_ble_connected(tmp_path: Path) -> None
             activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
         )
     )
-    (tmp_path / "data").mkdir()
+    # 协调器会在首次启动时负责创建数据目录。
+    assert (tmp_path / "data").is_dir()
     ble = _FakeBle()
     old_video = _FakeVideo("/dev/video-old")
     new_video = _FakeVideo("/dev/video-new")

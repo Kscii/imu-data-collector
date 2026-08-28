@@ -13,6 +13,7 @@ import numpy as np
 from imu_data_collector.constants import (
     CAPTURE_SCHEMA_NAME,
     CAPTURE_SCHEMA_VERSION,
+    MODERN_CAPTURE_SCHEMA_VERSIONS,
     SUPPORTED_CAPTURE_SCHEMA_VERSIONS,
 )
 from imu_data_collector.models import AnnotationDocument, BinaryLabel, EventKind
@@ -177,9 +178,9 @@ def validate_capture_h5(
         training_eligible = bool(handle.attrs.get("training_eligible", False))
         metrics["data_tier"] = data_tier
         metrics["training_eligible"] = str(training_eligible).lower()
-        if schema_version == CAPTURE_SCHEMA_VERSION and "data_tier" not in handle.attrs:
+        if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS and "data_tier" not in handle.attrs:
             issues.append("missing data_tier for current schema")
-        if schema_version == CAPTURE_SCHEMA_VERSION:
+        if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS:
             if "calibration_profile_id" not in handle.attrs:
                 issues.append("missing calibration_profile_id for current schema")
             if "imu" in handle:
@@ -191,6 +192,20 @@ def validate_capture_h5(
                 ):
                     if name not in handle["imu"].attrs:
                         issues.append(f"missing IMU calibration attribute {name}")
+        if schema_version == CAPTURE_SCHEMA_VERSION:
+            for name in (
+                "host_os",
+                "host_os_version",
+                "host_architecture",
+                "monotonic_implementation",
+                "clock_domain",
+            ):
+                if not str(handle.attrs.get(name, "")):
+                    issues.append(f"missing host runtime attribute {name}")
+            if "imu" in handle:
+                for name in ("ble_backend", "local_device_id"):
+                    if not str(handle["imu"].attrs.get(name, "")):
+                        issues.append(f"missing IMU runtime attribute {name}")
         if data_tier not in {"test", "prod"}:
             issues.append(f"invalid data_tier: {data_tier}")
         if training_eligible and data_tier != "prod":
@@ -208,7 +223,7 @@ def validate_capture_h5(
             "imu/samples/recording_time_ns",
             "imu/samples/values_si",
         )
-        if schema_version == CAPTURE_SCHEMA_VERSION:
+        if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS:
             required += (
                 "imu/packets/packet_kind",
                 "imu/packets/fitted_packet_end_time_ns",
@@ -307,7 +322,7 @@ def validate_capture_h5(
         metrics["parse_error_count"] = parse_error_count
         if parse_error_count > 0:
             issues.append(f"IMU packet parsing failed {parse_error_count} times")
-        if schema_version == CAPTURE_SCHEMA_VERSION:
+        if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS:
             assert packet_kinds is not None
             assert parse_valid is not None
             allowed_kinds = {1, 2, 255}
@@ -393,7 +408,7 @@ def validate_capture_h5(
         metrics["calibration_verified"] = str(calibrated).lower()
         if calibrated and sample_count and not np.isfinite(values_si[:]).all():
             issues.append("verified calibration produced non-finite values_si")
-        if calibrated and schema_version == CAPTURE_SCHEMA_VERSION:
+        if calibrated and schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS:
             try:
                 order = json.loads(str(handle["imu"].attrs["raw_axis_order_json"]))
                 signs = json.loads(str(handle["imu"].attrs["axis_signs_json"]))
@@ -428,12 +443,26 @@ def validate_capture_h5(
                     else 0.0
                 )
                 if (
-                    schema_version == CAPTURE_SCHEMA_VERSION
+                    schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS
                     and data_tier == "prod"
                     and float(metrics["video_actual_span_fps"]) < 27.0
                 ):
                     issues.append("prod video actual span FPS is below 27")
-                if schema_version == CAPTURE_SCHEMA_VERSION and data_tier == "prod":
+                control_policy = str(
+                    handle["video"].attrs.get("camera_control_policy", "")
+                )
+                if schema_version == CAPTURE_SCHEMA_VERSION:
+                    if not str(handle["video"].attrs.get("video_backend", "")):
+                        issues.append("current schema is missing video_backend")
+                    if not str(handle["video"].attrs.get("timestamp_mapping", "")):
+                        issues.append("current schema is missing video timestamp mapping")
+                    if control_policy not in {
+                        "fixed_verified",
+                        "observed_fps_gate",
+                        "backend_default",
+                    }:
+                        issues.append("current schema has invalid camera control policy")
+                if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS and data_tier == "prod":
                     try:
                         requested_controls = json.loads(
                             str(handle["video"].attrs["camera_controls_requested_json"])
@@ -444,7 +473,11 @@ def validate_capture_h5(
                         control_errors = json.loads(
                             str(handle["video"].attrs["camera_control_errors_json"])
                         )
-                        if (
+                        requires_fixed_controls = (
+                            schema_version == "1.5.0"
+                            or control_policy == "fixed_verified"
+                        )
+                        if requires_fixed_controls and (
                             not requested_controls
                             or requested_controls != effective_controls
                             or control_errors
@@ -459,7 +492,7 @@ def validate_capture_h5(
                     issues.append("recording contains no video frames")
                 if len(video_pts) != len(video_recording):
                     issues.append("video timestamp dataset length mismatch")
-                if schema_version == CAPTURE_SCHEMA_VERSION:
+                if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS:
                     if media_time is None:
                         issues.append("current schema is missing video media_time_ns")
                     elif len(media_time) != len(video_pts):
@@ -471,7 +504,7 @@ def validate_capture_h5(
                 if len(video_pts) > 1 and np.any(pts_deltas <= 0):
                     issues.append("video PTS are not strictly increasing")
                 if (
-                    schema_version == CAPTURE_SCHEMA_VERSION
+                    schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS
                     and len(pts_deltas)
                     and np.max(pts_deltas) > 200_000_000
                 ):

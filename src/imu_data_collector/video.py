@@ -1,12 +1,12 @@
-"""基于 FFmpeg/V4L2 的录制、本地预览、进度监控与逐帧 PTS 提取。"""
+"""基于 FFmpeg 系统输入后端的录制、预览与逐帧 PTS 提取。"""
 
 from __future__ import annotations
 
 import asyncio
 import glob
+import os
 import re
 import shutil
-import signal
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -16,6 +16,11 @@ from typing import Any
 import numpy as np
 
 from imu_data_collector.config import VideoSettings
+from imu_data_collector.host import (
+    background_subprocess_kwargs,
+    platform_id,
+    resolve_executable,
+)
 
 
 async def _run_capture(
@@ -26,6 +31,7 @@ async def _run_capture(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         close_fds=True,
+        **background_subprocess_kwargs(),
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -62,6 +68,118 @@ def _supports_profile(formats: str, settings: VideoSettings) -> bool:
     )
 
 
+def _video_backend_name() -> str:
+    return {
+        "linux": "ffmpeg_v4l2",
+        "windows": "ffmpeg_dshow",
+        "macos": "ffmpeg_avfoundation",
+    }.get(platform_id(), "ffmpeg_unknown")
+
+
+def _timestamp_mapping_name() -> str:
+    return (
+        "source_pts_monotonic"
+        if platform_id() == "linux"
+        else "first_source_pts_to_host_monotonic"
+    )
+
+
+def _choose_profile(
+    profiles: list[dict[str, Any]], settings: VideoSettings
+) -> dict[str, Any] | None:
+    """选择能稳定请求 30 FPS 的最高分辨率，不设置最低分辨率。"""
+
+    eligible = [
+        item
+        for item in profiles
+        if float(item.get("fps", 0.0)) >= float(settings.requested_fps) - 0.01
+    ]
+    if not eligible:
+        return None
+    preferred_format = settings.input_format.lower().replace("mjpg", "mjpeg")
+    return max(
+        eligible,
+        key=lambda item: (
+            int(item["width"]) * int(item["height"]),
+            item.get("input_format") == preferred_format,
+            -abs(float(item["fps"]) - settings.requested_fps),
+        ),
+    )
+
+
+def _parse_v4l2_profiles(text: str) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    current_format: str | None = None
+    current_size: tuple[int, int] | None = None
+    for line in text.splitlines():
+        format_match = re.search(r"'([A-Z0-9]{4})'", line)
+        if format_match:
+            code = format_match.group(1)
+            current_format = {
+                "MJPG": "mjpeg",
+                "JPEG": "mjpeg",
+                "YUYV": "yuyv422",
+            }.get(code, code.lower())
+            continue
+        size_match = re.search(r"Size:\s+Discrete\s+(\d+)x(\d+)", line)
+        if size_match:
+            current_size = (int(size_match.group(1)), int(size_match.group(2)))
+            continue
+        fps_match = re.search(r"\((\d+(?:\.\d+)?)\s+fps\)", line)
+        if current_format and current_size and fps_match:
+            profiles.append(
+                {
+                    "width": current_size[0],
+                    "height": current_size[1],
+                    "fps": float(fps_match.group(1)),
+                    "input_format": current_format,
+                }
+            )
+    return profiles
+
+
+def _parse_dshow_devices(text: str) -> list[dict[str, str]]:
+    devices: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in text.splitlines():
+        # 新版 FFmpeg 会把部分虚拟摄像头标成 ``(none)``；是否真正可采集
+        # 仍由后续 -list_options 结果决定，因此先保留在设备列表供诊断。
+        video_match = re.search(r'"(.+)"\s+\((?:video|none)\)', line)
+        if video_match:
+            current = {"name": video_match.group(1), "alternative": ""}
+            devices.append(current)
+            continue
+        if re.search(r'".+"\s+\(audio\)', line):
+            current = None
+            continue
+        alternative = re.search(r'Alternative name\s+"(.+)"', line)
+        if current is not None and alternative:
+            current["alternative"] = alternative.group(1)
+    return devices
+
+
+def _parse_dshow_profiles(text: str) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        size_match = re.search(r"s=(\d+)x(\d+)", line)
+        fps_values = [float(value) for value in re.findall(r"fps=(\d+(?:\.\d+)?)", line)]
+        if not size_match or not fps_values:
+            continue
+        pixel_match = re.search(r"(?:pixel_format|vcodec)=([a-zA-Z0-9_]+)", line)
+        pixel = pixel_match.group(1).lower() if pixel_match else "unknown"
+        if pixel in {"mjpeg", "mjpg"}:
+            pixel = "mjpeg"
+        profiles.append(
+            {
+                "width": int(size_match.group(1)),
+                "height": int(size_match.group(2)),
+                "fps": max(fps_values),
+                "input_format": pixel,
+            }
+        )
+    return profiles
+
+
 def _stable_camera_id(props: dict[str, str], device: str) -> str:
     serial = props.get("ID_SERIAL", "")
     path = props.get("ID_PATH", "")
@@ -74,6 +192,107 @@ async def discover_video_devices(
     settings: VideoSettings | None = None,
 ) -> list[dict[str, Any]]:
     profile = settings or VideoSettings()
+    current_platform = platform_id()
+    ffmpeg = resolve_executable("ffmpeg")
+    if current_platform == "windows":
+        _code, _stdout, stderr = await _run_capture(
+            ffmpeg,
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+            timeout_seconds=8.0,
+        )
+        output: list[dict[str, Any]] = []
+        for item in _parse_dshow_devices(stderr):
+            identifier = item["alternative"] or item["name"]
+            _code, _stdout, options = await _run_capture(
+                ffmpeg,
+                "-hide_banner",
+                "-f",
+                "dshow",
+                "-list_options",
+                "true",
+                "-i",
+                f"video={identifier}",
+                timeout_seconds=8.0,
+            )
+            profiles = _parse_dshow_profiles(options)
+            selected = _choose_profile(profiles, profile)
+            output.append(
+                {
+                    "device": identifier,
+                    "product": item["name"],
+                    "serial": "",
+                    "path": identifier,
+                    "interface": "",
+                    "integration": "unknown",
+                    "camera_id": identifier,
+                    "formats": options,
+                    "profiles": profiles,
+                    "selected_profile": selected,
+                    "supports_default_profile": selected is not None,
+                    "color_capture": bool(profiles),
+                    "backend": "ffmpeg_dshow",
+                }
+            )
+        return output
+
+    if current_platform == "macos":
+        _code, _stdout, stderr = await _run_capture(
+            ffmpeg,
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+            timeout_seconds=8.0,
+        )
+        output = []
+        in_video_section = False
+        for line in stderr.splitlines():
+            if "AVFoundation video devices" in line:
+                in_video_section = True
+                continue
+            if "AVFoundation audio devices" in line:
+                in_video_section = False
+            match = re.search(r"\[(\d+)\]\s+(.+)$", line)
+            if not in_video_section or not match:
+                continue
+            index, name = match.groups()
+            selected = {
+                "width": profile.width,
+                "height": profile.height,
+                "fps": float(profile.requested_fps),
+                "input_format": "backend_default",
+            }
+            output.append(
+                {
+                    "device": index,
+                    "product": name.strip(),
+                    "serial": "",
+                    "path": index,
+                    "interface": "",
+                    "integration": "unknown",
+                    "camera_id": f"avfoundation:{index}:{name.strip()}",
+                    "formats": "由 AVFoundation 在启动时协商",
+                    "profiles": [selected],
+                    "selected_profile": selected,
+                    "supports_default_profile": True,
+                    "color_capture": True,
+                    "backend": "ffmpeg_avfoundation",
+                }
+            )
+        return output
+
+    if current_platform != "linux":
+        raise RuntimeError(f"暂不支持当前摄像头平台：{current_platform}")
+
     devices = sorted(glob.glob("/dev/video*"))
 
     async def inspect(device: str) -> dict[str, Any] | None:
@@ -101,6 +320,8 @@ async def discover_video_devices(
         # metadata 节点常能出现在 --all 中，但没有实际像素格式。
         if code or not re.search(r"\[\d+\]:", formats):
             return None
+        profiles = _parse_v4l2_profiles(formats)
+        selected_profile = _choose_profile(profiles, profile)
         return {
             "device": device,
             "product": props.get("ID_V4L_PRODUCT", "Unknown camera"),
@@ -110,8 +331,12 @@ async def discover_video_devices(
             "integration": props.get("ID_INTEGRATION", ""),
             "camera_id": _stable_camera_id(props, device),
             "formats": formats,
-            "supports_default_profile": _supports_profile(formats, profile),
+            "profiles": profiles,
+            "selected_profile": selected_profile,
+            "supports_default_profile": selected_profile is not None
+            or _supports_profile(formats, profile),
             "color_capture": "MJPG" in formats or "YUYV" in formats,
+            "backend": "ffmpeg_v4l2",
         }
 
     inspected = await asyncio.gather(*(inspect(device) for device in devices))
@@ -146,11 +371,19 @@ def select_video_device(
                 compatible[0] if compatible else None,
             )
     if selected is None:
-        raise RuntimeError("没有摄像头支持配置的 1080p30 MJPEG 彩色视频模式")
+        raise RuntimeError("没有摄像头支持目标 30 FPS 的彩色视频模式")
     if not selected["supports_default_profile"]:
-        raise RuntimeError("所选摄像头不支持当前配置的视频分辨率、帧率或像素格式")
+        raise RuntimeError("所选摄像头不支持可用的目标 30 FPS 模式")
     if not selected["color_capture"]:
         raise RuntimeError("所选节点不是彩色视频采集节点")
+    if not selected.get("selected_profile"):
+        selected = dict(selected)
+        selected["selected_profile"] = {
+            "width": settings.width,
+            "height": settings.height,
+            "fps": float(settings.requested_fps),
+            "input_format": settings.input_format,
+        }
     return selected
 
 
@@ -169,6 +402,8 @@ class CameraControlState:
     requested: dict[str, int] = field(default_factory=dict)
     effective: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    policy: str = "observed_fps_gate"
+    supported: bool = False
 
     @property
     def ready(self) -> bool:
@@ -192,6 +427,11 @@ async def apply_video_controls(
     state = CameraControlState()
     if not settings.manual_controls_enabled:
         return state
+    if platform_id() != "linux":
+        state.policy = "observed_fps_gate"
+        return state
+    state.policy = "fixed_verified"
+    state.supported = True
     state.requested = {
         "auto_exposure": settings.auto_exposure,
         "exposure_time_absolute": settings.exposure_time_absolute,
@@ -345,6 +585,7 @@ class FFmpegVideoRecorder:
         device: str,
         output_path: Path | None,
         preview_hub: PreviewFrameHub | None = None,
+        profile: dict[str, Any] | None = None,
     ) -> None:
         self.settings = settings
         self.device = device
@@ -356,6 +597,14 @@ class FFmpegVideoRecorder:
         self.started_monotonic_ns: int | None = None
         self.control_state = CameraControlState()
         self.preview_hub = preview_hub
+        self.profile = profile or {
+            "width": settings.width,
+            "height": settings.height,
+            "fps": float(settings.requested_fps),
+            "input_format": settings.input_format,
+        }
+        self.backend_name = _video_backend_name()
+        self.timestamp_mapping = _timestamp_mapping_name()
         self._source_pts_seconds: deque[float] = deque()
         self._preview_times: deque[float] = deque()
         self._tasks: list[asyncio.Task[Any]] = []
@@ -405,7 +654,15 @@ class FFmpegVideoRecorder:
 
     def command(self) -> list[str]:
         settings = self.settings
-        use_vaapi = bool(settings.vaapi_device and Path(settings.vaapi_device).exists())
+        current_platform = platform_id()
+        width = int(self.profile.get("width", settings.width))
+        height = int(self.profile.get("height", settings.height))
+        input_format = str(self.profile.get("input_format", settings.input_format))
+        use_vaapi = bool(
+            current_platform == "linux"
+            and settings.vaapi_device
+            and Path(settings.vaapi_device).exists()
+        )
         split = "[0:v]split=2[record][preview];"
         if use_vaapi:
             record_filter = "[record]format=nv12,hwupload[record_out];"
@@ -433,11 +690,10 @@ class FFmpegVideoRecorder:
             f"[preview]fps={settings.preview_fps},scale={settings.preview_width}:-2[preview_out]"
         )
         command = [
-            "ffmpeg",
+            resolve_executable("ffmpeg"),
             "-hide_banner",
             "-loglevel",
             "error",
-            "-nostdin",
             "-progress",
             "pipe:2",
             "-stats_period",
@@ -445,23 +701,53 @@ class FFmpegVideoRecorder:
         ]
         if use_vaapi:
             command.extend(["-vaapi_device", str(settings.vaapi_device)])
-        command.extend(
-            [
-                "-copyts",
-                "-f",
-                "video4linux2",
-                "-timestamps",
-                "default",
-                "-input_format",
-                settings.input_format,
-                "-video_size",
-                f"{settings.width}x{settings.height}",
-                "-framerate",
-                str(settings.requested_fps),
-                "-i",
-                self.device,
-            ]
-        )
+        if current_platform == "linux":
+            command.extend(
+                [
+                    "-copyts",
+                    "-f",
+                    "video4linux2",
+                    "-timestamps",
+                    "default",
+                    "-input_format",
+                    input_format,
+                    "-video_size",
+                    f"{width}x{height}",
+                    "-framerate",
+                    str(settings.requested_fps),
+                    "-i",
+                    self.device,
+                ]
+            )
+        elif current_platform == "windows":
+            command.extend(["-f", "dshow"])
+            if input_format == "mjpeg":
+                command.extend(["-vcodec", "mjpeg"])
+            command.extend(
+                [
+                    "-video_size",
+                    f"{width}x{height}",
+                    "-framerate",
+                    str(settings.requested_fps),
+                    "-i",
+                    f"video={self.device}",
+                ]
+            )
+        elif current_platform == "macos":
+            command.extend(
+                [
+                    "-f",
+                    "avfoundation",
+                    "-framerate",
+                    str(settings.requested_fps),
+                    "-video_size",
+                    f"{width}x{height}",
+                    "-i",
+                    f"{self.device}:none",
+                ]
+            )
+        else:
+            raise RuntimeError(f"暂不支持当前摄像头平台：{current_platform}")
         source_stats_output = [
             "-map",
             "0:v:0",
@@ -473,7 +759,7 @@ class FFmpegVideoRecorder:
             "source {n} {pts} {tb}",
             "-f",
             "null",
-            "/dev/null",
+            os.devnull,
         ]
         if self.output_path is None:
             command.extend(
@@ -536,10 +822,11 @@ class FFmpegVideoRecorder:
         self.started_monotonic_ns = time.monotonic_ns()
         self.process = await asyncio.create_subprocess_exec(
             *self.command(),
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             close_fds=True,
+            **background_subprocess_kwargs(),
         )
         self._tasks = [
             asyncio.create_task(self._read_preview()),
@@ -556,12 +843,20 @@ class FFmpegVideoRecorder:
         if process is None:
             return
         if process.returncode is None:
-            process.send_signal(signal.SIGINT)
             try:
+                if process.stdin is not None:
+                    process.stdin.write(b"q\n")
+                    await process.stdin.drain()
                 await asyncio.wait_for(process.wait(), timeout=timeout)
+            except (BrokenPipeError, ConnectionResetError):
+                await process.wait()
             except TimeoutError:
                 process.terminate()
-                await process.wait()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=3.0)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         if process.returncode not in (0, 255):
@@ -647,7 +942,7 @@ async def probe_video_frames(
     if nice_value and shutil.which("nice"):
         command.extend(("nice", "-n", str(nice_value)))
     command.extend((
-        "ffprobe",
+        resolve_executable("ffprobe"),
         "-v",
         "error",
         "-select_streams",
@@ -665,6 +960,7 @@ async def probe_video_frames(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         close_fds=True,
+        **background_subprocess_kwargs(),
     )
     assert process.stdout is not None
     assert process.stderr is not None
@@ -754,7 +1050,7 @@ async def normalize_video_timeline(
     if nice_value and shutil.which("nice"):
         command.extend(("nice", "-n", str(nice_value)))
     command.extend((
-        "ffmpeg",
+        resolve_executable("ffmpeg"),
         "-hide_banner",
         "-loglevel",
         "error",
