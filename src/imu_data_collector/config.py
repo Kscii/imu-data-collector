@@ -74,6 +74,8 @@ class DesktopCloudSettings:
     broker_server_host: str = "127.0.0.1"
     broker_server_port: int = 8770
     google_oauth_client_id: str | None = None
+    # 只允许上传代理从服务器私有环境变量注入；桌面安装包禁止携带。
+    google_oauth_client_secret: str | None = None
     authorization_endpoint: str = "https://accounts.google.com/o/oauth2/v2/auth"
     token_endpoint: str = "https://oauth2.googleapis.com/token"
     revocation_endpoint: str = "https://oauth2.googleapis.com/revoke"
@@ -263,6 +265,8 @@ def load_settings(config_path: Path | None = None) -> Settings:
         settings.data_root = Path(data_root)
     if google_oauth_client_id := os.environ.get("IMU_GOOGLE_OAUTH_CLIENT_ID"):
         settings.cloud.google_oauth_client_id = google_oauth_client_id
+    if google_oauth_client_secret := os.environ.get("IMU_GOOGLE_OAUTH_CLIENT_SECRET"):
+        settings.cloud.google_oauth_client_secret = google_oauth_client_secret
     if broker_server_host := os.environ.get("IMU_UPLOAD_BROKER_HOST"):
         settings.cloud.broker_server_host = broker_server_host
     if broker_server_port := os.environ.get("IMU_UPLOAD_BROKER_PORT"):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""为桌面安装包生成不含秘密的团队上传配置目录。"""
+"""为桌面安装包生成不含云端秘密的团队上传配置目录。"""
 
 from __future__ import annotations
 
@@ -39,11 +39,14 @@ def main() -> None:
         "bucket": None,
         "project": None,
     }
-    value["cloud"] = {
+    cloud = {
         **value.get("cloud", {}),
         "broker_url": broker_url,
         "google_oauth_client_id": args.oauth_client_id,
     }
+    # 即使源配置未来出现服务器专用字段，也不允许进入桌面安装包。
+    cloud.pop("google_oauth_client_secret", None)
+    value["cloud"] = cloud
     config_path.write_text(
         yaml.safe_dump(value, allow_unicode=True, sort_keys=False),
         encoding="utf-8",

@@ -15,7 +15,7 @@
   再由服务器私有邮箱映射得到唯一 UniKey。操作者身份不能由浏览器请求体自报。
 - 数据级别：录制开始时显式选择 `test` 或 `prod`，安全默认值为 `test`；缺失级别的旧条目
   也按 `test` 处理，`prod` 仍需通过全部质量门禁。
-- 存储：原始媒体不进 Git/Git LFS；Linux 管理机保留 ADC/GCS 发布能力，团队桌面安装包改由 Google Desktop OAuth + PKCE 登录，经独立上传代理获得单录制 GCS 可恢复上传会话。refresh token 只进入操作系统凭据库，GCS 服务账号只存在于代理 VM；标注端从 `gs://soft3888-label` 索引 manifest。
+- 存储：原始媒体不进 Git/Git LFS；Linux 管理机保留 ADC/GCS 发布能力，团队桌面安装包改由 Google Desktop OAuth + PKCE 登录，经独立上传代理完成 token exchange 并获得单录制 GCS 可恢复上传会话。安装包不含 client secret；refresh token 只进入操作系统凭据库，OAuth secret 与 GCS 服务账号只存在于代理 VM；标注端从 `gs://soft3888-label` 索引 manifest。
 - 发布状态：上传成功只表示制品已经进入 Bucket；标注端校验完成后会另写索引回执。采集页分别
   展示“已上传 Bucket”“标注端已接收”和“标注端拒绝”，拒绝时保留具体错误码与原因。
 

@@ -26,9 +26,12 @@ npm run build
 
 ```bash
 sudo systemctl is-active imu-annotation.service
+sudo systemctl is-active imu-upload-broker.service
 sudo systemctl is-active imu-annotation-gc.timer
 curl --fail http://127.0.0.1:8766/api/v1/health
+curl --fail http://127.0.0.1:8770/health
 sudo journalctl -u imu-annotation.service -n 100 --no-pager
+sudo journalctl -u imu-upload-broker.service -n 100 --no-pager
 sudo journalctl -u imu-annotation-gc.service -n 100 --no-pager
 ```
 
@@ -39,6 +42,10 @@ sudo journalctl -u imu-annotation-gc.service -n 100 --no-pager
 
 使用管理员账号：
 
+- Windows 安装包内不存在 `google_oauth_client_secret`；首次 Google 登录经上传代理成功，刷新或
+  重启本机服务后仍可用系统凭据库中的 refresh token 获取短期 ID token；
+- token exchange 拒绝非 loopback 回调，错误页和服务日志不包含 code、verifier、refresh token
+  或 client secret；
 - IAP 登录后页首显示正确 UniKey，不能切换身份；
 - 刷新后仍停留在 URL 指定的当前页面；
 - 刷新 Bucket 后新 manifest 进入列表，异常条目显示稳定错误码和录制 ID；

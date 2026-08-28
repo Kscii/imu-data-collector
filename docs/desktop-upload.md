@@ -34,10 +34,15 @@ captures/<recording_id>/preview.mp4
 
 ## 配置边界
 
-组员不需要编辑 YAML。`desktop-v*` 的 GitHub Actions 构建从两个仓库变量生成安装包内配置：
+组员不需要编辑 YAML。`desktop-v*` 的 GitHub Actions 构建从两个公开仓库变量生成安装包内配置：
 
 - `DESKTOP_UPLOAD_BROKER_URL=https://upload.imu.kscii.tech`
 - `DESKTOP_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com`
+
+桌面端通过 PKCE 取得一次性授权码，再把授权码、verifier 和固定 loopback 回调地址发给上传代理。
+代理从服务器私有环境变量读取 Google client secret 并完成 token exchange；后续 refresh token
+刷新也走同一个代理。安装包和 GitHub Release 因此不包含 client secret，更绝不包含 GCP 服务账号
+私钥。真正的授权边界还包括代理对 ID token 的签名、audience、邮箱和白名单校验。
 
 生成后的公开配置等价于：
 
@@ -73,10 +78,11 @@ identity:
 
 生产环境不要把新版本专用的 OAuth 字段写入标注服务和上传代理共用的 YAML，否则旧版本在
 部署回滚预检时可能无法解析。Client ID 由仅上传代理读取的
-`/etc/imu-annotation/upload-broker.env` 提供：
+`/etc/imu-annotation/upload-broker.env` 提供；该文件必须仅允许受控运维用户读取：
 
 ```dotenv
 IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com
+IMU_GOOGLE_OAUTH_CLIENT_SECRET=<Google 桌面客户端签发的 client secret>
 IMU_UPLOAD_BROKER_HOST=0.0.0.0
 ```
 
@@ -85,9 +91,9 @@ systemd 单元通过 `EnvironmentFile=-/etc/imu-annotation/upload-broker.env` �
 `0.0.0.0:8770` 是为了接收负载均衡器从 VM 内网地址发来的请求；GCP 防火墙仍只允许负载均衡
 和健康检查来源访问该端口，不把 8770 直接开放给公网。
 
-邮箱映射和项目私有值不提交仓库。Desktop OAuth client ID 是公开标识，可以进入安装包；Desktop
-客户端不使用 client secret。代理 VM 的服务账号至少需要创建对象、读取对象与读取对象 metadata
-的权限，不把该身份授予桌面用户。
+邮箱映射、client secret 和项目私有值不提交仓库。Desktop OAuth client ID 是公开标识，可以进入
+安装包；client secret 只由上传代理读取。代理 VM 的服务账号至少需要创建对象、读取对象与读取
+对象 metadata 的权限，不把该身份授予桌面用户。
 
 当前 Arch 管理机是受控运维环境，私有配置显式使用 `publish.mode=direct_gcs` 和 ADC；不能把该
 配置复制给组员。
@@ -98,6 +104,7 @@ systemd 单元通过 `EnvironmentFile=-/etc/imu-annotation/upload-broker.env` �
 
 ```bash
 IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com \
+IMU_GOOGLE_OAUTH_CLIENT_SECRET=<desktop-client-secret> \
   uv run imu-upload-broker --config /etc/imu-annotation/config.yaml
 ```
 
@@ -107,6 +114,8 @@ IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com \
 部署时应由 HTTPS 负载均衡或反向代理终止 TLS，进程本身继续监听回环地址。生产验收至少包括：
 
 - 非白名单 Google 邮箱得到 403；错误 audience、过期 token 和未验证邮箱得到 401/403；
+- 安装包、GitHub Release、WebUI 配置接口和日志中不存在 client secret；
+- token exchange 拒绝非 loopback 回调，并且错误响应不回显 code、verifier 或 refresh token；
 - 对象键越界、schema 不支持、同 ID 不同摘要得到 409/422；
 - 断网后本地后台任务保留并可重试，不删除 H5/MKV；
 - 三个对象任一缺失或 SHA-256 不匹配时没有 manifest；

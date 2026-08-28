@@ -1,7 +1,8 @@
-"""为桌面采集端签发录制范围内的 GCS resumable upload 会话。
+"""为桌面采集端代理 OAuth token exchange 并签发 GCS 上传会话。
 
-代理是唯一持有 GCS 服务账号权限的组件。桌面端只提交经过 Google 签名的短期
-ID token；代理校验邮箱白名单、对象键、大小与 SHA-256，最后才原子写 manifest。
+代理是唯一持有 Google client secret 和 GCS 服务账号权限的组件。桌面端上传时只提交经过
+Google 签名的短期 ID token；代理校验邮箱白名单、对象键、大小与 SHA-256，最后才原子写
+manifest。
 """
 
 import argparse
@@ -11,15 +12,20 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
+import requests
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi.responses import JSONResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import storage
 from google.oauth2 import id_token as google_id_token
 
 from imu_data_collector.broker_models import (
     BrokerArtifactSession,
+    BrokerOAuthTokenRequest,
+    BrokerOAuthTokenResponse,
     BrokerUploadCompleteRequest,
     BrokerUploadCompleteResponse,
     BrokerUploadStartRequest,
@@ -53,12 +59,63 @@ def _sha256_blob(blob: storage.Blob) -> str:
     return digest.hexdigest()
 
 
+def _validate_loopback_redirect_uri(value: str) -> None:
+    """只允许采集端固定的 loopback OAuth 回调，禁止代理交换任意重定向授权码。"""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="OAuth redirect_uri 无效") from error
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "::1"}
+        or not port
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/api/v1/cloud/oauth/callback"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(status_code=422, detail="OAuth redirect_uri 不是允许的本机回调")
+
+
+def _safe_oauth_field(value: object, fallback: str, limit: int) -> str:
+    return " ".join(str(value or fallback).split())[:limit]
+
+
+def _oauth_error_response(response: requests.Response) -> JSONResponse:
+    try:
+        payload = response.json()
+    except (requests.JSONDecodeError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        payload = {}
+    error = _safe_oauth_field(payload.get("error"), "upstream_error", 80)
+    descriptions = {
+        "invalid_grant": "授权码或 refresh token 无效、已过期或已经使用",
+        "invalid_request": "Google OAuth 请求参数无效",
+        "unauthorized_client": "Google OAuth 客户端未被允许执行该请求",
+        "access_denied": "Google 账号拒绝了授权请求",
+    }
+    # 不透传上游自由文本，避免它意外回显授权码、verifier、refresh token 或 client secret。
+    description = descriptions.get(error, "Google OAuth token endpoint 拒绝请求")
+    status = response.status_code if 400 <= response.status_code < 500 else 502
+    return JSONResponse(
+        status_code=status,
+        content={"error": error, "error_description": description},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
 def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
     active = settings or load_settings()
     if active.storage.backend != "gcs" or not active.storage.bucket:
         raise RuntimeError("上传代理必须配置 storage.backend=gcs 和 storage.bucket")
     if not active.cloud.google_oauth_client_id:
         raise RuntimeError("上传代理缺少 cloud.google_oauth_client_id")
+    if not active.cloud.google_oauth_client_secret:
+        raise RuntimeError("上传代理缺少服务器私有的 cloud.google_oauth_client_secret")
     client = storage.Client(project=active.storage.project)
     bucket = client.bucket(active.storage.bucket.removeprefix("gs://"))
     app = FastAPI(title="IMU 上传代理", version="1.0.0")
@@ -96,6 +153,71 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             "direct_to_bucket_resumable": True,
             "server_verifies_sha256_before_manifest": True,
         }
+
+    @app.post("/v1/oauth/token", response_model=BrokerOAuthTokenResponse)
+    def exchange_oauth_token(
+        body: BrokerOAuthTokenRequest,
+        response: Response,
+    ) -> BrokerOAuthTokenResponse | JSONResponse:
+        """使用服务器私有 client secret 代理 Google token exchange。"""
+
+        form: dict[str, str] = {
+            "client_id": active.cloud.google_oauth_client_id,
+            "client_secret": active.cloud.google_oauth_client_secret,
+            "grant_type": body.grant_type,
+        }
+        if body.grant_type == "authorization_code":
+            assert body.code and body.code_verifier and body.redirect_uri
+            _validate_loopback_redirect_uri(body.redirect_uri)
+            form.update(
+                {
+                    "code": body.code,
+                    "code_verifier": body.code_verifier,
+                    "redirect_uri": body.redirect_uri,
+                }
+            )
+        else:
+            assert body.refresh_token
+            form["refresh_token"] = body.refresh_token
+        try:
+            upstream = requests.post(
+                active.cloud.token_endpoint,
+                data=form,
+                timeout=20,
+            )
+        except requests.RequestException:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "temporarily_unavailable",
+                    "error_description": "上传代理暂时无法连接 Google OAuth",
+                },
+                headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+            )
+        if not upstream.ok:
+            return _oauth_error_response(upstream)
+        try:
+            payload = upstream.json()
+        except (requests.JSONDecodeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict) or not payload.get("id_token"):
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "invalid_response",
+                    "error_description": "Google OAuth 响应缺少 ID token",
+                },
+                headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+            )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return BrokerOAuthTokenResponse(
+            id_token=str(payload["id_token"]),
+            refresh_token=(
+                str(payload["refresh_token"]) if payload.get("refresh_token") else None
+            ),
+            expires_in=int(payload.get("expires_in", 3600)),
+        )
 
     @app.post("/v1/uploads", response_model=BrokerUploadStartResponse)
     def start_upload(
