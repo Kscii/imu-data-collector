@@ -149,7 +149,10 @@
 - [~] 已实现内容寻址的不可变训练快照 TAR、manifest、逐文件 SHA-256，以及合并的
   `cw12eu.h5`、不可变 benchmark manifest 和 generation 保护的 `current.json`；相同内容可在
   中断后幂等恢复。仍需把现有历史 prod 录制逐条重开并重新完成，再用真实 GCS 验证第一条
-  25 Hz team snapshot；参与者划分将在真实数据产生后生成。
+  25 Hz team snapshot。2026-08-28 只读审计确认需人工处理的两条 completed 录制为
+  `20260827T063052.208742Z_xfan0282` 和 `20260827T065206.649328Z_xfan0282`；不能自动替代人工
+  reopen/recomplete。collector 实际生成的合并 HDF5 已通过 benchmark v2 validator；参与者划分
+  将在真实 team snapshot 产生后生成。
 
 ## P1：运行与治理
 
