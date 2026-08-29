@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
-from imu_data_collector.models import ActivityTaxonomyDefinition
+from imu_data_collector.models import (
+    ActivityTaxonomyChange,
+    ActivityTaxonomyDefinition,
+    TaxonomyChangeOperation,
+)
 from imu_data_collector.storage import ObjectConflictError, ObjectStore
 
 
@@ -17,7 +22,16 @@ class ActivityTaxonomyStore:
         self.store = store
         self.taxonomy_id = str(seed["taxonomy_id"])
         self._lock = threading.RLock()
-        self._seed = self._normalize(seed)
+        seed_payload = dict(seed)
+        seed_payload.setdefault(
+            "change",
+            {
+                "actor_unikey": "system",
+                "changed_at_utc": datetime.now(UTC).isoformat(),
+                "operation": "seed",
+            },
+        )
+        self._seed = self._normalize(seed_payload)
         self._ensure_initialized()
 
     @property
@@ -75,6 +89,11 @@ class ActivityTaxonomyStore:
         self,
         expected_version: str,
         update: Callable[[ActivityTaxonomyDefinition], ActivityTaxonomyDefinition],
+        *,
+        actor_unikey: str,
+        operation: TaxonomyChangeOperation,
+        source_code: str | None = None,
+        target_code: str | None = None,
     ) -> ActivityTaxonomyDefinition:
         with self._lock:
             current, generation = self.current()
@@ -85,9 +104,20 @@ class ActivityTaxonomyStore:
             )
             revision = current.revision + 1
             base_version = current.version.split("+", 1)[0]
+            change = ActivityTaxonomyChange(
+                actor_unikey=actor_unikey,
+                changed_at_utc=datetime.now(UTC).isoformat(),
+                operation=operation,
+                source_code=source_code,
+                target_code=target_code,
+            )
             changed = ActivityTaxonomyDefinition.model_validate(
                 changed.model_dump(mode="json")
-                | {"revision": revision, "version": f"{base_version}+r{revision}"}
+                | {
+                    "revision": revision,
+                    "version": f"{base_version}+r{revision}",
+                    "change": change.model_dump(mode="json"),
+                }
             )
             payload = changed.model_dump(mode="json")
             snapshot_key = self.version_key(changed.version)

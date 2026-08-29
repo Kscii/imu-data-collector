@@ -257,19 +257,19 @@ def create_annotation_app(
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该活动标签版本") from error
 
-    @app.get("/api/v1/taxonomy/admin")
-    def taxonomy_admin(request: Request) -> dict[str, Any]:
-        admin_actor(request)
-        return service.taxonomy_admin_summary()
+    @app.get("/api/v1/taxonomy/manage")
+    def taxonomy_management(request: Request) -> dict[str, Any]:
+        current_actor(request)
+        return service.taxonomy_management_summary()
 
     @app.post("/api/v1/taxonomy/activities")
     def create_taxonomy_activity(
         body: ActivityTaxonomyCreateRequest,
         request: Request,
     ) -> dict[str, Any]:
-        admin_actor(request)
+        actor = current_actor(request)
         try:
-            return service.create_taxonomy_activity(body)
+            return service.create_taxonomy_activity(body, actor.unikey)
         except ObjectConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
@@ -281,9 +281,9 @@ def create_annotation_app(
         body: ActivityTaxonomyUpdateRequest,
         request: Request,
     ) -> dict[str, Any]:
-        admin_actor(request)
+        actor = current_actor(request)
         try:
-            return service.update_taxonomy_activity(code, body)
+            return service.update_taxonomy_activity(code, body, actor.unikey)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该活动标签") from error
         except ObjectConflictError as error:
@@ -297,9 +297,11 @@ def create_annotation_app(
         request: Request,
         expected_version: Annotated[str, Query(min_length=1, max_length=80)],
     ) -> dict[str, Any]:
-        admin_actor(request)
+        actor = current_actor(request)
         try:
-            return service.delete_taxonomy_activity(code, expected_version)
+            return service.delete_taxonomy_activity(
+                code, expected_version, actor.unikey
+            )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该活动标签") from error
         except ObjectConflictError as error:
@@ -312,7 +314,7 @@ def create_annotation_app(
         body: ActivityTaxonomyMigrationPreviewRequest,
         request: Request,
     ) -> dict[str, Any]:
-        admin_actor(request)
+        current_actor(request)
         try:
             return service.preview_taxonomy_migration(body)
         except KeyError as error:
@@ -327,7 +329,7 @@ def create_annotation_app(
         body: ActivityTaxonomyMigrationApplyRequest,
         request: Request,
     ) -> dict[str, Any]:
-        actor = admin_actor(request)
+        actor = current_actor(request)
         try:
             return service.apply_taxonomy_migration(body, actor.unikey)
         except KeyError as error:

@@ -17,6 +17,7 @@ from imu_data_collector.config import (
     AnnotationSettings,
     Settings,
     StorageSettings,
+    load_activity_taxonomy,
     load_settings,
 )
 from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
@@ -24,6 +25,7 @@ from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
     ActivityTaxonomyCreateRequest,
+    ActivityTaxonomyDefinition,
     ActivityTaxonomyEntry,
     ActivityTaxonomyMigrationApplyRequest,
     ActivityTaxonomyMigrationPreviewRequest,
@@ -401,6 +403,39 @@ def test_legacy_taxonomy_entry_without_name_uses_code_for_display() -> None:
     assert entry.name == "walking"
 
 
+def test_legacy_taxonomy_version_without_change_metadata_remains_readable() -> None:
+    definition = ActivityTaxonomyDefinition.model_validate(
+        {
+            "taxonomy_id": "fall_binary_v1",
+            "version": "1.0.0",
+            "fall": [{"code": "forward_fall", "name": "Forward fall"}],
+            "non_fall": [{"code": "walking", "name": "Walking"}],
+        }
+    )
+
+    assert definition.change is None
+
+
+def test_existing_legacy_taxonomy_objects_are_not_rewritten(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    legacy = load_activity_taxonomy(settings.activity_taxonomy_path)
+    taxonomy_id = legacy["taxonomy_id"]
+    safe_version = legacy["version"].replace("+", "_").replace("/", "_")
+    current_key = f"taxonomies/{taxonomy_id}/current.json"
+    version_key = f"taxonomies/{taxonomy_id}/versions/{safe_version}.json"
+    store.write_json(current_key, legacy, if_generation_match=0)
+    store.write_json(version_key, legacy, if_generation_match=0)
+
+    service = create_annotation_app(settings, store).state.annotation_service
+
+    assert service.taxonomy_definition()["change"] is None
+    stored_current, _generation = store.read_json(current_key)
+    stored_version, _generation = store.read_json(version_key)
+    assert stored_current == legacy
+    assert stored_version == legacy
+
+
 def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
@@ -416,7 +451,8 @@ def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) ->
             binary_label="non_fall",
             code="stair_climbing",
             name="Stair climbing",
-        )
+        ),
+        "xfan0282",
     )
     assert created["version"] != initial["version"]
     assert next(
@@ -461,6 +497,7 @@ def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) ->
             name="Stairs",
             active=False,
         ),
+        "xfan0282",
     )
     assert next(
         item for item in disabled["non_fall"] if item["code"] == "stair_climbing"
@@ -497,17 +534,21 @@ def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) ->
         )
 
     with pytest.raises(ValueError, match="只能停用"):
-        service.delete_taxonomy_activity("stair_climbing", disabled["version"])
+        service.delete_taxonomy_activity(
+            "stair_climbing", disabled["version"], "xfan0282"
+        )
 
 
-def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) -> None:
+def test_taxonomy_management_api_allows_members_and_detects_conflict(
+    tmp_path: Path,
+) -> None:
     from fastapi.testclient import TestClient
 
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     app = create_annotation_app(settings, store)
     with TestClient(app) as client:
-        initial = client.get("/api/v1/taxonomy/admin")
+        initial = client.get("/api/v1/taxonomy/manage")
         assert initial.status_code == 200
         version = initial.json()["version"]
         created = client.post(
@@ -520,6 +561,12 @@ def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) 
             },
         )
         assert created.status_code == 200
+        change = created.json()["change"]
+        assert change["actor_unikey"] == "xfan0282"
+        assert change["operation"] == "create"
+        assert change["source_code"] == "stair_climbing"
+        assert change["target_code"] is None
+        assert datetime.fromisoformat(change["changed_at_utc"]).tzinfo == UTC
         preview = client.post(
             "/api/v1/taxonomy/migrations/preview",
             json={
@@ -535,7 +582,7 @@ def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) 
             json={"expected_version": version, "active": False},
         )
         assert conflict.status_code == 409
-        latest = client.get("/api/v1/taxonomy/admin").json()
+        latest = client.get("/api/v1/taxonomy/manage").json()
         deleted = client.delete(
             "/api/v1/taxonomy/activities/stair_climbing",
             params={"expected_version": latest["version"]},
@@ -545,20 +592,65 @@ def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) 
             item["code"] != "stair_climbing"
             for item in deleted.json()["non_fall"]
         )
+        assert "/api/v1/taxonomy/admin" not in app.openapi()["paths"]
 
     settings.auth.local_actor_id = "rkim6933"
     member_app = create_annotation_app(settings, store)
     with TestClient(member_app) as client:
         assert client.get("/api/v1/taxonomy").status_code == 200
-        assert client.get("/api/v1/taxonomy/admin").status_code == 403
-        assert client.post(
+        initial = client.get("/api/v1/taxonomy/manage")
+        assert initial.status_code == 200
+        created = client.post(
+            "/api/v1/taxonomy/activities",
+            json={
+                "expected_version": initial.json()["version"],
+                "binary_label": "non_fall",
+                "code": "member_label",
+                "name": "Member label",
+            },
+        )
+        assert created.status_code == 200
+        assert created.json()["change"]["actor_unikey"] == "rkim6933"
+        updated = client.patch(
+            "/api/v1/taxonomy/activities/member_label",
+            json={
+                "expected_version": created.json()["version"],
+                "name": "Team label",
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["change"]["operation"] == "update"
+        preview = client.post(
             "/api/v1/taxonomy/migrations/preview",
             json={
-                "expected_version": "1.0.0",
-                "source_code": "standing",
+                "expected_version": updated.json()["version"],
+                "source_code": "member_label",
                 "target_code": "walking",
             },
-        ).status_code == 403
+        )
+        assert preview.status_code == 200
+        migrated = client.post(
+            "/api/v1/taxonomy/migrations/apply",
+            json={
+                "expected_version": updated.json()["version"],
+                "source_code": "member_label",
+                "target_code": "walking",
+                "plan_token": preview.json()["plan_token"],
+                "confirmation": "MIGRATE member_label TO walking",
+            },
+        )
+        assert migrated.status_code == 200
+        assert migrated.json()["taxonomy"]["change"]["actor_unikey"] == "rkim6933"
+        assert migrated.json()["taxonomy"]["change"]["operation"] == "migrate"
+        deleted = client.delete(
+            "/api/v1/taxonomy/activities/member_label",
+            params={
+                "expected_version": migrated.json()["taxonomy"]["version"]
+            },
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["change"]["operation"] == "delete"
+        assert client.post("/api/v1/index/refresh").status_code == 403
 
 
 def test_completed_review_exports_with_its_pinned_taxonomy_version(
@@ -578,7 +670,8 @@ def test_completed_review_exports_with_its_pinned_taxonomy_version(
             binary_label="non_fall",
             code="stair_climbing",
             name="Stair climbing",
-        )
+        ),
+        "xfan0282",
     )
 
     completed = service.update_workflow(
@@ -611,7 +704,8 @@ def test_taxonomy_migration_rebuilds_completed_export_and_disables_source(
             binary_label="non_fall",
             code="upright",
             name="Upright",
-        )
+        ),
+        "xfan0282",
     )
     review = service.review(recording_id)
     service.save_annotations(
@@ -661,7 +755,7 @@ def test_taxonomy_migration_rebuilds_completed_export_and_disables_source(
     assert result["migrated"][0]["export_rebuilt"] is True
     assert result["remaining_usage"] == 0
     assert store.stat(result["receipt_object_key"]) is not None
-    taxonomy = service.taxonomy_admin_summary()
+    taxonomy = service.taxonomy_management_summary()
     standing = next(item for item in taxonomy["non_fall"] if item["code"] == "standing")
     assert standing["active"] is False
 
@@ -688,7 +782,8 @@ def test_taxonomy_migration_rejects_cross_category_and_stale_preview(
             binary_label="non_fall",
             code="upright",
             name="Upright",
-        )
+        ),
+        "xfan0282",
     )
     request = ActivityTaxonomyMigrationPreviewRequest(
         expected_version=created["version"],
@@ -702,7 +797,8 @@ def test_taxonomy_migration_rejects_cross_category_and_stale_preview(
             binary_label="non_fall",
             code="turning",
             name="Turning",
-        )
+        ),
+        "xfan0282",
     )
     with pytest.raises(ObjectConflictError, match="活动标签已经更新"):
         service.apply_taxonomy_migration(

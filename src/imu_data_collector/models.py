@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -10,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 UNIKEY_RE = re.compile(r"^[a-z][a-z0-9]{2,31}$")
+TaxonomyChangeOperation = Literal["seed", "create", "update", "delete", "migrate"]
 
 
 class RecordingState(StrEnum):
@@ -223,6 +225,37 @@ class ActivityTaxonomyEntry(BaseModel):
         return value.strip()
 
 
+class ActivityTaxonomyChange(BaseModel):
+    """创建一个不可变 taxonomy 版本的团队操作。"""
+
+    actor_unikey: str = Field(pattern=r"^[a-z][a-z0-9]{2,31}$")
+    changed_at_utc: datetime
+    operation: TaxonomyChangeOperation
+    source_code: str | None = Field(
+        default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    target_code: str | None = Field(
+        default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+
+    @field_validator("changed_at_utc")
+    @classmethod
+    def normalize_changed_at_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("changed_at_utc must include a timezone")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def validate_codes(self) -> ActivityTaxonomyChange:
+        if self.operation != "seed" and self.source_code is None:
+            raise ValueError("taxonomy change requires source_code")
+        if self.operation == "migrate" and self.target_code is None:
+            raise ValueError("taxonomy migration change requires target_code")
+        if self.operation != "migrate" and self.target_code is not None:
+            raise ValueError("target_code is only valid for taxonomy migration")
+        return self
+
+
 class ActivityTaxonomyDefinition(BaseModel):
     """一个不可变的活动分类表版本。"""
 
@@ -231,6 +264,7 @@ class ActivityTaxonomyDefinition(BaseModel):
     revision: int = Field(default=1, ge=1)
     fall: list[ActivityTaxonomyEntry] = Field(min_length=1)
     non_fall: list[ActivityTaxonomyEntry] = Field(min_length=1)
+    change: ActivityTaxonomyChange | None = None
 
     @model_validator(mode="after")
     def validate_unique_codes(self) -> ActivityTaxonomyDefinition:
