@@ -180,9 +180,10 @@ class LocalFilesystemStore:
             f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
         )
         try:
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
+            temporary.write_bytes(
+                (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+                    "utf-8"
+                )
             )
             temporary.replace(path)
         finally:

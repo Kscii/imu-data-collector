@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from imu_data_collector import model_catalog as model_catalog_module
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.config import AnnotationSettings, Settings, StorageSettings
 from imu_data_collector.model_catalog import ModelCatalog
@@ -178,7 +179,10 @@ def _install_model(store: LocalFilesystemStore, tmp_path: Path) -> str:
     return release_id
 
 
-def test_model_catalog_lists_downloads_and_admin_deprecates(tmp_path: Path) -> None:
+def test_model_catalog_lists_downloads_and_admin_deprecates(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(model_catalog_module.time, "monotonic", lambda: 30.0)
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     run_id = _install_experiment(store, tmp_path)
@@ -188,6 +192,7 @@ def test_model_catalog_lists_downloads_and_admin_deprecates(tmp_path: Path) -> N
     with TestClient(app) as client:
         catalog = client.get("/api/v1/model-catalog")
         detail = client.get(f"/api/v1/model-catalog/experiment/{run_id}")
+        assert detail.status_code == 200, detail.json()
         partial = client.get(
             f"/api/v1/model-catalog/experiment/{run_id}/files/onnx-model-fold0/download",
             headers={"Range": "bytes=1-2"},

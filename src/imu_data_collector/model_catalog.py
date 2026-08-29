@@ -49,7 +49,7 @@ class ModelCatalog:
         self.store = store
         self.cache_ttl_s = cache_ttl_s
         self._lock = threading.Lock()
-        self._loaded_at = 0.0
+        self._loaded_at: float | None = None
         self._entries: dict[tuple[PublicationKind, str], dict[str, Any]] = {}
         self._errors: list[dict[str, str]] = []
 
@@ -224,7 +224,11 @@ class ModelCatalog:
     def refresh(self, *, force: bool = False) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
-            if not force and now - self._loaded_at < self.cache_ttl_s:
+            if (
+                self._loaded_at is not None
+                and not force
+                and now - self._loaded_at < self.cache_ttl_s
+            ):
                 return self.summary(refresh=False)
             entries: dict[tuple[PublicationKind, str], dict[str, Any]] = {}
             errors: list[dict[str, str]] = []
@@ -253,7 +257,10 @@ class ModelCatalog:
             return self.summary(refresh=False)
 
     def _ensure(self) -> None:
-        if time.monotonic() - self._loaded_at >= self.cache_ttl_s:
+        if (
+            self._loaded_at is None
+            or time.monotonic() - self._loaded_at >= self.cache_ttl_s
+        ):
             self.refresh()
 
     @staticmethod
@@ -302,7 +309,7 @@ class ModelCatalog:
         return {
             "schema_version": "imu_model_catalog_api_v1",
             "cache_ttl_s": self.cache_ttl_s,
-            "loaded": bool(self._loaded_at),
+            "loaded": self._loaded_at is not None,
             "experiments": [item for item in entries if item["kind"] == "experiment"],
             "models": [item for item in entries if item["kind"] == "model"],
             "invalid_publications": list(self._errors),
