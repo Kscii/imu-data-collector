@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 UNIKEY_RE = re.compile(r"^[a-z][a-z0-9]{2,31}$")
 
@@ -201,12 +201,26 @@ class AnnotationDocument(BaseModel):
 
 
 class ActivityTaxonomyEntry(BaseModel):
-    """可持久化、可停用的活动标签。"""
+    """以稳定 code 标识、以可修改 name 展示的活动标签。"""
 
+    model_config = ConfigDict(extra="ignore")
     code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
-    display_name_zh: str = Field(min_length=1, max_length=80)
-    display_name_en: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=80)
     active: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def fill_legacy_name(cls, value: object) -> object:
+        """旧 taxonomy 没有 name 时用 code 显示，但不改写历史对象。"""
+
+        if isinstance(value, dict) and not str(value.get("name", "")).strip():
+            return {**value, "name": value.get("code", "")}
+        return value
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return value.strip()
 
 
 class ActivityTaxonomyDefinition(BaseModel):
@@ -230,25 +244,46 @@ class ActivityTaxonomyCreateRequest(BaseModel):
     expected_version: str = Field(min_length=1, max_length=80)
     binary_label: BinaryLabel
     code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
-    display_name_zh: str = Field(min_length=1, max_length=80)
-    display_name_en: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return value.strip()
 
 
 class ActivityTaxonomyUpdateRequest(BaseModel):
     expected_version: str = Field(min_length=1, max_length=80)
-    display_name_zh: str | None = Field(default=None, min_length=1, max_length=80)
-    display_name_en: str | None = Field(default=None, min_length=1, max_length=80)
+    name: str | None = Field(default=None, min_length=1, max_length=80)
     active: bool | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
     @model_validator(mode="after")
     def validate_change(self) -> ActivityTaxonomyUpdateRequest:
-        if (
-            self.display_name_zh is None
-            and self.display_name_en is None
-            and self.active is None
-        ):
+        if self.name is None and self.active is None:
             raise ValueError("taxonomy update requires at least one change")
         return self
+
+
+class ActivityTaxonomyMigrationPreviewRequest(BaseModel):
+    expected_version: str = Field(min_length=1, max_length=80)
+    source_code: str = Field(
+        min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    target_code: str = Field(
+        min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+
+
+class ActivityTaxonomyMigrationApplyRequest(
+    ActivityTaxonomyMigrationPreviewRequest
+):
+    plan_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation: str = Field(min_length=1, max_length=160)
 
 
 class SyncAnchor(BaseModel):

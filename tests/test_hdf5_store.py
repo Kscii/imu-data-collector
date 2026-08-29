@@ -42,8 +42,8 @@ def taxonomy() -> dict:
     return {
         "taxonomy_id": "fall_binary_v1",
         "version": "1.0.0",
-        "fall": [{"code": "forward_fall", "display_name_zh": "向前跌倒"}],
-        "non_fall": [{"code": "walking", "display_name_zh": "行走"}],
+        "fall": [{"code": "forward_fall"}],
+        "non_fall": [{"code": "walking"}],
     }
 
 

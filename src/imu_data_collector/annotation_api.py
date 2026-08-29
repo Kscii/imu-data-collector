@@ -28,6 +28,8 @@ from imu_data_collector.dataset_catalog import DatasetCatalog
 from imu_data_collector.host import resource_path
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
+    ActivityTaxonomyMigrationApplyRequest,
+    ActivityTaxonomyMigrationPreviewRequest,
     ActivityTaxonomyUpdateRequest,
     AnnotationRecordingDeleteRequest,
     AnnotationReviewWorkflowRequest,
@@ -305,6 +307,36 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
+    @app.post("/api/v1/taxonomy/migrations/preview")
+    def preview_taxonomy_migration(
+        body: ActivityTaxonomyMigrationPreviewRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        admin_actor(request)
+        try:
+            return service.preview_taxonomy_migration(body)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到源标签或目标标签") from error
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/taxonomy/migrations/apply")
+    def apply_taxonomy_migration(
+        body: ActivityTaxonomyMigrationApplyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = admin_actor(request)
+        try:
+            return service.apply_taxonomy_migration(body, actor.unikey)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到源标签或目标标签") from error
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
     @app.post("/api/v1/index/refresh")
     def refresh(request: Request) -> dict[str, Any]:
         admin_actor(request)
@@ -361,6 +393,15 @@ def create_annotation_app(
         return StreamingResponse(
             stream(), status_code=status_code, media_type="video/mp4", headers=headers
         )
+
+    @app.get("/api/v1/calibration-evidence/{recording_id}/analysis")
+    def calibration_evidence_analysis(recording_id: str) -> dict[str, Any]:
+        try:
+            return service.calibration_evidence_analysis(recording_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该校准证据") from error
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/v1/calibration-evidence/{recording_id}/capture-h5/download")
     def calibration_evidence_h5(recording_id: str) -> StreamingResponse:

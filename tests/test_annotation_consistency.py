@@ -24,6 +24,9 @@ from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
     ActivityTaxonomyCreateRequest,
+    ActivityTaxonomyEntry,
+    ActivityTaxonomyMigrationApplyRequest,
+    ActivityTaxonomyMigrationPreviewRequest,
     ActivityTaxonomyUpdateRequest,
     AnnotationDocument,
     AnnotationReviewWorkflowRequest,
@@ -36,7 +39,7 @@ from imu_data_collector.models import (
     SyncAnchor,
     SyncDocument,
 )
-from imu_data_collector.storage import LocalFilesystemStore
+from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 
 
 class FailOnceSnapshotManifestStore(LocalFilesystemStore):
@@ -154,10 +157,11 @@ def _publish_calibrated_recording(
         samples.create_dataset("time_monotonic_ns", data=10_000_000_000 + times)
         samples.create_dataset("raw_counts", data=raw)
         samples.create_dataset("values_si", data=raw.astype(np.float32))
+        samples.create_dataset("trailer", data=np.zeros((50, 4), dtype=np.uint8))
         frames = handle.create_group("video").create_group("frames")
-        frames.create_dataset(
-            "recording_time_ns", data=np.arange(60, dtype=np.int64) * 33_333_333
-        )
+        frame_times = np.arange(60, dtype=np.int64) * 33_333_333
+        frames.create_dataset("recording_time_ns", data=frame_times)
+        frames.create_dataset("media_time_ns", data=frame_times)
 
     paths = {
         "capture_h5": h5_path,
@@ -250,7 +254,7 @@ def _ready_review(service, recording_id: str) -> None:
     )
     annotations = AnnotationDocument(
         taxonomy_id="fall_binary_v1",
-        taxonomy_version="1.0.0",
+        taxonomy_version=service.taxonomy["version"],
         finalized=True,
         segments=[
             ActivitySegment(
@@ -288,8 +292,7 @@ def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> Non
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     recording_id = _publish_calibrated_recording(settings, store, tmp_path)
-    app = create_annotation_app(settings, store)
-    service = app.state.annotation_service
+    service = create_annotation_app(settings, store).state.annotation_service
     assert service.refresh() == {
         "imported": 1,
         "unchanged": 0,
@@ -392,6 +395,12 @@ def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None
         )
 
 
+def test_legacy_taxonomy_entry_without_name_uses_code_for_display() -> None:
+    entry = ActivityTaxonomyEntry.model_validate({"code": "walking"})
+
+    assert entry.name == "walking"
+
+
 def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
@@ -406,11 +415,13 @@ def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) ->
             expected_version=initial["version"],
             binary_label="non_fall",
             code="stair_climbing",
-            display_name_zh="上下楼梯",
-            display_name_en="Stair climbing",
+            name="Stair climbing",
         )
     )
     assert created["version"] != initial["version"]
+    assert next(
+        item for item in created["non_fall"] if item["code"] == "stair_climbing"
+    )["name"] == "Stair climbing"
     assert service.taxonomy_definition(initial["version"]) == initial
 
     review = service.update_workflow(
@@ -446,9 +457,14 @@ def test_taxonomy_management_versions_and_protects_used_codes(tmp_path: Path) ->
     disabled = service.update_taxonomy_activity(
         "stair_climbing",
         ActivityTaxonomyUpdateRequest(
-            expected_version=created["version"], active=False
+            expected_version=created["version"],
+            name="Stairs",
+            active=False,
         ),
     )
+    assert next(
+        item for item in disabled["non_fall"] if item["code"] == "stair_climbing"
+    )["name"] == "Stairs"
     current_review = service.review(recording_id)
     retained = saved.model_copy(update={"revision": saved.revision + 1})
     assert service.save_annotations(
@@ -500,11 +516,20 @@ def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) 
                 "expected_version": version,
                 "binary_label": "non_fall",
                 "code": "stair_climbing",
-                "display_name_zh": "上下楼梯",
-                "display_name_en": "Stair climbing",
+                "name": "Stair climbing",
             },
         )
         assert created.status_code == 200
+        preview = client.post(
+            "/api/v1/taxonomy/migrations/preview",
+            json={
+                "expected_version": created.json()["version"],
+                "source_code": "standing",
+                "target_code": "stair_climbing",
+            },
+        )
+        assert preview.status_code == 200
+        assert preview.json()["affected_recordings"] == 0
         conflict = client.patch(
             "/api/v1/taxonomy/activities/stair_climbing",
             json={"expected_version": version, "active": False},
@@ -526,6 +551,14 @@ def test_taxonomy_admin_api_requires_admin_and_detects_conflict(tmp_path: Path) 
     with TestClient(member_app) as client:
         assert client.get("/api/v1/taxonomy").status_code == 200
         assert client.get("/api/v1/taxonomy/admin").status_code == 403
+        assert client.post(
+            "/api/v1/taxonomy/migrations/preview",
+            json={
+                "expected_version": "1.0.0",
+                "source_code": "standing",
+                "target_code": "walking",
+            },
+        ).status_code == 403
 
 
 def test_completed_review_exports_with_its_pinned_taxonomy_version(
@@ -544,8 +577,7 @@ def test_completed_review_exports_with_its_pinned_taxonomy_version(
             expected_version=current["version"],
             binary_label="non_fall",
             code="stair_climbing",
-            display_name_zh="上下楼梯",
-            display_name_en="Stair climbing",
+            name="Stair climbing",
         )
     )
 
@@ -561,6 +593,188 @@ def test_completed_review_exports_with_its_pinned_taxonomy_version(
     assert completed.active_export is not None
     assert completed.annotations.taxonomy_version == original_version
     assert completed.annotations.taxonomy_version != service.taxonomy["version"]
+
+
+def test_taxonomy_migration_rebuilds_completed_export_and_disables_source(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    _ready_review(service, recording_id)
+    current = service.taxonomy_definition()
+    created = service.create_taxonomy_activity(
+        ActivityTaxonomyCreateRequest(
+            expected_version=current["version"],
+            binary_label="non_fall",
+            code="upright",
+            name="Upright",
+        )
+    )
+    review = service.review(recording_id)
+    service.save_annotations(
+        recording_id,
+        review.annotations.model_copy(
+            update={"revision": review.annotations.revision + 1}
+        ),
+        "xfan0282",
+        review.revision,
+    )
+    completed = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete",
+            expected_revision=service.review(recording_id).revision,
+        ),
+        "xfan0282",
+    )
+    assert completed.active_export is not None
+    previous_export = completed.active_export
+
+    preview_request = ActivityTaxonomyMigrationPreviewRequest(
+        expected_version=created["version"],
+        source_code="standing",
+        target_code="upright",
+    )
+    preview = service.preview_taxonomy_migration(preview_request)
+    assert preview["affected_recordings"] == 1
+    assert preview["affected_segments"] == 1
+    result = service.apply_taxonomy_migration(
+        ActivityTaxonomyMigrationApplyRequest(
+            **preview_request.model_dump(),
+            plan_token=preview["plan_token"],
+            confirmation="MIGRATE standing TO upright",
+        ),
+        "xfan0282",
+    )
+
+    migrated = service.review(recording_id)
+    assert migrated.workflow.state == ReviewWorkflowState.COMPLETED
+    assert migrated.annotations.segments[0].activity_code == "upright"
+    assert migrated.active_export is not None
+    assert migrated.active_export.object_key != previous_export.object_key
+    assert migrated.active_export.logical_content_sha256 != (
+        previous_export.logical_content_sha256
+    )
+    assert result["migrated"][0]["export_rebuilt"] is True
+    assert result["remaining_usage"] == 0
+    assert store.stat(result["receipt_object_key"]) is not None
+    taxonomy = service.taxonomy_admin_summary()
+    standing = next(item for item in taxonomy["non_fall"] if item["code"] == "standing")
+    assert standing["active"] is False
+
+
+def test_taxonomy_migration_rejects_cross_category_and_stale_preview(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    service = create_annotation_app(settings, store).state.annotation_service
+    current = service.taxonomy_definition()
+    with pytest.raises(ValueError, match="同一跌倒类型"):
+        service.preview_taxonomy_migration(
+            ActivityTaxonomyMigrationPreviewRequest(
+                expected_version=current["version"],
+                source_code="standing",
+                target_code="forward_fall",
+            )
+        )
+
+    created = service.create_taxonomy_activity(
+        ActivityTaxonomyCreateRequest(
+            expected_version=current["version"],
+            binary_label="non_fall",
+            code="upright",
+            name="Upright",
+        )
+    )
+    request = ActivityTaxonomyMigrationPreviewRequest(
+        expected_version=created["version"],
+        source_code="standing",
+        target_code="upright",
+    )
+    preview = service.preview_taxonomy_migration(request)
+    service.create_taxonomy_activity(
+        ActivityTaxonomyCreateRequest(
+            expected_version=created["version"],
+            binary_label="non_fall",
+            code="turning",
+            name="Turning",
+        )
+    )
+    with pytest.raises(ObjectConflictError, match="活动标签已经更新"):
+        service.apply_taxonomy_migration(
+            ActivityTaxonomyMigrationApplyRequest(
+                **request.model_dump(),
+                plan_token=preview["plan_token"],
+                confirmation="MIGRATE standing TO upright",
+            ),
+            "xfan0282",
+        )
+
+
+def test_calibration_evidence_analysis_preserves_raw_and_derives_si(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    app = create_annotation_app(settings, store)
+    service = app.state.annotation_service
+    profile_id = str(service.calibration_evidence["profile_id"])
+    service.calibration_recording_ids.add(recording_id)
+    source = tmp_path / "source" / "capture.h5"
+    digest = sha256_file(source)
+    object_key = f"calibration-evidence/{profile_id}/{recording_id}/capture.h5"
+    info = store.put_file(
+        source,
+        object_key,
+        content_type="application/x-hdf5",
+        metadata={"sha256": digest},
+    )
+    store.write_json(
+        service._calibration_manifest_key(profile_id, recording_id),
+        {
+            "schema_version": "1.0.0",
+            "profile_id": profile_id,
+            "recording_id": recording_id,
+            "artifacts": [
+                {
+                    "role": "capture_h5",
+                    "filename": "capture.h5",
+                    "object_key": object_key,
+                    "size_bytes": info.size_bytes,
+                    "sha256": digest,
+                    "content_type": "application/x-hdf5",
+                }
+            ],
+        },
+        if_generation_match=0,
+    )
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/calibration-evidence/{recording_id}/analysis"
+        )
+        assert response.status_code == 200
+        result = response.json()
+
+    assert result["conversion"]["available"] is True
+    assert result["conversion"]["source"] == "runtime_authoritative_profile"
+    assert result["imu"]["raw_counts"][0] == [0, 1, 4096, 3, 4, 5]
+    assert len(result["imu"]["values_si"]) == 50
+    assert result["imu"]["frame_hex"][0].startswith("00 00 00 01 10 00")
+    assert result["video"]["media_time_ns"] == result["video"]["recording_time_ns"]
+
+    settings.imu.calibration_evidence_sha256 = "0" * 64
+    degraded = service.calibration_evidence_analysis(recording_id)
+    assert degraded["conversion"]["available"] is False
+    assert degraded["imu"]["values_si"] == []
+    assert degraded["imu"]["raw_counts"] == result["imu"]["raw_counts"]
 
 
 def test_configured_evidence_hash_must_match_actual_file(tmp_path: Path) -> None:
