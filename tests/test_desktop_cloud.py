@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import imu_data_collector.broker_client as broker_client
+import imu_data_collector.build_info as build_info
 import imu_data_collector.desktop_auth as desktop_auth
 from imu_data_collector import upload_broker
 from imu_data_collector.config import (
@@ -25,6 +26,15 @@ from imu_data_collector.config import (
 )
 from imu_data_collector.desktop_auth import DesktopOAuthManager
 from imu_data_collector.models import ArtifactDescriptor, CaptureManifestV2
+
+
+def test_pyinstaller_bundles_every_build_id_source() -> None:
+    spec = Path("packaging/imu_collector.spec").read_text(encoding="utf-8")
+    for source in {
+        *build_info._CAPTURE_API_SOURCES,
+        *build_info._ANNOTATION_API_SOURCES,
+    }:
+        assert f'"{source}"' in spec
 
 
 def _test_id_token(email: str) -> str:
