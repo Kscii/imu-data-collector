@@ -61,6 +61,7 @@ from imu_data_collector.models import (
     ReviewDocument,
     ReviewWorkflowState,
     SyncDocument,
+    TaxonomyChangeOperation,
     TrainingExportReference,
 )
 from imu_data_collector.review import ReviewConflictError, workflow_with_timestamp
@@ -145,7 +146,7 @@ class AnnotationService:
                 usage[segment.activity_code] = usage.get(segment.activity_code, 0) + 1
         return usage
 
-    def taxonomy_admin_summary(self) -> dict[str, Any]:
+    def taxonomy_management_summary(self) -> dict[str, Any]:
         definition = self.taxonomy_definition()
         usage = self._taxonomy_usage()
         return {
@@ -161,7 +162,7 @@ class AnnotationService:
         }
 
     def create_taxonomy_activity(
-        self, request: ActivityTaxonomyCreateRequest
+        self, request: ActivityTaxonomyCreateRequest, actor_id: str
     ) -> dict[str, Any]:
         def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
             if any(
@@ -176,11 +177,23 @@ class AnnotationService:
             )
 
         return self._publish_taxonomy(
-            self.taxonomies.mutate(request.expected_version, update)
+            self.taxonomies.mutate(
+                request.expected_version,
+                update,
+                actor_unikey=actor_id,
+                operation="create",
+                source_code=request.code,
+            )
         )
 
     def update_taxonomy_activity(
-        self, code: str, request: ActivityTaxonomyUpdateRequest
+        self,
+        code: str,
+        request: ActivityTaxonomyUpdateRequest,
+        actor_id: str,
+        *,
+        operation: TaxonomyChangeOperation = "update",
+        target_code: str | None = None,
     ) -> dict[str, Any]:
         def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
             found = False
@@ -210,10 +223,19 @@ class AnnotationService:
             return current.model_copy(update=updated)
 
         return self._publish_taxonomy(
-            self.taxonomies.mutate(request.expected_version, update)
+            self.taxonomies.mutate(
+                request.expected_version,
+                update,
+                actor_unikey=actor_id,
+                operation=operation,
+                source_code=code,
+                target_code=target_code,
+            )
         )
 
-    def delete_taxonomy_activity(self, code: str, expected_version: str) -> dict[str, Any]:
+    def delete_taxonomy_activity(
+        self, code: str, expected_version: str, actor_id: str
+    ) -> dict[str, Any]:
         usage = self._taxonomy_usage().get(code, 0)
         if usage:
             raise ValueError(f"活动标签已被 {usage} 个区间使用，只能停用")
@@ -233,7 +255,13 @@ class AnnotationService:
             return current.model_copy(update=updated)
 
         return self._publish_taxonomy(
-            self.taxonomies.mutate(expected_version, update)
+            self.taxonomies.mutate(
+                expected_version,
+                update,
+                actor_unikey=actor_id,
+                operation="delete",
+                source_code=code,
+            )
         )
 
     @staticmethod
@@ -343,6 +371,9 @@ class AnnotationService:
                     ActivityTaxonomyUpdateRequest(
                         expected_version=definition["version"], active=False
                     ),
+                    actor_id,
+                    operation="migrate",
+                    target_code=request.target_code,
                 )
 
             migrated: list[dict[str, Any]] = []
@@ -469,7 +500,7 @@ class AnnotationService:
             return {
                 **receipt,
                 "receipt_object_key": receipt_key,
-                "taxonomy": self.taxonomy_admin_summary(),
+                "taxonomy": self.taxonomy_management_summary(),
             }
 
     @contextmanager

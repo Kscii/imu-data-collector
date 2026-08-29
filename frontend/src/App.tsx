@@ -226,6 +226,15 @@ type Taxonomy = {
   revision: number;
   fall: TaxonomyEntry[];
   non_fall: TaxonomyEntry[];
+  change?: TaxonomyChange | null;
+};
+
+type TaxonomyChange = {
+  actor_unikey: string;
+  changed_at_utc: string;
+  operation: "seed" | "create" | "update" | "delete" | "migrate";
+  source_code: string | null;
+  target_code: string | null;
 };
 
 type TaxonomyEntry = {
@@ -787,12 +796,6 @@ export default function App() {
   }, [annotationApplication]);
 
   useEffect(() => {
-    if (annotationApplication && session && tab === "taxonomy" && !session.is_admin) {
-      selectTab("annotate");
-    }
-  }, [annotationApplication, session, tab]);
-
-  useEffect(() => {
     if (annotationApplication) return;
     sessionStorage.setItem(
       CAPTURE_FORM_KEY,
@@ -1028,7 +1031,7 @@ export default function App() {
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button>{session?.is_admin && <button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button>}<button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button></> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button></> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
           {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
@@ -1079,7 +1082,7 @@ export default function App() {
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} onChanged={refreshRecordings} />
       )}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
-      {annotationApplication && tab === "taxonomy" && taxonomy && session?.is_admin && <TaxonomyAdminPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
+      {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
       {!annotationApplication && tab === "library" && <CaptureLibrary
@@ -1351,7 +1354,7 @@ function Metric({ label, value, warn = false }: { label: string; value: string |
   return <div className={`metric ${warn ? "warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
+function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
   const [definition, setDefinition] = useState<Taxonomy>(taxonomy);
   const [editingCode, setEditingCode] = useState("");
   const [binaryLabel, setBinaryLabel] = useState<"fall" | "non_fall">("non_fall");
@@ -1366,7 +1369,7 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
   const [message, setMessage] = useState("");
 
   const refresh = async () => {
-    const value = await api<Taxonomy>("/api/v1/taxonomy/admin");
+    const value = await api<Taxonomy>("/api/v1/taxonomy/manage");
     setDefinition(value);
     onChanged(value);
     return value;
@@ -1426,6 +1429,18 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
     } finally {
       setBusy("");
     }
+  };
+
+  const toggleActivity = async (entry: TaxonomyEntry, changes: { active: boolean }): Promise<boolean> => {
+    if (entry.active && changes.active === false) {
+      const usage = entry.usage_count ?? 0;
+      const confirmed = window.confirm(tr(
+        `停用活动标签 ${entry.name}（${entry.code}）？\n当前被 ${usage} 个区间使用。停用后不能用于新标注，历史标注不受影响。`,
+        `Disable ${entry.name} (${entry.code})?\nIt is currently used by ${usage} intervals. It cannot be selected for new annotations after being disabled; historical annotations are unchanged.`,
+      ));
+      if (!confirmed) return false;
+    }
+    return updateActivity(entry, changes);
   };
 
   const deleteActivity = async (entry: TaxonomyEntry) => {
@@ -1530,7 +1545,7 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
   const taxonomyGroup = (label: "fall" | "non_fall") => {
     const active = definition[label].filter((entry) => entry.active);
     const inactive = definition[label].filter((entry) => !entry.active);
-    const taxonomyRow = (entry: TaxonomyEntry) => <TaxonomyAdminRow
+    const taxonomyRow = (entry: TaxonomyEntry) => <TaxonomyManagementRow
       key={entry.code}
       entry={entry}
       editing={editingCode === entry.code}
@@ -1543,7 +1558,7 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
         if (updated) setEditingCode("");
         return updated;
       }}
-      onToggle={updateActivity}
+      onToggle={toggleActivity}
       onDelete={deleteActivity}
     />;
     return <section className="panel taxonomy-group" key={label}>
@@ -1556,12 +1571,27 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
     </section>;
   };
 
+  const changeOperation = definition.change
+    ? {
+      seed: tr("初始化", "Seeded"),
+      create: tr("新增标签", "Created a label"),
+      update: tr("更新标签", "Updated a label"),
+      delete: tr("删除标签", "Deleted a label"),
+      migrate: tr("迁移标签", "Migrated a label"),
+    }[definition.change.operation]
+    : "";
+  const changeCodes = definition.change?.target_code
+    ? `${definition.change.source_code} → ${definition.change.target_code}`
+    : definition.change?.source_code ?? "";
+
   return <main className="taxonomy-admin">
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel taxonomy-intro">
-      <div><div className="panel-title">活动标签管理</div><strong>当前版本 {definition.version}</strong><p className="stage-help">code 是不可修改的机器标识，name 是标注页面使用的可修改显示名称。历史版本和训练快照保持不可变。</p></div>
-      <span className="state">仅管理员</span>
+      <div><div className="panel-title">活动标签管理</div><strong>当前版本 {definition.version}</strong><p className="stage-help">code 是不可修改的机器标识，name 是标注页面使用的可修改显示名称。历史版本和训练快照保持不可变。</p>{definition.change
+        ? <p className="stage-help">{tr("最近变更", "Last change")} · {definition.change.actor_unikey} · {changeOperation}{changeCodes ? ` · ${changeCodes}` : ""} · {new Date(definition.change.changed_at_utc).toLocaleString()}</p>
+        : <p className="stage-help">{tr("历史版本暂无操作者记录", "No actor record is available for this legacy version")}</p>}</div>
+      <span className="state">团队成员同权</span>
     </section>
     <section className="panel taxonomy-create">
       <div className="panel-title">新增活动标签</div>
@@ -1592,7 +1622,7 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
   </main>;
 }
 
-function TaxonomyAdminRow({ entry, editing, editBlocked, busy, onStartEdit, onCancelEdit, onSaveName, onToggle, onDelete }: {
+function TaxonomyManagementRow({ entry, editing, editBlocked, busy, onStartEdit, onCancelEdit, onSaveName, onToggle, onDelete }: {
   entry: TaxonomyEntry;
   editing: boolean;
   editBlocked: boolean;
@@ -1600,7 +1630,7 @@ function TaxonomyAdminRow({ entry, editing, editBlocked, busy, onStartEdit, onCa
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSaveName: (entry: TaxonomyEntry, name: string) => Promise<boolean>;
-  onToggle: (entry: TaxonomyEntry, changes: { name?: string; active?: boolean }) => Promise<boolean>;
+  onToggle: (entry: TaxonomyEntry, changes: { active: boolean }) => Promise<boolean>;
   onDelete: (entry: TaxonomyEntry) => Promise<void>;
 }) {
   const [draftName, setDraftName] = useState(entry.name);
