@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -326,6 +328,11 @@ class _FakeBlob:
         assert self.content is not None
         return self.content
 
+    def open(self, mode: str):
+        assert mode == "rb"
+        assert self.content is not None
+        return io.BytesIO(self.content)
+
     def create_resumable_upload_session(self, **_kwargs) -> str:
         return f"https://storage.example/{self.name}"
 
@@ -533,3 +540,131 @@ def test_upload_broker_requires_whitelisted_google_identity(monkeypatch, tmp_pat
         for item in payload["sessions"]
     )
     assert bucket.blob(f"_upload_sessions/{payload['upload_id']}.json").exists(None)
+
+
+def _model_package_request() -> tuple[dict, dict[str, bytes]]:
+    prefix = "benchmark-models/packages/threshold-impact-deadbeef0000"
+    payloads = {"bundle": b"bundle", "model": b"onnx"}
+    descriptors = [
+        {
+            "file_id": "bundle",
+            "object_key": f"{prefix}/package.tar.gz",
+            "size_bytes": len(payloads["bundle"]),
+            "sha256": hashlib.sha256(payloads["bundle"]).hexdigest(),
+            "content_type": "application/gzip",
+        },
+        {
+            "file_id": "model",
+            "object_key": f"{prefix}/files/model.onnx",
+            "size_bytes": len(payloads["model"]),
+            "sha256": hashlib.sha256(payloads["model"]).hexdigest(),
+            "content_type": "application/octet-stream",
+        },
+    ]
+    marker = {
+        "schema_version": "imu_model_package_publication_v1",
+        "package_id": "threshold-impact-deadbeef0000",
+        "created_at_utc": "2026-08-29T00:00:00+00:00",
+        "logical_digest": "d" * 64,
+        "manifest": {"model_code": "threshold-impact"},
+        "bundle": {
+            "filename": "package.tar.gz",
+            "size_bytes": descriptors[0]["size_bytes"],
+            "sha256": descriptors[0]["sha256"],
+        },
+        "files": [
+            {
+                "file_id": "model",
+                "filename": "model.onnx",
+                "object_key": descriptors[1]["object_key"],
+                "size_bytes": descriptors[1]["size_bytes"],
+                "sha256": descriptors[1]["sha256"],
+                "content_type": "application/octet-stream",
+            }
+        ],
+    }
+    return {
+        "publication_kind": "package",
+        "publication_id": "threshold-impact-deadbeef0000",
+        "marker": marker,
+        "artifacts": descriptors,
+    }, payloads
+
+
+def test_model_broker_constrains_keys_verifies_payload_and_writes_marker_last(
+    monkeypatch, tmp_path
+) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    request, payloads = _model_package_request()
+    headers = {"Authorization": "Bearer gcloud-signed-id-token"}
+    with TestClient(app) as client:
+        started = client.post("/v1/model-uploads", json=request, headers=headers)
+        assert started.status_code == 200, started.json()
+        plan = started.json()
+        assert not bucket.blob(
+            "benchmark-models/packages/threshold-impact-deadbeef0000/publication.json"
+        ).exists(None)
+        for session in plan["sessions"]:
+            blob = bucket.blob(session["object_key"])
+            blob.content = payloads[session["file_id"]]
+            blob.size = len(blob.content)
+            blob.generation = 1
+        completed = client.post(
+            "/v1/model-uploads/complete",
+            json={"upload_id": plan["upload_id"]},
+            headers=headers,
+        )
+        state = bucket.blob(
+            "benchmark-models/packages/threshold-impact-deadbeef0000/state.json"
+        )
+        marker = bucket.blob(
+            "benchmark-models/packages/threshold-impact-deadbeef0000/publication.json"
+        )
+        restored = client.post(
+            "/v1/model-publications/package/threshold-impact-deadbeef0000/restore",
+            json={"expected_generation": 1},
+            headers=headers,
+        )
+
+    assert completed.status_code == 200, completed.json()
+    assert state.exists(None)
+    assert marker.exists(None)
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["history"][-1]["action"] == "restore"
+
+
+def test_model_broker_rejects_caller_selected_object_key(monkeypatch, tmp_path) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    request, _payloads = _model_package_request()
+    request["artifacts"][1]["object_key"] = "captures/other/manifest.json"
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/model-uploads",
+            json=request,
+            headers={"Authorization": "Bearer gcloud-signed-id-token"},
+        )
+
+    assert response.status_code == 422
+    assert "推导结果" in response.json()["detail"]

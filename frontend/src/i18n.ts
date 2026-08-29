@@ -442,6 +442,7 @@ const translations: Record<string, string> = {
   "当前训练快照": "Current training snapshot",
   "历史训练快照": "Historical training snapshot",
   "数据集": "Datasets",
+  "模型": "Models",
   "只读数据集目录": "Read-only dataset catalog",
   "这里展示 benchmark 当前版本和不可变历史版本。网页下载适合检查单个文件；正式训练仍推荐在 benchmark 仓库运行 ./benchmark data pull，由命令统一校验并原子激活。": "This page shows the current benchmark datasets and immutable historical versions. Browser downloads are intended for inspecting individual files. For training, run ./benchmark data pull in the benchmark repository so the command can validate and atomically activate the full snapshot.",
   "正在刷新": "Refreshing",

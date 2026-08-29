@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -67,3 +67,58 @@ class BrokerUploadCompleteResponse(BaseModel):
     recording_id: str
     manifest_generation: int
     verified_sha256: bool = True
+
+
+class ModelArtifactDescriptor(BaseModel):
+    """Benchmark publisher requests only these immutable objects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+    object_key: str = Field(min_length=1, max_length=1024)
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_type: str = Field(min_length=1, max_length=128)
+
+
+class ModelUploadStartRequest(BaseModel):
+    """Immutable model/result payload and the marker written after verification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    publication_kind: Literal["experiment", "package"]
+    publication_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+    marker: dict[str, Any]
+    artifacts: list[ModelArtifactDescriptor] = Field(min_length=1)
+
+
+class ModelArtifactSession(BaseModel):
+    file_id: str
+    object_key: str
+    session_url: str | None = None
+    already_present: bool = False
+
+
+class ModelUploadStartResponse(BaseModel):
+    upload_id: str
+    sessions: list[ModelArtifactSession]
+
+
+class ModelUploadCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upload_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class ModelUploadCompleteResponse(BaseModel):
+    publication_kind: Literal["experiment", "package"]
+    publication_id: str
+    marker_object: str
+    marker_generation: int
+    verified_sha256: bool = True
+
+
+class ModelPublicationRestoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_generation: int = Field(gt=0)

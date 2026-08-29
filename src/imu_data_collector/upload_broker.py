@@ -10,14 +10,15 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Annotated, Any
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import requests
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
+from google.api_core.exceptions import PreconditionFailed
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import storage
 from google.oauth2 import id_token as google_id_token
@@ -30,10 +31,37 @@ from imu_data_collector.broker_models import (
     BrokerUploadCompleteResponse,
     BrokerUploadStartRequest,
     BrokerUploadStartResponse,
+    ModelArtifactSession,
+    ModelPublicationRestoreRequest,
+    ModelUploadCompleteRequest,
+    ModelUploadCompleteResponse,
+    ModelUploadStartRequest,
+    ModelUploadStartResponse,
 )
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
 from imu_data_collector.models import CaptureManifestV2
+
+EXPERIMENT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
+PACKAGE_PUBLICATION_SCHEMA = "imu_model_package_publication_v1"
+MODEL_STATE_SCHEMA = "imu_model_publication_state_v1"
+EXPERIMENT_PREFIXES = {
+    "formal_cv": "benchmark-results/temporal-core",
+    "engineering": "benchmark-results/engineering",
+}
+PACKAGE_PREFIX = "benchmark-models/packages"
+MODEL_CONTENT_TYPES = {
+    "application/gzip",
+    "application/json",
+    "application/json; charset=utf-8",
+    "application/octet-stream",
+    "text/csv",
+    "text/markdown",
+}
+
+
+def _json_bytes(payload: object) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
 
 
 def _expected_key(recording_id: str, role: str) -> str:
@@ -49,6 +77,161 @@ def _verify_manifest_keys(manifest: CaptureManifestV2) -> None:
     for artifact in manifest.artifacts:
         if artifact.object_key != _expected_key(manifest.recording_id, artifact.role):
             raise HTTPException(status_code=422, detail="manifest 对象键不是代理允许的稳定键")
+
+
+def _safe_object_key(value: object) -> str:
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail="模型制品对象键无效")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise HTTPException(status_code=422, detail="模型制品对象键无效")
+    return value
+
+
+def _content_type(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".json":
+        return "application/json"
+    if suffix == ".csv":
+        return "text/csv"
+    if suffix == ".md":
+        return "text/markdown"
+    return "application/octet-stream"
+
+
+def _artifact(
+    file_id: str,
+    object_key: str,
+    payload: dict[str, Any],
+    *,
+    content_type: str,
+) -> dict[str, Any]:
+    size = payload.get("size_bytes")
+    digest = payload.get("sha256")
+    if (
+        not isinstance(size, int)
+        or size <= 0
+        or not isinstance(digest, str)
+        or len(digest) != 64
+    ):
+        raise HTTPException(status_code=422, detail="模型发布制品身份无效")
+    return {
+        "file_id": file_id,
+        "object_key": _safe_object_key(object_key),
+        "size_bytes": size,
+        "sha256": digest,
+        "content_type": content_type,
+    }
+
+
+def _expected_model_publication(
+    body: ModelUploadStartRequest,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    """Derive every permitted object key from the immutable publication marker."""
+
+    marker = body.marker
+    publication_id = body.publication_id
+    expected: list[dict[str, Any]] = []
+    if body.publication_kind == "experiment":
+        if (
+            marker.get("schema_version") != EXPERIMENT_PUBLICATION_SCHEMA
+            or marker.get("run_id") != publication_id
+            or marker.get("evidence_level") not in EXPERIMENT_PREFIXES
+        ):
+            raise HTTPException(status_code=422, detail="实验发布 manifest 无效")
+        prefix = f"{EXPERIMENT_PREFIXES[marker['evidence_level']]}/{publication_id}"
+        marker_key = f"{prefix}/manifest.json"
+        bundle = marker.get("bundle")
+        if not isinstance(bundle, dict) or bundle.get("filename") != "run.tar.gz":
+            raise HTTPException(status_code=422, detail="实验发布 bundle 无效")
+        expected.append(
+            _artifact(
+                "bundle",
+                f"{prefix}/run.tar.gz",
+                bundle,
+                content_type="application/gzip",
+            )
+        )
+        quick_files = marker.get("quick_files")
+        if not isinstance(quick_files, list):
+            raise HTTPException(status_code=422, detail="实验发布 quick_files 无效")
+        for item in quick_files:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=422, detail="实验发布 quick_files 无效")
+            filename = item.get("path")
+            if not isinstance(filename, str) or Path(filename).name != filename:
+                raise HTTPException(status_code=422, detail="实验快捷文件名无效")
+            expected.append(
+                _artifact(
+                    f"quick-{filename.replace('.', '-')}",
+                    f"{prefix}/files/{filename}",
+                    item,
+                    content_type=_content_type(filename),
+                )
+            )
+        direct_files = marker.get("direct_files")
+        if not isinstance(direct_files, list) or not direct_files:
+            raise HTTPException(status_code=422, detail="实验直接下载文件无效")
+        for item in direct_files:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=422, detail="实验直接下载文件无效")
+            file_id = item.get("file_id")
+            object_key = item.get("object_key")
+            content_type = item.get("content_type")
+            if (
+                not isinstance(file_id, str)
+                or not isinstance(object_key, str)
+                or not object_key.startswith(f"{prefix}/models/")
+                or content_type not in MODEL_CONTENT_TYPES
+            ):
+                raise HTTPException(status_code=422, detail="实验直接下载对象无效")
+            expected.append(
+                _artifact(file_id, object_key, item, content_type=content_type)
+            )
+    else:
+        if (
+            marker.get("schema_version") != PACKAGE_PUBLICATION_SCHEMA
+            or marker.get("package_id") != publication_id
+        ):
+            raise HTTPException(status_code=422, detail="模型包 publication 无效")
+        prefix = f"{PACKAGE_PREFIX}/{publication_id}"
+        marker_key = f"{prefix}/publication.json"
+        bundle = marker.get("bundle")
+        if not isinstance(bundle, dict) or bundle.get("filename") != "package.tar.gz":
+            raise HTTPException(status_code=422, detail="模型包 bundle 无效")
+        expected.append(
+            _artifact(
+                "bundle",
+                f"{prefix}/package.tar.gz",
+                bundle,
+                content_type="application/gzip",
+            )
+        )
+        files = marker.get("files")
+        if not isinstance(files, list) or not files:
+            raise HTTPException(status_code=422, detail="模型包文件列表无效")
+        for item in files:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=422, detail="模型包文件列表无效")
+            file_id = item.get("file_id")
+            object_key = item.get("object_key")
+            content_type = item.get("content_type")
+            if (
+                not isinstance(file_id, str)
+                or not isinstance(object_key, str)
+                or not object_key.startswith(f"{prefix}/files/")
+                or content_type not in MODEL_CONTENT_TYPES
+            ):
+                raise HTTPException(status_code=422, detail="模型包对象无效")
+            expected.append(
+                _artifact(file_id, object_key, item, content_type=content_type)
+            )
+    actual = [item.model_dump(mode="json") for item in body.artifacts]
+    if actual != expected:
+        raise HTTPException(status_code=422, detail="上传制品与发布标记推导结果不一致")
+    if len({item["file_id"] for item in expected}) != len(expected):
+        raise HTTPException(status_code=422, detail="上传制品 file_id 重复")
+    return prefix, marker_key, expected
 
 
 def _sha256_blob(blob: storage.Blob) -> str:
@@ -139,6 +322,32 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Google 账号不在团队上传白名单")
         return {"email": email, "unikey": active.identity.email_to_unikey[email]}
 
+    def model_actor(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, str]:
+        """Accept only a Google-signed gcloud identity token for a whitelisted member."""
+
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="缺少 Google ID token")
+        token = authorization.removeprefix("Bearer ").strip()
+        claims: dict[str, Any] | None = None
+        for audience in active.cloud.model_publish_google_audiences:
+            try:
+                claims = google_id_token.verify_oauth2_token(
+                    token,
+                    GoogleAuthRequest(),
+                    audience,
+                )
+                break
+            except (ValueError, TypeError):
+                continue
+        if claims is None:
+            raise HTTPException(status_code=401, detail="模型发布 Google ID token 无效")
+        email = str(claims.get("email") or "").strip().lower()
+        if not claims.get("email_verified") or email not in active.identity.email_to_unikey:
+            raise HTTPException(status_code=403, detail="Google 账号不在团队发布白名单")
+        return {"email": email, "unikey": active.identity.email_to_unikey[email]}
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"ok": True, "application": "upload-broker"}
@@ -150,6 +359,11 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             "accepted_capture_h5_schema_versions": list(
                 ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
             ),
+            "accepted_model_publication_schema_versions": [
+                EXPERIMENT_PUBLICATION_SCHEMA,
+                PACKAGE_PUBLICATION_SCHEMA,
+            ],
+            "model_publication_lifecycle": ["available", "deprecated"],
             "direct_to_bucket_resumable": True,
             "server_verifies_sha256_before_manifest": True,
         }
@@ -368,6 +582,236 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             recording_id=planned.recording_id,
             manifest_generation=int(manifest_blob.generation or 0),
         )
+
+    @app.post("/v1/model-uploads", response_model=ModelUploadStartResponse)
+    def start_model_upload(
+        body: ModelUploadStartRequest,
+        current: Annotated[dict[str, str], Depends(model_actor)],
+    ) -> ModelUploadStartResponse:
+        prefix, marker_key, artifacts = _expected_model_publication(body)
+        marker_blob = bucket.blob(marker_key)
+        marker_payload = _json_bytes(body.marker)
+        if marker_blob.exists(client):
+            existing = marker_blob.download_as_bytes(client=client)
+            if existing != marker_payload:
+                raise HTTPException(status_code=409, detail="该发布 ID 已存在且内容不同")
+
+        sessions: list[ModelArtifactSession] = []
+        for artifact in artifacts:
+            blob = bucket.blob(artifact["object_key"])
+            if blob.exists(client):
+                blob.reload(client)
+                metadata = dict(blob.metadata or {})
+                if (
+                    int(blob.size or -1) != artifact["size_bytes"]
+                    or metadata.get("sha256") != artifact["sha256"]
+                    or metadata.get("file_id") != artifact["file_id"]
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"模型对象已存在但身份不一致：{artifact['object_key']}",
+                    )
+                sessions.append(
+                    ModelArtifactSession(
+                        file_id=artifact["file_id"],
+                        object_key=artifact["object_key"],
+                        already_present=True,
+                    )
+                )
+                continue
+            blob.content_type = artifact["content_type"]
+            blob.metadata = {
+                "publication_kind": body.publication_kind,
+                "publication_id": body.publication_id,
+                "file_id": artifact["file_id"],
+                "sha256": artifact["sha256"],
+                "uploader": current["unikey"],
+            }
+            session_url = blob.create_resumable_upload_session(
+                content_type=artifact["content_type"],
+                size=artifact["size_bytes"],
+                if_generation_match=0,
+                checksum="auto",
+            )
+            sessions.append(
+                ModelArtifactSession(
+                    file_id=artifact["file_id"],
+                    object_key=artifact["object_key"],
+                    session_url=session_url,
+                )
+            )
+
+        upload_id = uuid.uuid4().hex
+        plan = {
+            "schema_version": "imu_model_upload_plan_v1",
+            "upload_id": upload_id,
+            "actor": current,
+            "expires_at_utc": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+            "publication_kind": body.publication_kind,
+            "publication_id": body.publication_id,
+            "prefix": prefix,
+            "marker_key": marker_key,
+            "marker": body.marker,
+            "artifacts": artifacts,
+        }
+        bucket.blob(f"_upload_sessions/models/{upload_id}.json").upload_from_string(
+            _json_bytes(plan),
+            content_type="application/json",
+            if_generation_match=0,
+        )
+        return ModelUploadStartResponse(upload_id=upload_id, sessions=sessions)
+
+    @app.post(
+        "/v1/model-uploads/complete",
+        response_model=ModelUploadCompleteResponse,
+    )
+    def complete_model_upload(
+        body: ModelUploadCompleteRequest,
+        current: Annotated[dict[str, str], Depends(model_actor)],
+    ) -> ModelUploadCompleteResponse:
+        plan_blob = bucket.blob(f"_upload_sessions/models/{body.upload_id}.json")
+        if not plan_blob.exists(client):
+            raise HTTPException(status_code=404, detail="模型上传会话不存在或已经失效")
+        plan = json.loads(plan_blob.download_as_bytes(client=client))
+        if plan.get("actor") != current:
+            raise HTTPException(status_code=403, detail="模型上传会话不属于当前用户")
+        if datetime.fromisoformat(plan["expires_at_utc"]) < datetime.now(UTC):
+            raise HTTPException(status_code=410, detail="模型上传会话已经过期")
+        for artifact in plan["artifacts"]:
+            blob = bucket.blob(artifact["object_key"])
+            if not blob.exists(client):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"模型制品尚未上传：{artifact['file_id']}",
+                )
+            blob.reload(client)
+            if int(blob.size or -1) != artifact["size_bytes"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"模型制品大小不一致：{artifact['file_id']}",
+                )
+            if _sha256_blob(blob) != artifact["sha256"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"模型制品 SHA-256 不一致：{artifact['file_id']}",
+                )
+
+        timestamp = datetime.now(UTC).isoformat()
+        state_key = f"{plan['prefix']}/state.json"
+        state_blob = bucket.blob(state_key)
+        if not state_blob.exists(client):
+            state_blob.metadata = {
+                "publication_kind": plan["publication_kind"],
+                "publication_id": plan["publication_id"],
+            }
+            state_blob.upload_from_string(
+                _json_bytes(
+                    {
+                        "schema_version": MODEL_STATE_SCHEMA,
+                        "kind": plan["publication_kind"],
+                        "publication_id": plan["publication_id"],
+                        "status": "available",
+                        "updated_at_utc": timestamp,
+                        "updated_by": current["unikey"],
+                        "history": [],
+                    }
+                ),
+                content_type="application/json",
+                if_generation_match=0,
+            )
+
+        marker_blob = bucket.blob(plan["marker_key"])
+        marker_payload = _json_bytes(plan["marker"])
+        if marker_blob.exists(client):
+            if marker_blob.download_as_bytes(client=client) != marker_payload:
+                raise HTTPException(status_code=409, detail="远端发布标记内容冲突")
+            marker_blob.reload(client)
+        else:
+            marker_blob.metadata = {
+                "publication_kind": plan["publication_kind"],
+                "publication_id": plan["publication_id"],
+                "sha256": hashlib.sha256(marker_payload).hexdigest(),
+                "publisher": current["unikey"],
+            }
+            marker_blob.upload_from_string(
+                marker_payload,
+                content_type="application/json",
+                if_generation_match=0,
+            )
+            marker_blob.reload(client)
+        return ModelUploadCompleteResponse(
+            publication_kind=plan["publication_kind"],
+            publication_id=plan["publication_id"],
+            marker_object=plan["marker_key"],
+            marker_generation=int(marker_blob.generation or 0),
+        )
+
+    def model_state_blob(
+        publication_kind: Literal["experiment", "package"], publication_id: str
+    ) -> storage.Blob:
+        if publication_kind == "package":
+            candidates = [f"{PACKAGE_PREFIX}/{publication_id}/state.json"]
+        else:
+            candidates = [
+                f"{root}/{publication_id}/state.json"
+                for root in EXPERIMENT_PREFIXES.values()
+            ]
+        for key in candidates:
+            blob = bucket.blob(key)
+            if blob.exists(client):
+                blob.reload(client)
+                return blob
+        raise HTTPException(status_code=404, detail="找不到模型发布状态")
+
+    @app.post("/v1/model-publications/{publication_kind}/{publication_id}/restore")
+    def restore_model_publication(
+        publication_kind: Literal["experiment", "package"],
+        publication_id: str,
+        body: ModelPublicationRestoreRequest,
+        current: Annotated[dict[str, str], Depends(model_actor)],
+    ) -> dict[str, Any]:
+        if current["unikey"] not in active.identity.admins:
+            raise HTTPException(status_code=403, detail="恢复模型发布仅限管理员")
+        blob = model_state_blob(publication_kind, publication_id)
+        if int(blob.generation or 0) != body.expected_generation:
+            raise HTTPException(status_code=409, detail="模型发布状态已经变化")
+        state = json.loads(blob.download_as_bytes(client=client))
+        if (
+            state.get("schema_version") != MODEL_STATE_SCHEMA
+            or state.get("kind") != publication_kind
+            or state.get("publication_id") != publication_id
+        ):
+            raise HTTPException(status_code=422, detail="模型发布状态无效")
+        timestamp = datetime.now(UTC).isoformat()
+        previous = state.get("status")
+        history = list(state.get("history") or [])
+        history.append(
+            {
+                "action": "restore",
+                "from": previous,
+                "to": "available",
+                "actor": current["unikey"],
+                "at_utc": timestamp,
+            }
+        )
+        state.update(
+            {
+                "status": "available",
+                "updated_at_utc": timestamp,
+                "updated_by": current["unikey"],
+                "history": history,
+            }
+        )
+        try:
+            blob.upload_from_string(
+                _json_bytes(state),
+                content_type="application/json",
+                if_generation_match=body.expected_generation,
+            )
+        except PreconditionFailed as error:
+            raise HTTPException(status_code=409, detail="模型发布状态已经变化") from error
+        blob.reload(client)
+        return {**state, "generation": int(blob.generation or 0)}
 
     return app
 

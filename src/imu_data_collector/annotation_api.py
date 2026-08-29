@@ -22,10 +22,12 @@ from imu_data_collector.auth import (
     AuthorizationError,
     TokenVerifier,
 )
+from imu_data_collector.broker_models import ModelPublicationRestoreRequest
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.dataset_catalog import DatasetCatalog
 from imu_data_collector.host import resource_path
+from imu_data_collector.model_catalog import ModelCatalog
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
     ActivityTaxonomyMigrationApplyRequest,
@@ -61,6 +63,7 @@ def create_annotation_app(
     )
     service = AnnotationService(active, object_store)
     dataset_catalog = DatasetCatalog(object_store)
+    model_catalog = ModelCatalog(object_store)
     authenticator = Authenticator(active, token_verifier)
     refresh_stop = threading.Event()
 
@@ -99,6 +102,7 @@ def create_annotation_app(
     app.add_exception_handler(HTTPException, structured_http_error_handler)
     app.state.annotation_service = service
     app.state.authenticator = authenticator
+    app.state.model_catalog = model_catalog
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next):
@@ -247,6 +251,103 @@ def create_annotation_app(
             media_type="application/x-hdf5",
             headers=headers,
         )
+
+    @app.get("/api/v1/model-catalog")
+    def model_catalog_summary(
+        refresh: Annotated[bool, Query()] = False,
+    ) -> dict[str, Any]:
+        return model_catalog.refresh(force=True) if refresh else model_catalog.summary()
+
+    @app.get("/api/v1/model-catalog/{kind}/{publication_id}")
+    def model_catalog_detail(
+        kind: Literal["experiment", "package"], publication_id: str
+    ) -> dict[str, Any]:
+        try:
+            return model_catalog.detail(kind, publication_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该模型发布") from error
+
+    @app.get("/api/v1/model-catalog/{kind}/{publication_id}/marker/download")
+    def model_catalog_marker_download(
+        kind: Literal["experiment", "package"], publication_id: str
+    ) -> Response:
+        try:
+            payload, filename = model_catalog.marker(kind, publication_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该模型发布") from error
+        return Response(
+            payload,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "private, max-age=60",
+            },
+        )
+
+    @app.get("/api/v1/model-catalog/{kind}/{publication_id}/files/{file_id}/download")
+    def model_catalog_file_download(
+        kind: Literal["experiment", "package"],
+        publication_id: str,
+        file_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> StreamingResponse:
+        try:
+            descriptor, info = model_catalog.file(kind, publication_id, file_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该模型文件") from error
+        start, end, status_code = 0, info.size_bytes - 1, 200
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
+            if not match:
+                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else end
+            if start > end or end >= info.size_bytes:
+                raise HTTPException(status_code=416, detail="模型文件 Range 越界")
+            status_code = 206
+
+        def stream():
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(info.key, cursor, chunk_end)
+                cursor = chunk_end + 1
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+            "Content-Disposition": f'attachment; filename="{descriptor["filename"]}"',
+            "Cache-Control": "private, max-age=300",
+            "X-Content-SHA256": descriptor["sha256"],
+        }
+        if status_code == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{info.size_bytes}"
+        return StreamingResponse(
+            stream(),
+            status_code=status_code,
+            media_type=descriptor.get("content_type") or "application/octet-stream",
+            headers=headers,
+        )
+
+    @app.post("/api/v1/model-catalog/{kind}/{publication_id}/deprecate")
+    def deprecate_model_publication(
+        kind: Literal["experiment", "package"],
+        publication_id: str,
+        body: ModelPublicationRestoreRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = admin_actor(request)
+        try:
+            return model_catalog.deprecate(
+                kind,
+                publication_id,
+                actor=actor.unikey,
+                expected_generation=body.expected_generation,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该模型发布") from error
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail="模型发布状态已经变化") from error
 
     @app.get("/api/v1/taxonomy")
     def taxonomy(

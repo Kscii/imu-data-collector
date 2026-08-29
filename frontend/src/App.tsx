@@ -15,7 +15,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数采平台", "IMU Data Collector");
 
-type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets";
+type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models";
 type AnnotationTaskTab = "sync" | "annotate" | "review" | "data";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -56,7 +56,7 @@ function nextCollectionId(current: string, participant: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library", datasets: "datasets" }
+    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models" }
     : { capture: "capture", records: "library", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -360,6 +360,83 @@ type DatasetCatalogCollection = {
 type DatasetCatalogDocument = {
   schema_version: "imu_dataset_catalog_v1";
   collections: DatasetCatalogCollection[];
+};
+
+type MetricSummary = { mean: number; std: number };
+
+type ModelMethod = {
+  method_id: string;
+  model_id: string;
+  training_recipe: string;
+  fold_count: number;
+  input_semantic: "si_window" | "normalized_window" | "engineered_features";
+  metrics: {
+    window: Record<string, MetricSummary>;
+    event: Record<string, MetricSummary>;
+    alarm: Record<string, MetricSummary>;
+  };
+  artifact_ids: string[];
+};
+
+type ModelArtifact = {
+  artifact_id: string;
+  model_id: string;
+  training_recipe: string;
+  fold: number;
+  seed: number;
+  backend?: string | null;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  parity: Record<string, unknown>;
+  source: Record<string, unknown>;
+  files?: { onnx_file_id?: string; metadata_file_id?: string };
+  alarm_policies?: Record<string, unknown>[];
+};
+
+type ModelCatalogSummaryEntry = {
+  kind: "experiment" | "package";
+  publication_id: string;
+  status: "available" | "deprecated";
+  state_generation: number;
+  updated_at_utc?: string | null;
+  created_at_utc?: string | null;
+  run_id?: string;
+  experiment_id?: string;
+  evidence_level?: "formal_cv" | "engineering";
+  scheduled_jobs?: number;
+  method_count?: number;
+  artifact_count?: number;
+  source?: Record<string, unknown> | null;
+  base_snapshot_id?: string;
+  data_quality_status?: string | null;
+  package_id?: string;
+  model_code?: string;
+  display_name?: string;
+  logical_digest?: string;
+};
+
+type ModelCatalogDocument = {
+  schema_version: "imu_model_catalog_api_v1";
+  cache_ttl_s: number;
+  experiments: ModelCatalogSummaryEntry[];
+  packages: ModelCatalogSummaryEntry[];
+  invalid_publications: { object_key: string; detail: string }[];
+};
+
+type ModelCatalogFile = {
+  file_id: string;
+  filename: string;
+  object_key: string;
+  content_type?: string | null;
+  size_bytes: number;
+  sha256: string;
+};
+
+type ModelCatalogDetail = ModelCatalogSummaryEntry & {
+  marker: Record<string, any>;
+  state: Record<string, any>;
+  files: ModelCatalogFile[];
 };
 
 type ReviewDocument = {
@@ -1031,7 +1108,7 @@ export default function App() {
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button></> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button><button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>模型</button></> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
           {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
@@ -1085,6 +1162,7 @@ export default function App() {
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
+      {annotationApplication && tab === "models" && session && <ModelCatalogPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary
         recordings={recordings}
         onChanged={refreshRecordings}
@@ -2799,6 +2877,192 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { s
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
     </div>
   </article>;
+}
+
+const MODEL_METRICS = [
+  { id: "balanced_accuracy", scope: "window", labelZh: "平衡准确率", labelEn: "Balanced accuracy", core: true },
+  { id: "sensitivity", scope: "window", labelZh: "灵敏度", labelEn: "Sensitivity", core: true },
+  { id: "f1", scope: "window", labelZh: "F1", labelEn: "F1", core: true },
+  { id: "auprc", scope: "window", labelZh: "AUPRC", labelEn: "AUPRC", core: true },
+  { id: "event_sensitivity", scope: "event", labelZh: "事件灵敏度", labelEn: "Event sensitivity", core: true },
+  { id: "adl_alarm_episodes_per_hour", scope: "alarm", labelZh: "误报/小时", labelEn: "False alarms/hour", core: true },
+  { id: "onset_latency_p95_s", scope: "alarm", labelZh: "延迟 P95", labelEn: "Latency P95", core: true },
+  { id: "specificity", scope: "window", labelZh: "特异度", labelEn: "Specificity", core: false },
+  { id: "precision", scope: "window", labelZh: "精确率", labelEn: "Precision", core: false },
+  { id: "mcc", scope: "window", labelZh: "MCC", labelEn: "MCC", core: false },
+  { id: "auroc", scope: "window", labelZh: "AUROC", labelEn: "AUROC", core: false },
+  { id: "adl_recording_false_positive_rate", scope: "alarm", labelZh: "ADL 录制误报率", labelEn: "ADL recording FPR", core: false },
+  { id: "onset_latency_median_s", scope: "alarm", labelZh: "延迟中位数", labelEn: "Median latency", core: false },
+  { id: "impact_offset_median_s", scope: "alarm", labelZh: "撞击偏移中位数", labelEn: "Median impact offset", core: false },
+] as const;
+
+type ModelMetricDefinition = typeof MODEL_METRICS[number];
+
+function modelMetric(method: ModelMethod, definition: ModelMetricDefinition) {
+  return method.metrics[definition.scope][definition.id];
+}
+
+function formatMetric(value?: MetricSummary) {
+  if (!value) return "—";
+  return `${value.mean.toFixed(3)} ± ${value.std.toFixed(3)}`;
+}
+
+function ModelCatalogPage({ session }: { session: Session }) {
+  const [catalog, setCatalog] = useState<ModelCatalogDocument | null>(null);
+  const [section, setSection] = useState<"packages" | "experiments">("packages");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = async (force = false) => {
+    setBusy(true);
+    setError("");
+    try {
+      setCatalog(await api<ModelCatalogDocument>(`/api/v1/model-catalog${force ? "?refresh=true" : ""}`));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => { void refresh(); }, []);
+
+  const formal = catalog?.experiments.filter((item) => item.evidence_level === "formal_cv" && item.status === "available") ?? [];
+  const engineering = catalog?.experiments.filter((item) => item.evidence_level === "engineering" && item.status === "available") ?? [];
+  const deprecatedExperiments = catalog?.experiments.filter((item) => item.status === "deprecated") ?? [];
+  const availablePackages = catalog?.packages.filter((item) => item.status === "available") ?? [];
+  const deprecatedPackages = catalog?.packages.filter((item) => item.status === "deprecated") ?? [];
+
+  return <main className="model-catalog-page">
+    {error && <div className="error-banner">{error}</div>}
+    <section className="panel model-catalog">
+      <div className="model-catalog-heading">
+        <div>
+          <div className="panel-title">{tr("模型与 ONNX 制品", "Models and ONNX artifacts")}</div>
+          <p className="stage-help">{tr(
+            "这里保存可审计的实验 ONNX 与最终模型包。指标只用于展示已有证据；本页面不执行在线推理，也不指定推荐或最佳模型。",
+            "This catalog stores auditable experimental ONNX artifacts and final model packages. It displays existing evidence only; it does not run inference or designate a recommended or best model.",
+          )}</p>
+        </div>
+        <button disabled={busy} onClick={() => void refresh(true)}>{busy ? tr("正在刷新…", "Refreshing…") : tr("刷新 Bucket", "Refresh bucket")}</button>
+      </div>
+      <div className="model-section-tabs">
+        <button className={section === "packages" ? "active" : ""} onClick={() => setSection("packages")}>{tr("模型包", "Model packages")}</button>
+        <button className={section === "experiments" ? "active" : ""} onClick={() => setSection("experiments")}>{tr("实验 ONNX", "Experimental ONNX")}</button>
+      </div>
+      {!catalog && !error && <span className="muted">{tr("正在读取模型目录…", "Loading model catalog…")}</span>}
+      {catalog?.invalid_publications.map((item) => <div className="warning-banner compact-banner" key={item.object_key}><code>{item.object_key}</code> · {userVisibleMessage(item.detail)}</div>)}
+      {catalog && section === "packages" && <div className="model-publication-list">
+        {availablePackages.length === 0 && <div className="placeholder compact">{tr("尚未发布最终模型包", "No final model package has been published")}</div>}
+        {availablePackages.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}
+        {deprecatedPackages.length > 0 && <details className="model-deprecated-group"><summary>{tr("已弃用模型包", "Deprecated model packages")} · {deprecatedPackages.length}</summary>{deprecatedPackages.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>}
+      </div>}
+      {catalog && section === "experiments" && <div className="model-publication-list">
+        <ModelExperimentGroup title={tr("正式交叉验证", "Formal cross-validation")} entries={formal} session={session} onChanged={() => refresh(true)} empty={tr("尚无正式交叉验证发布", "No formal cross-validation publication")} />
+        <details className="model-experiment-group" open={formal.length === 0}><summary>{tr("工程验证", "Engineering validation")} · {engineering.length}</summary>{engineering.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>
+        {deprecatedExperiments.length > 0 && <details className="model-deprecated-group"><summary>{tr("已弃用实验", "Deprecated experiments")} · {deprecatedExperiments.length}</summary>{deprecatedExperiments.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>}
+      </div>}
+    </section>
+  </main>;
+}
+
+function ModelExperimentGroup({ title, entries, session, onChanged, empty }: { title: string; entries: ModelCatalogSummaryEntry[]; session: Session; onChanged: () => void; empty: string }) {
+  return <section className="model-experiment-group"><h2>{title}</h2>{entries.length === 0 ? <div className="placeholder compact">{empty}</div> : entries.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={onChanged} />)}</section>;
+}
+
+function ModelPublicationCard({ summary, session, onChanged }: { summary: ModelCatalogSummaryEntry; session: Session; onChanged: () => void }) {
+  const [detail, setDetail] = useState<ModelCatalogDetail | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const base = `/api/v1/model-catalog/${summary.kind}/${encodeURIComponent(summary.publication_id)}`;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api<ModelCatalogDetail>(base, { signal: controller.signal }).then(setDetail).catch((value) => {
+      if ((value as Error).name !== "AbortError") setError((value as Error).message);
+    });
+    return () => controller.abort();
+  }, [base]);
+
+  const deprecate = async () => {
+    if (!window.confirm(tr("确认将此发布标记为已弃用？文件仍会保留。", "Mark this publication as deprecated? Its files will be retained."))) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`${base}/deprecate`, { method: "POST", body: JSON.stringify({ expected_generation: summary.state_generation }) });
+      onChanged();
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const title = summary.kind === "package"
+    ? (summary.display_name || summary.model_code || summary.publication_id)
+    : (summary.experiment_id || summary.publication_id);
+  return <article className={`model-publication ${summary.status === "deprecated" ? "deprecated" : ""}`}>
+    <div className="model-publication-heading">
+      <div><strong>{title}</strong><code>{summary.publication_id}</code><span>{summary.created_at_utc ? new Date(summary.created_at_utc).toLocaleString() : "—"}</span></div>
+      <div className="save-row"><span className={`model-state ${summary.status}`}>{summary.status === "available" ? tr("可用", "Available") : tr("已弃用", "Deprecated")}</span>{session.is_admin && summary.status === "available" && <button className="danger secondary-danger" disabled={busy} onClick={() => void deprecate()}>{tr("标记为已弃用", "Deprecate")}</button>}</div>
+    </div>
+    {error && <div className="error-banner compact-banner">{error}</div>}
+    {!detail && !error && <span className="muted">{tr("正在读取发布详情…", "Loading publication details…")}</span>}
+    {detail && summary.kind === "experiment" && <ExperimentEvidence detail={detail} />}
+    {detail && summary.kind === "package" && <PackageEvidence detail={detail} />}
+  </article>;
+}
+
+function ModelDownloads({ detail }: { detail: ModelCatalogDetail }) {
+  const base = `/api/v1/model-catalog/${detail.kind}/${encodeURIComponent(detail.publication_id)}`;
+  return <div className="model-downloads">
+    {detail.files.map((file) => <a className="button-link" key={file.file_id} href={`${base}/files/${encodeURIComponent(file.file_id)}/download`} download title={file.sha256}>{file.file_id === "bundle" ? tr("下载完整包", "Download full bundle") : `${tr("下载", "Download")} ${file.filename}`} · {formatDatasetBytes(file.size_bytes)}</a>)}
+    <a className="button-link" href={`${base}/marker/download`} download>{tr("下载原始 JSON", "Download raw JSON")}</a>
+  </div>;
+}
+
+function RawModelJson({ marker }: { marker: Record<string, any> }) {
+  return <details className="model-raw-json"><summary>{tr("查看原始 JSON", "View raw JSON")}</summary><pre>{JSON.stringify(marker, null, 2)}</pre></details>;
+}
+
+function PackageEvidence({ detail }: { detail: ModelCatalogDetail }) {
+  const manifest = detail.marker.manifest ?? {};
+  return <div className="model-package-detail">
+    <div className="model-facts"><span><strong>{tr("模型", "Model")}</strong>{manifest.model_code ?? "—"}</span><span><strong>{tr("输入语义", "Input semantic")}</strong>{manifest.input?.semantic ?? "—"}</span><span><strong>{tr("输出语义", "Output semantic")}</strong>{manifest.output?.semantic ?? "—"}</span><span><strong>{tr("逻辑摘要", "Logical digest")}</strong><code>{detail.marker.logical_digest ?? "—"}</code></span></div>
+    <ModelDownloads detail={detail} />
+    <RawModelJson marker={detail.marker} />
+  </div>;
+}
+
+function ExperimentEvidence({ detail }: { detail: ModelCatalogDetail }) {
+  const methods = (detail.marker.methods ?? []) as ModelMethod[];
+  const artifacts = (detail.marker.artifacts ?? []) as ModelArtifact[];
+  const [sortMetric, setSortMetric] = useState("balanced_accuracy");
+  const [ascending, setAscending] = useState(false);
+  const [extraMetrics, setExtraMetrics] = useState<string[]>([]);
+  const [selectedMethod, setSelectedMethod] = useState(methods[0]?.method_id ?? "");
+  const columns = MODEL_METRICS.filter((item) => item.core || extraMetrics.includes(item.id));
+  const sortDefinition = MODEL_METRICS.find((item) => item.id === sortMetric) ?? MODEL_METRICS[0];
+  const sorted = [...methods].sort((left, right) => {
+    const a = modelMetric(left, sortDefinition)?.mean ?? Number.NEGATIVE_INFINITY;
+    const b = modelMetric(right, sortDefinition)?.mean ?? Number.NEGATIVE_INFINITY;
+    return ascending ? a - b : b - a;
+  });
+  const selected = methods.find((item) => item.method_id === selectedMethod) ?? methods[0];
+  const methodArtifacts = artifacts.filter((item) => selected?.artifact_ids.includes(item.artifact_id));
+
+  const chooseSort = (metric: string) => {
+    if (sortMetric === metric) setAscending((value) => !value);
+    else { setSortMetric(metric); setAscending(false); }
+  };
+  return <div className="experiment-evidence">
+    <div className="model-facts"><span><strong>{tr("证据级别", "Evidence level")}</strong>{detail.evidence_level === "formal_cv" ? tr("正式交叉验证", "Formal cross-validation") : tr("工程验证", "Engineering validation")}</span><span><strong>{tr("任务", "Jobs")}</strong>{detail.scheduled_jobs ?? "—"}</span><span><strong>{tr("数据快照", "Data snapshot")}</strong>{detail.base_snapshot_id ?? "—"}</span><span><strong>{tr("数据质量", "Data quality")}</strong>{detail.data_quality_status ?? "—"}</span></div>
+    <details className="model-column-picker"><summary>{tr("选择附加指标列", "Choose additional metric columns")}</summary>{MODEL_METRICS.filter((item) => !item.core).map((item) => <label key={item.id}><input type="checkbox" checked={extraMetrics.includes(item.id)} onChange={(event) => setExtraMetrics((current) => event.target.checked ? [...current, item.id] : current.filter((value) => value !== item.id))} />{tr(item.labelZh, item.labelEn)}</label>)}</details>
+    <div className="model-table-scroll"><table className="model-metrics-table"><thead><tr><th>{tr("方法", "Method")}</th><th>{tr("训练配方", "Training recipe")}</th><th>{tr("输入", "Input")}</th>{columns.map((item) => <th key={item.id}><button onClick={() => chooseSort(item.id)}>{tr(item.labelZh, item.labelEn)} {sortMetric === item.id ? (ascending ? "↑" : "↓") : ""}</button></th>)}</tr></thead><tbody>{sorted.map((method) => <tr key={method.method_id} className={selected?.method_id === method.method_id ? "selected" : ""} onClick={() => setSelectedMethod(method.method_id)}><td>{method.model_id}</td><td>{method.training_recipe}</td><td>{method.input_semantic}</td>{columns.map((item) => <td key={item.id}>{formatMetric(modelMetric(method, item))}</td>)}</tr>)}</tbody></table></div>
+    {selected && <section className="model-method-detail"><h3>{selected.model_id} · {selected.training_recipe}</h3><p>{selected.fold_count} {tr("个 fold；表格展示均值 ± 样本标准差。警报指标仅使用该实验声明的参考策略。", "folds; the table reports mean ± sample standard deviation. Alarm metrics use only the experiment's declared reference policy.")}</p><div className="model-artifact-grid">{methodArtifacts.map((artifact) => <article key={artifact.artifact_id}><strong>{artifact.artifact_id}</strong><span>fold {artifact.fold} · seed {artifact.seed}</span><span>{String(artifact.input.semantic ?? "—")} → fall_score</span><div className="save-row">{artifact.files?.onnx_file_id && <a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(artifact.files.onnx_file_id)}/download`} download>{tr("下载 ONNX", "Download ONNX")}</a>}{artifact.files?.metadata_file_id && <a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(artifact.files.metadata_file_id)}/download`} download>{tr("下载 metadata", "Download metadata")}</a>}</div><details><summary>{tr("输入、校验与其他警报策略", "Input, parity, and other alarm policies")}</summary><pre>{JSON.stringify({ input: artifact.input, output: artifact.output, parity: artifact.parity, alarm_policies: artifact.alarm_policies ?? [] }, null, 2)}</pre></details></article>)}</div></section>}
+    <ModelDownloads detail={detail} />
+    <RawModelJson marker={detail.marker} />
+  </div>;
 }
 
 function formatDatasetBytes(sizeBytes: number) {
