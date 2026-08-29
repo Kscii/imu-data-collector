@@ -768,12 +768,21 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
         _install_completed_review(app, store, tmp_path, recording_id)
         created = client.post("/api/v1/training-snapshots")
         repeated = client.post("/api/v1/training-snapshots")
+        current_key = "benchmark-datasets/team/cw12eu/current.json"
+        assert store.stat(current_key) is None
+        activated = client.post(
+            f"/api/v1/training-snapshots/{created.json()['snapshot_id']}/activate-benchmark"
+        )
         listed = client.get("/api/v1/training-snapshots")
 
     assert created.status_code == 200
     assert created.json()["created"] is True
     assert repeated.json()["created"] is False
     assert repeated.json()["snapshot_id"] == created.json()["snapshot_id"]
+    assert activated.status_code == 200
+    assert activated.json()["benchmark"]["is_current"] is True
+    current, _generation = store.read_json(current_key)
+    assert current["handoff_contract_version"] == "0.1.0"
     assert [item["snapshot_id"] for item in listed.json()] == [
         created.json()["snapshot_id"]
     ]

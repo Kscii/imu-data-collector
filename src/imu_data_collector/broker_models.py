@@ -86,7 +86,7 @@ class ModelUploadStartRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    publication_kind: Literal["experiment", "package"]
+    publication_kind: Literal["result", "experiment", "model"]
     publication_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
     marker: dict[str, Any]
     artifacts: list[ModelArtifactDescriptor] = Field(min_length=1)
@@ -111,7 +111,7 @@ class ModelUploadCompleteRequest(BaseModel):
 
 
 class ModelUploadCompleteResponse(BaseModel):
-    publication_kind: Literal["experiment", "package"]
+    publication_kind: Literal["result", "experiment", "model"]
     publication_id: str
     marker_object: str
     marker_generation: int

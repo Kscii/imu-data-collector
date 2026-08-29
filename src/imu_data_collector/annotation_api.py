@@ -260,7 +260,7 @@ def create_annotation_app(
 
     @app.get("/api/v1/model-catalog/{kind}/{publication_id}")
     def model_catalog_detail(
-        kind: Literal["experiment", "package"], publication_id: str
+        kind: Literal["experiment", "model"], publication_id: str
     ) -> dict[str, Any]:
         try:
             return model_catalog.detail(kind, publication_id)
@@ -269,7 +269,7 @@ def create_annotation_app(
 
     @app.get("/api/v1/model-catalog/{kind}/{publication_id}/marker/download")
     def model_catalog_marker_download(
-        kind: Literal["experiment", "package"], publication_id: str
+        kind: Literal["experiment", "model"], publication_id: str
     ) -> Response:
         try:
             payload, filename = model_catalog.marker(kind, publication_id)
@@ -286,7 +286,7 @@ def create_annotation_app(
 
     @app.get("/api/v1/model-catalog/{kind}/{publication_id}/files/{file_id}/download")
     def model_catalog_file_download(
-        kind: Literal["experiment", "package"],
+        kind: Literal["experiment", "model"],
         publication_id: str,
         file_id: str,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
@@ -331,7 +331,7 @@ def create_annotation_app(
 
     @app.post("/api/v1/model-catalog/{kind}/{publication_id}/deprecate")
     def deprecate_model_publication(
-        kind: Literal["experiment", "package"],
+        kind: Literal["experiment", "model"],
         publication_id: str,
         body: ModelPublicationRestoreRequest,
         request: Request,
@@ -828,6 +828,24 @@ def create_annotation_app(
             media_type="application/x-tar",
             headers=headers,
         )
+
+    @app.post("/api/v1/training-snapshots/{snapshot_id}/activate-benchmark")
+    def activate_benchmark_snapshot(
+        snapshot_id: str, request: Request
+    ) -> dict[str, Any]:
+        try:
+            return service.activate_benchmark_snapshot(
+                snapshot_id, current_actor(request).unikey
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+        except ObjectConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="benchmark current 已被其他成员更新，请刷新后重试",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download")
     def benchmark_snapshot_download(snapshot_id: str) -> StreamingResponse:

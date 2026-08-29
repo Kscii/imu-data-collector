@@ -6,21 +6,20 @@ import re
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from imu_data_collector.storage import ObjectConflictError, ObjectInfo, ObjectStore
 
-EXPERIMENT_SCHEMA = "imu_benchmark_result_manifest_v2"
-PACKAGE_SCHEMA = "imu_model_package_publication_v1"
-STATE_SCHEMA = "imu_model_publication_state_v1"
-EXPERIMENT_ROOTS = {
-    "formal_cv": "benchmark-results/temporal-core",
-    "engineering": "benchmark-results/engineering",
-}
-PACKAGE_ROOT = "benchmark-models/packages"
+EXPERIMENT_SCHEMA = "imu_experiment_catalog_v0"
+EXPERIMENT_CONTRACT_VERSION = "0.1.0"
+MODEL_SCHEMA = "imu_model_release_v0"
+MODEL_CONTRACT_VERSION = "0.1.0"
+STATE_SCHEMA = "imu_model_catalog_state_v0"
+EXPERIMENT_ROOT = "benchmark-model-catalog/experiments"
+MODEL_ROOT = "benchmark-model-catalog/models"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
-PublicationKind = Literal["experiment", "package"]
+PublicationKind = Literal["experiment", "model"]
 
 
 def _safe_key(value: object) -> str:
@@ -88,63 +87,87 @@ class ModelCatalog:
 
     def _experiment(self, marker_key: str) -> dict[str, Any]:
         marker, marker_generation = self.store.read_json(marker_key)
-        run_id = marker.get("run_id")
-        evidence = marker.get("evidence_level")
+        publication_id = marker.get("publication_id")
         if (
             marker.get("schema_version") != EXPERIMENT_SCHEMA
-            or not isinstance(run_id, str)
-            or not _ID.fullmatch(run_id)
-            or evidence not in EXPERIMENT_ROOTS
+            or marker.get("contract_version") != EXPERIMENT_CONTRACT_VERSION
+            or not isinstance(publication_id, str)
+            or not _ID.fullmatch(publication_id)
+            or marker.get("evidence_level") not in {"formal_cv", "engineering"}
         ):
-            raise ValueError("实验发布 manifest 无效")
-        prefix = f"{EXPERIMENT_ROOTS[evidence]}/{run_id}"
-        if marker_key != f"{prefix}/manifest.json":
-            raise ValueError("实验发布 manifest 路径与证据级别不一致")
+            raise ValueError("实验目录 metadata 无效")
+        prefix = f"{EXPERIMENT_ROOT}/{publication_id}"
+        if marker_key != f"{prefix}/metadata.json":
+            raise ValueError("实验目录 metadata 路径无效")
         state, state_generation = self._state(
-            f"{prefix}/state.json", "experiment", run_id
+            f"{prefix}/state.json", "experiment", publication_id
         )
-        files: dict[str, dict[str, Any]] = {}
-        bundle = marker.get("bundle")
-        if not isinstance(bundle, dict) or bundle.get("filename") != "run.tar.gz":
-            raise ValueError("实验 bundle 无效")
-        files["bundle"] = self._verify_file(
-            {**bundle, "file_id": "bundle", "filename": "run.tar.gz"},
-            object_key=f"{prefix}/run.tar.gz",
-        )[0]
-        for item in marker.get("quick_files") or []:
-            if not isinstance(item, dict):
-                raise ValueError("实验快捷文件无效")
-            filename = item.get("path")
-            if not isinstance(filename, str) or Path(filename).name != filename:
-                raise ValueError("实验快捷文件名无效")
-            file_id = f"quick-{filename.replace('.', '-')}"
-            files[file_id] = self._verify_file(
-                {**item, "file_id": file_id, "filename": filename},
-                object_key=f"{prefix}/files/{filename}",
-            )[0]
-        direct_files = marker.get("direct_files")
-        if not isinstance(direct_files, list) or not direct_files:
-            raise ValueError("实验缺少 ONNX 直接下载文件")
-        for item in direct_files:
-            if not isinstance(item, dict) or not isinstance(item.get("file_id"), str):
-                raise ValueError("实验直接下载文件无效")
-            file_id = item["file_id"]
-            if file_id in files:
-                raise ValueError("实验文件 ID 重复")
-            object_key = _safe_key(item.get("object_key"))
-            if not object_key.startswith(f"{prefix}/models/"):
-                raise ValueError("实验直接下载文件越出发布目录")
-            files[file_id] = self._verify_file(item, object_key=object_key)[0]
         methods = marker.get("methods")
         artifacts = marker.get("artifacts")
         if not isinstance(methods, list) or not methods:
-            raise ValueError("实验缺少方法聚合指标")
+            raise ValueError("实验目录缺少方法聚合指标")
         if not isinstance(artifacts, list) or not artifacts:
-            raise ValueError("实验缺少 ONNX 模型元数据")
+            raise ValueError("实验目录缺少 ONNX 模型元数据")
+        files: dict[str, dict[str, Any]] = {}
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or not isinstance(
+                artifact.get("artifact_id"), str
+            ):
+                raise ValueError("实验 ONNX 元数据无效")
+            artifact_id = artifact["artifact_id"]
+            descriptor = artifact.get("onnx")
+            if not isinstance(descriptor, dict):
+                raise ValueError("实验 ONNX 文件描述符无效")
+            object_key = _safe_key(descriptor.get("object_key"))
+            if object_key != f"{prefix}/onnx/{artifact_id}.onnx":
+                raise ValueError("实验 ONNX 文件越出发布目录")
+            decision = artifact.get("decision")
+            threshold = decision.get("score_threshold") if isinstance(decision, dict) else None
+            policies = decision.get("trigger_policies") if isinstance(decision, dict) else None
+            if (
+                not isinstance(threshold, dict)
+                or threshold.get("selection_split") != "validation"
+                or threshold.get("comparison") != ">="
+                or decision.get("anchor") != "window_end"
+                or not isinstance(policies, list)
+                or not policies
+            ):
+                raise ValueError("实验 ONNX 缺少完整判定规则")
+            policy_fields = {
+                "policy_id",
+                "required_positive_windows",
+                "lookback_windows",
+                "consecutive",
+                "cooldown_seconds",
+                "reference_policy",
+                "validation_pareto",
+            }
+            if any(
+                not isinstance(policy, dict) or not policy_fields.issubset(policy)
+                for policy in policies
+            ):
+                raise ValueError("实验 ONNX 触发策略不完整")
+            files[f"onnx-{artifact_id}"] = self._verify_file(
+                descriptor, object_key=object_key
+            )[0]
+        result_evidence = marker.get("result_evidence")
+        if not isinstance(result_evidence, dict):
+            raise ValueError("实验目录缺少 result 证据引用")
+        for name, filename in (("manifest", "manifest.json"), ("bundle", "run.tar.gz")):
+            descriptor = result_evidence.get(name)
+            if not isinstance(descriptor, dict):
+                raise ValueError("实验目录 result 证据描述符无效")
+            _artifact_identity(descriptor)
+            object_key = _safe_key(descriptor.get("object_key"))
+            if (
+                descriptor.get("filename") != filename
+                or not object_key.startswith("benchmark-results/")
+            ):
+                raise ValueError("实验目录 result 证据对象键无效")
         return {
             "kind": "experiment",
-            "publication_id": run_id,
-            "evidence_level": evidence,
+            "publication_id": publication_id,
+            "evidence_level": marker["evidence_level"],
             "marker": marker,
             "marker_key": marker_key,
             "marker_generation": marker_generation,
@@ -153,51 +176,49 @@ class ModelCatalog:
             "files": files,
         }
 
-    def _package(self, marker_key: str) -> dict[str, Any]:
+    def _model(self, marker_key: str) -> dict[str, Any]:
         marker, marker_generation = self.store.read_json(marker_key)
-        package_id = marker.get("package_id")
+        release_id = marker.get("release_id")
         if (
-            marker.get("schema_version") != PACKAGE_SCHEMA
-            or not isinstance(package_id, str)
-            or not _ID.fullmatch(package_id)
+            marker.get("schema_version") != MODEL_SCHEMA
+            or marker.get("contract_version") != MODEL_CONTRACT_VERSION
+            or not isinstance(release_id, str)
+            or not _ID.fullmatch(release_id)
         ):
-            raise ValueError("模型包 publication 无效")
-        prefix = f"{PACKAGE_ROOT}/{package_id}"
-        if marker_key != f"{prefix}/publication.json":
-            raise ValueError("模型包 publication 路径无效")
+            raise ValueError("模型发布 metadata 无效")
+        prefix = f"{MODEL_ROOT}/{release_id}"
+        if marker_key != f"{prefix}/metadata.json":
+            raise ValueError("模型发布 metadata 路径无效")
         state, state_generation = self._state(
-            f"{prefix}/state.json", "package", package_id
+            f"{prefix}/state.json", "model", release_id
         )
-        files: dict[str, dict[str, Any]] = {}
-        bundle = marker.get("bundle")
-        if not isinstance(bundle, dict) or bundle.get("filename") != "package.tar.gz":
-            raise ValueError("模型包 bundle 无效")
-        files["bundle"] = self._verify_file(
-            {**bundle, "file_id": "bundle", "filename": "package.tar.gz"},
-            object_key=f"{prefix}/package.tar.gz",
-        )[0]
-        published_files = marker.get("files")
-        if not isinstance(published_files, list) or not published_files:
-            raise ValueError("模型包缺少文件")
-        for item in published_files:
-            if not isinstance(item, dict) or not isinstance(item.get("file_id"), str):
-                raise ValueError("模型包文件无效")
-            file_id = item["file_id"]
-            if file_id in files:
-                raise ValueError("模型包文件 ID 重复")
-            object_key = _safe_key(item.get("object_key"))
-            if not object_key.startswith(f"{prefix}/files/"):
-                raise ValueError("模型包文件越出发布目录")
-            files[file_id] = self._verify_file(item, object_key=object_key)[0]
+        descriptor = marker.get("model")
+        if not isinstance(descriptor, dict):
+            raise ValueError("模型发布缺少 model.onnx 描述符")
+        object_key = _safe_key(descriptor.get("object_key"))
+        if object_key != f"{prefix}/model.onnx":
+            raise ValueError("模型文件越出发布目录")
+        decision = marker.get("decision")
+        threshold = decision.get("score_threshold") if isinstance(decision, dict) else None
+        trigger = decision.get("trigger_policy") if isinstance(decision, dict) else None
+        if (
+            not isinstance(threshold, dict)
+            or threshold.get("comparison") != ">="
+            or not isinstance(trigger, dict)
+            or decision.get("anchor") != "window_end"
+        ):
+            raise ValueError("模型发布缺少固定阈值或触发策略")
         return {
-            "kind": "package",
-            "publication_id": package_id,
+            "kind": "model",
+            "publication_id": release_id,
             "marker": marker,
             "marker_key": marker_key,
             "marker_generation": marker_generation,
             "state": state,
             "state_generation": state_generation,
-            "files": files,
+            "files": {
+                "model": self._verify_file(descriptor, object_key=object_key)[0]
+            },
         }
 
     def refresh(self, *, force: bool = False) -> dict[str, Any]:
@@ -209,15 +230,15 @@ class ModelCatalog:
             errors: list[dict[str, str]] = []
             marker_keys = [
                 info.key
-                for root in (*EXPERIMENT_ROOTS.values(), PACKAGE_ROOT)
+                for root in (EXPERIMENT_ROOT, MODEL_ROOT)
                 for info in self.store.list(f"{root}/")
-                if info.key.endswith(("/manifest.json", "/publication.json"))
+                if info.key.endswith("/metadata.json")
             ]
             for key in sorted(set(marker_keys)):
                 try:
                     entry = (
-                        self._package(key)
-                        if key.startswith(f"{PACKAGE_ROOT}/")
+                        self._model(key)
+                        if key.startswith(f"{MODEL_ROOT}/")
                         else self._experiment(key)
                     )
                     identity = (entry["kind"], entry["publication_id"])
@@ -245,28 +266,26 @@ class ModelCatalog:
             "state_generation": entry["state_generation"],
             "updated_at_utc": entry["state"].get("updated_at_utc"),
             "created_at_utc": marker.get("created_at_utc"),
+            "source": marker.get("source"),
         }
         if entry["kind"] == "experiment":
+            data = marker.get("data") or {}
             return {
                 **base,
-                "run_id": entry["publication_id"],
+                "run_id": marker.get("run_id"),
                 "experiment_id": marker.get("experiment_id"),
                 "evidence_level": entry["evidence_level"],
                 "scheduled_jobs": marker.get("scheduled_jobs"),
                 "method_count": len(marker["methods"]),
                 "artifact_count": len(marker["artifacts"]),
-                "source": marker.get("source"),
-                "base_snapshot_id": marker.get("base_snapshot_id"),
-                "data_quality_status": marker.get("data_quality_status"),
+                "base_snapshot_id": data.get("base_snapshot_id"),
             }
-        package_manifest = marker.get("manifest") or {}
         return {
             **base,
-            "package_id": entry["publication_id"],
-            "model_code": package_manifest.get("model_code"),
-            "display_name": package_manifest.get("display_name"),
-            "logical_digest": marker.get("logical_digest"),
-            "source": package_manifest.get("source"),
+            "release_id": entry["publication_id"],
+            "model_code": marker.get("model_code"),
+            "name": marker.get("name"),
+            "model_sha256": (marker.get("model") or {}).get("sha256"),
         }
 
     def summary(self, *, refresh: bool = True) -> dict[str, Any]:
@@ -274,7 +293,10 @@ class ModelCatalog:
             self._ensure()
         entries = [self._summary_entry(entry) for entry in self._entries.values()]
         entries.sort(
-            key=lambda item: (str(item.get("created_at_utc") or ""), item["publication_id"]),
+            key=lambda item: (
+                str(item.get("created_at_utc") or ""),
+                item["publication_id"],
+            ),
             reverse=True,
         )
         return {
@@ -282,7 +304,7 @@ class ModelCatalog:
             "cache_ttl_s": self.cache_ttl_s,
             "loaded": bool(self._loaded_at),
             "experiments": [item for item in entries if item["kind"] == "experiment"],
-            "packages": [item for item in entries if item["kind"] == "package"],
+            "models": [item for item in entries if item["kind"] == "model"],
             "invalid_publications": list(self._errors),
         }
 
@@ -319,8 +341,7 @@ class ModelCatalog:
             entry = self._entries[(kind, publication_id)]
         except KeyError as error:
             raise KeyError(publication_id) from error
-        filename = "manifest.json" if kind == "experiment" else "publication.json"
-        return self.store.read_bytes(entry["marker_key"]), filename
+        return self.store.read_bytes(entry["marker_key"]), "metadata.json"
 
     def deprecate(
         self,

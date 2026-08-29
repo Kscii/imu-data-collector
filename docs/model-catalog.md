@@ -7,16 +7,16 @@
 
 - 实验 ONNX：正式 5-fold 交叉验证和受控的 1-fold 工程验证分开显示。表格按
   `model_id + training_recipe` 聚合，显示各 fold 的均值和样本标准差；单个 fold 的
-  ONNX、metadata 和完整 run bundle 仍可下载复核。
-- 模型包：面向后续运行时集成的独立制品。完整包包含 ONNX、运行配置、指标、golden
-  输入/输出和校验和；Python parity 不代表 Android Runtime 或实体机已经通过。
+  ONNX、统一 metadata 和既有完整 result bundle 仍可下载复核。
+- 模型发布：面向后续运行时集成的独立两文件制品，只包含 `model.onnx` 和
+  `metadata.json`。metadata 固定阈值与触发策略；Python parity 不代表 Android Runtime
+  或实体机已经通过。
 
 对象前缀固定为：
 
 ```text
-benchmark-results/temporal-core/<run_id>/
-benchmark-results/engineering/<run_id>/
-benchmark-models/packages/<package_id>/
+benchmark-model-catalog/experiments/<publication_id>/
+benchmark-model-catalog/models/<release_id>/
 ```
 
 每个发布的有效载荷不可变。`state.json` 只允许 `available` 和 `deprecated` 两种状态；
@@ -32,7 +32,7 @@ benchmark-models/packages/<package_id>/
 Benchmark 不需要 Bucket 写权限。CLI 获取短期 Google ID token 后请求
 `https://upload.imu.kscii.tech`；代理检查邮箱白名单，根据发布 JSON 反推出唯一允许的对象键，
 签发受限的 resumable upload 会话，随后逐个复核大小和 SHA-256，再写 `state.json` 和最终
-发布标记。令牌和上传会话 URL不得写入日志或持久化。
+`metadata.json`。令牌和上传会话 URL 不得写入日志或持久化。
 
 上传代理默认接受 Google Cloud SDK 的 OAuth audience：
 
@@ -56,10 +56,15 @@ cloud:
 ```text
 GET  /api/v1/model-catalog
 GET  /api/v1/model-catalog?refresh=true
-GET  /api/v1/model-catalog/{experiment|package}/{id}
-GET  /api/v1/model-catalog/{experiment|package}/{id}/marker/download
-GET  /api/v1/model-catalog/{experiment|package}/{id}/files/{file_id}/download
-POST /api/v1/model-catalog/{experiment|package}/{id}/deprecate
+GET  /api/v1/model-catalog/{experiment|model}/{id}
+GET  /api/v1/model-catalog/{experiment|model}/{id}/marker/download
+GET  /api/v1/model-catalog/{experiment|model}/{id}/files/{file_id}/download
+POST /api/v1/model-catalog/{experiment|model}/{id}/deprecate
 ```
 
 文件下载支持单段 HTTP Range，并返回 `X-Content-SHA256`。
+
+跨仓库的规范源及版本策略见同步副本
+[`docs/contracts/annotation-benchmark-contract.zh-CN.md`](contracts/annotation-benchmark-contract.zh-CN.md)，
+其来源 commit 和 SHA-256 固定在
+`configs/contracts/annotation-benchmark-contract.lock.json`。

@@ -314,6 +314,7 @@ type TrainingSnapshot = {
     manifest_object_key: string;
     manifest_sha256: string;
     current_object_key: string;
+    is_current: boolean;
   } | null;
   created?: boolean;
 };
@@ -388,14 +389,14 @@ type ModelArtifact = {
   input: Record<string, unknown>;
   output: Record<string, unknown>;
   metrics: Record<string, unknown>;
+  decision: Record<string, unknown>;
   parity: Record<string, unknown>;
   source: Record<string, unknown>;
-  files?: { onnx_file_id?: string; metadata_file_id?: string };
-  alarm_policies?: Record<string, unknown>[];
+  onnx: ModelCatalogFile;
 };
 
 type ModelCatalogSummaryEntry = {
-  kind: "experiment" | "package";
+  kind: "experiment" | "model";
   publication_id: string;
   status: "available" | "deprecated";
   state_generation: number;
@@ -409,18 +410,17 @@ type ModelCatalogSummaryEntry = {
   artifact_count?: number;
   source?: Record<string, unknown> | null;
   base_snapshot_id?: string;
-  data_quality_status?: string | null;
-  package_id?: string;
+  release_id?: string;
   model_code?: string;
-  display_name?: string;
-  logical_digest?: string;
+  name?: string;
+  model_sha256?: string;
 };
 
 type ModelCatalogDocument = {
   schema_version: "imu_model_catalog_api_v1";
   cache_ttl_s: number;
   experiments: ModelCatalogSummaryEntry[];
-  packages: ModelCatalogSummaryEntry[];
+  models: ModelCatalogSummaryEntry[];
   invalid_publications: { object_key: string; detail: string }[];
 };
 
@@ -2839,12 +2839,34 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
     }
   };
 
+  const activateSnapshot = async (snapshotId: string) => {
+    if (!window.confirm(tr(
+      `仅应在 benchmark 已按 snapshot ID 验证该 H5 后切换团队 current。确认激活 ${snapshotId}？`,
+      `Only switch team current after benchmark has validated this H5 by snapshot ID. Activate ${snapshotId}?`,
+    ))) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await api(`/api/v1/training-snapshots/${snapshotId}/activate-benchmark`, { method: "POST" });
+      setMessage(tr(`已激活团队快照 ${snapshotId}`, `Activated team snapshot ${snapshotId}`));
+      await refresh();
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const currentSnapshot = snapshots.find((item) => item.benchmark?.is_current);
+  const otherSnapshots = snapshots.filter((item) => item !== currentSnapshot);
+
   return <main>
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
       <div className="panel-title">训练快照</div>
-      <p className="stage-help">点击时冻结当前所有已完成的正式数据，同时生成逐录制 TAR、合并 cw12eu.h5，并原子更新 benchmark 的团队当前版本指针。相同内容会复用同一个不可变快照。</p>
+      <p className="stage-help">{tr("生成操作只冻结正式数据并暂存不可变 TAR 与 cw12eu.h5。请先在 benchmark 按 snapshot ID 验证，再单独激活团队 current；相同内容会复用同一个快照。", "Generation only freezes production data and stages immutable TAR and cw12eu.h5 artifacts. Validate by snapshot ID in benchmark, then activate team current separately; unchanged content reuses the same snapshot.")}</p>
       <div className="save-row">
         <button className="primary" disabled={busy} onClick={createSnapshot}>{busy ? "正在处理…" : "生成当前训练快照"}</button>
         <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>刷新列表</button>
@@ -2854,17 +2876,17 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
         )}</span>
       </div>
       {snapshots.length === 0 ? <span className="muted">目前还没有训练快照。</span> : <>
-        <SnapshotRow snapshot={snapshots[0]} current session={session} busy={busy} onDelete={deleteSnapshot} />
-        {snapshots.length > 1 && <details className="snapshot-history">
-          <summary>历史快照（{snapshots.length - 1}）</summary>
-          {snapshots.slice(1).map((snapshot) => <SnapshotRow key={snapshot.snapshot_id} snapshot={snapshot} session={session} busy={busy} onDelete={deleteSnapshot} />)}
+        {currentSnapshot && <SnapshotRow snapshot={currentSnapshot} current session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} />}
+        {otherSnapshots.length > 0 && <details className="snapshot-history" open={!currentSnapshot}>
+          <summary>{tr("待验证或历史快照", "Staged or historical snapshots")}（{otherSnapshots.length}）</summary>
+          {otherSnapshots.map((snapshot) => <SnapshotRow key={snapshot.snapshot_id} snapshot={snapshot} session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} />)}
         </details>}
       </>}
     </section>
   </main>;
 }
 
-function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void }) {
+function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onActivate }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void; onActivate: (snapshotId: string) => void }) {
   return <article className={current ? "current-snapshot" : ""}>
     <div>
       <strong>{current ? "当前训练快照" : "历史训练快照"} · {snapshot.snapshot_id}</strong>
@@ -2874,6 +2896,7 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete }: { s
     <div className="save-row">
       <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>下载 TAR</a>
       {snapshot.benchmark && <a className="button-link" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/benchmark-h5/download`} download>下载 benchmark H5</a>}
+      {snapshot.benchmark && !snapshot.benchmark.is_current && <button disabled={busy} onClick={() => onActivate(snapshot.snapshot_id)}>{tr("验证后激活 current", "Activate current after validation")}</button>}
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
     </div>
   </article>;
@@ -2909,7 +2932,7 @@ function formatMetric(value?: MetricSummary) {
 
 function ModelCatalogPage({ session }: { session: Session }) {
   const [catalog, setCatalog] = useState<ModelCatalogDocument | null>(null);
-  const [section, setSection] = useState<"packages" | "experiments">("packages");
+  const [section, setSection] = useState<"models" | "experiments">("models");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -2930,8 +2953,8 @@ function ModelCatalogPage({ session }: { session: Session }) {
   const formal = catalog?.experiments.filter((item) => item.evidence_level === "formal_cv" && item.status === "available") ?? [];
   const engineering = catalog?.experiments.filter((item) => item.evidence_level === "engineering" && item.status === "available") ?? [];
   const deprecatedExperiments = catalog?.experiments.filter((item) => item.status === "deprecated") ?? [];
-  const availablePackages = catalog?.packages.filter((item) => item.status === "available") ?? [];
-  const deprecatedPackages = catalog?.packages.filter((item) => item.status === "deprecated") ?? [];
+  const availableModels = catalog?.models.filter((item) => item.status === "available") ?? [];
+  const deprecatedModels = catalog?.models.filter((item) => item.status === "deprecated") ?? [];
 
   return <main className="model-catalog-page">
     {error && <div className="error-banner">{error}</div>}
@@ -2940,22 +2963,22 @@ function ModelCatalogPage({ session }: { session: Session }) {
         <div>
           <div className="panel-title">{tr("模型与 ONNX 制品", "Models and ONNX artifacts")}</div>
           <p className="stage-help">{tr(
-            "这里保存可审计的实验 ONNX 与最终模型包。指标只用于展示已有证据；本页面不执行在线推理，也不指定推荐或最佳模型。",
-            "This catalog stores auditable experimental ONNX artifacts and final model packages. It displays existing evidence only; it does not run inference or designate a recommended or best model.",
+            "这里保存可审计的实验 ONNX 与最终模型发布。指标只用于展示已有证据；本页面不执行在线推理，也不指定推荐或最佳模型。",
+            "This catalog stores auditable experimental ONNX artifacts and final model releases. It displays existing evidence only; it does not run inference or designate a recommended or best model.",
           )}</p>
         </div>
         <button disabled={busy} onClick={() => void refresh(true)}>{busy ? tr("正在刷新…", "Refreshing…") : tr("刷新 Bucket", "Refresh bucket")}</button>
       </div>
       <div className="model-section-tabs">
-        <button className={section === "packages" ? "active" : ""} onClick={() => setSection("packages")}>{tr("模型包", "Model packages")}</button>
+        <button className={section === "models" ? "active" : ""} onClick={() => setSection("models")}>{tr("模型发布", "Model releases")}</button>
         <button className={section === "experiments" ? "active" : ""} onClick={() => setSection("experiments")}>{tr("实验 ONNX", "Experimental ONNX")}</button>
       </div>
       {!catalog && !error && <span className="muted">{tr("正在读取模型目录…", "Loading model catalog…")}</span>}
       {catalog?.invalid_publications.map((item) => <div className="warning-banner compact-banner" key={item.object_key}><code>{item.object_key}</code> · {userVisibleMessage(item.detail)}</div>)}
-      {catalog && section === "packages" && <div className="model-publication-list">
-        {availablePackages.length === 0 && <div className="placeholder compact">{tr("尚未发布最终模型包", "No final model package has been published")}</div>}
-        {availablePackages.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}
-        {deprecatedPackages.length > 0 && <details className="model-deprecated-group"><summary>{tr("已弃用模型包", "Deprecated model packages")} · {deprecatedPackages.length}</summary>{deprecatedPackages.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>}
+      {catalog && section === "models" && <div className="model-publication-list">
+        {availableModels.length === 0 && <div className="placeholder compact">{tr("尚未发布最终模型", "No final model release has been published")}</div>}
+        {availableModels.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}
+        {deprecatedModels.length > 0 && <details className="model-deprecated-group"><summary>{tr("已弃用模型", "Deprecated model releases")} · {deprecatedModels.length}</summary>{deprecatedModels.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>}
       </div>}
       {catalog && section === "experiments" && <div className="model-publication-list">
         <ModelExperimentGroup title={tr("正式交叉验证", "Formal cross-validation")} entries={formal} session={session} onChanged={() => refresh(true)} empty={tr("尚无正式交叉验证发布", "No formal cross-validation publication")} />
@@ -2998,8 +3021,8 @@ function ModelPublicationCard({ summary, session, onChanged }: { summary: ModelC
     }
   };
 
-  const title = summary.kind === "package"
-    ? (summary.display_name || summary.model_code || summary.publication_id)
+  const title = summary.kind === "model"
+    ? (summary.name || summary.model_code || summary.publication_id)
     : (summary.experiment_id || summary.publication_id);
   return <article className={`model-publication ${summary.status === "deprecated" ? "deprecated" : ""}`}>
     <div className="model-publication-heading">
@@ -3009,15 +3032,15 @@ function ModelPublicationCard({ summary, session, onChanged }: { summary: ModelC
     {error && <div className="error-banner compact-banner">{error}</div>}
     {!detail && !error && <span className="muted">{tr("正在读取发布详情…", "Loading publication details…")}</span>}
     {detail && summary.kind === "experiment" && <ExperimentEvidence detail={detail} />}
-    {detail && summary.kind === "package" && <PackageEvidence detail={detail} />}
+    {detail && summary.kind === "model" && <ModelReleaseEvidence detail={detail} />}
   </article>;
 }
 
 function ModelDownloads({ detail }: { detail: ModelCatalogDetail }) {
   const base = `/api/v1/model-catalog/${detail.kind}/${encodeURIComponent(detail.publication_id)}`;
   return <div className="model-downloads">
-    {detail.files.map((file) => <a className="button-link" key={file.file_id} href={`${base}/files/${encodeURIComponent(file.file_id)}/download`} download title={file.sha256}>{file.file_id === "bundle" ? tr("下载完整包", "Download full bundle") : `${tr("下载", "Download")} ${file.filename}`} · {formatDatasetBytes(file.size_bytes)}</a>)}
-    <a className="button-link" href={`${base}/marker/download`} download>{tr("下载原始 JSON", "Download raw JSON")}</a>
+    {detail.files.map((file) => <a className="button-link" key={file.file_id} href={`${base}/files/${encodeURIComponent(file.file_id)}/download`} download title={file.sha256}>{file.file_id === "result-bundle" ? tr("下载完整实验结果", "Download full experiment result") : `${tr("下载", "Download")} ${file.filename}`} · {formatDatasetBytes(file.size_bytes)}</a>)}
+    <a className="button-link" href={`${base}/marker/download`} download>{tr("下载 metadata.json", "Download metadata.json")}</a>
   </div>;
 }
 
@@ -3025,10 +3048,10 @@ function RawModelJson({ marker }: { marker: Record<string, any> }) {
   return <details className="model-raw-json"><summary>{tr("查看原始 JSON", "View raw JSON")}</summary><pre>{JSON.stringify(marker, null, 2)}</pre></details>;
 }
 
-function PackageEvidence({ detail }: { detail: ModelCatalogDetail }) {
-  const manifest = detail.marker.manifest ?? {};
+function ModelReleaseEvidence({ detail }: { detail: ModelCatalogDetail }) {
+  const metadata = detail.marker;
   return <div className="model-package-detail">
-    <div className="model-facts"><span><strong>{tr("模型", "Model")}</strong>{manifest.model_code ?? "—"}</span><span><strong>{tr("输入语义", "Input semantic")}</strong>{manifest.input?.semantic ?? "—"}</span><span><strong>{tr("输出语义", "Output semantic")}</strong>{manifest.output?.semantic ?? "—"}</span><span><strong>{tr("逻辑摘要", "Logical digest")}</strong><code>{detail.marker.logical_digest ?? "—"}</code></span></div>
+    <div className="model-facts"><span><strong>{tr("模型", "Model")}</strong>{metadata.model_code ?? "—"}</span><span><strong>{tr("输入语义", "Input semantic")}</strong>{metadata.input?.semantic ?? "—"}</span><span><strong>{tr("输出语义", "Output semantic")}</strong>{metadata.output?.semantic ?? "—"}</span><span><strong>{tr("判定阈值", "Decision threshold")}</strong>{metadata.decision?.score_threshold?.value ?? "—"}</span></div>
     <ModelDownloads detail={detail} />
     <RawModelJson marker={detail.marker} />
   </div>;
@@ -3056,10 +3079,10 @@ function ExperimentEvidence({ detail }: { detail: ModelCatalogDetail }) {
     else { setSortMetric(metric); setAscending(false); }
   };
   return <div className="experiment-evidence">
-    <div className="model-facts"><span><strong>{tr("证据级别", "Evidence level")}</strong>{detail.evidence_level === "formal_cv" ? tr("正式交叉验证", "Formal cross-validation") : tr("工程验证", "Engineering validation")}</span><span><strong>{tr("任务", "Jobs")}</strong>{detail.scheduled_jobs ?? "—"}</span><span><strong>{tr("数据快照", "Data snapshot")}</strong>{detail.base_snapshot_id ?? "—"}</span><span><strong>{tr("数据质量", "Data quality")}</strong>{detail.data_quality_status ?? "—"}</span></div>
+    <div className="model-facts"><span><strong>{tr("证据级别", "Evidence level")}</strong>{detail.evidence_level === "formal_cv" ? tr("正式交叉验证", "Formal cross-validation") : tr("工程验证", "Engineering validation")}</span><span><strong>{tr("任务", "Jobs")}</strong>{detail.scheduled_jobs ?? "—"}</span><span><strong>{tr("数据快照", "Data snapshot")}</strong>{detail.base_snapshot_id ?? "—"}</span></div>
     <details className="model-column-picker"><summary>{tr("选择附加指标列", "Choose additional metric columns")}</summary>{MODEL_METRICS.filter((item) => !item.core).map((item) => <label key={item.id}><input type="checkbox" checked={extraMetrics.includes(item.id)} onChange={(event) => setExtraMetrics((current) => event.target.checked ? [...current, item.id] : current.filter((value) => value !== item.id))} />{tr(item.labelZh, item.labelEn)}</label>)}</details>
     <div className="model-table-scroll"><table className="model-metrics-table"><thead><tr><th>{tr("方法", "Method")}</th><th>{tr("训练配方", "Training recipe")}</th><th>{tr("输入", "Input")}</th>{columns.map((item) => <th key={item.id}><button onClick={() => chooseSort(item.id)}>{tr(item.labelZh, item.labelEn)} {sortMetric === item.id ? (ascending ? "↑" : "↓") : ""}</button></th>)}</tr></thead><tbody>{sorted.map((method) => <tr key={method.method_id} className={selected?.method_id === method.method_id ? "selected" : ""} onClick={() => setSelectedMethod(method.method_id)}><td>{method.model_id}</td><td>{method.training_recipe}</td><td>{method.input_semantic}</td>{columns.map((item) => <td key={item.id}>{formatMetric(modelMetric(method, item))}</td>)}</tr>)}</tbody></table></div>
-    {selected && <section className="model-method-detail"><h3>{selected.model_id} · {selected.training_recipe}</h3><p>{selected.fold_count} {tr("个 fold；表格展示均值 ± 样本标准差。警报指标仅使用该实验声明的参考策略。", "folds; the table reports mean ± sample standard deviation. Alarm metrics use only the experiment's declared reference policy.")}</p><div className="model-artifact-grid">{methodArtifacts.map((artifact) => <article key={artifact.artifact_id}><strong>{artifact.artifact_id}</strong><span>fold {artifact.fold} · seed {artifact.seed}</span><span>{String(artifact.input.semantic ?? "—")} → fall_score</span><div className="save-row">{artifact.files?.onnx_file_id && <a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(artifact.files.onnx_file_id)}/download`} download>{tr("下载 ONNX", "Download ONNX")}</a>}{artifact.files?.metadata_file_id && <a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(artifact.files.metadata_file_id)}/download`} download>{tr("下载 metadata", "Download metadata")}</a>}</div><details><summary>{tr("输入、校验与其他警报策略", "Input, parity, and other alarm policies")}</summary><pre>{JSON.stringify({ input: artifact.input, output: artifact.output, parity: artifact.parity, alarm_policies: artifact.alarm_policies ?? [] }, null, 2)}</pre></details></article>)}</div></section>}
+    {selected && <section className="model-method-detail"><h3>{selected.model_id} · {selected.training_recipe}</h3><p>{selected.fold_count} {tr("个 fold；表格展示均值 ± 样本标准差。每个 ONNX 同时绑定验证集选择的阈值和所有已评估触发策略。", "folds; the table reports mean ± sample standard deviation. Each ONNX is bound to its validation-selected threshold and all evaluated trigger policies.")}</p><div className="model-artifact-grid">{methodArtifacts.map((artifact) => <article key={artifact.artifact_id}><strong>{artifact.artifact_id}</strong><span>fold {artifact.fold} · seed {artifact.seed}</span><span>{String(artifact.input.semantic ?? "—")} → fall_score</span><div className="save-row"><a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(`onnx-${artifact.artifact_id}`)}/download`} download>{tr("下载 ONNX", "Download ONNX")}</a></div><details><summary>{tr("输入、判定规则与校验", "Input, decision rules, and parity")}</summary><pre>{JSON.stringify({ input: artifact.input, output: artifact.output, decision: artifact.decision, parity: artifact.parity }, null, 2)}</pre></details></article>)}</div></section>}
     <ModelDownloads detail={detail} />
     <RawModelJson marker={detail.marker} />
   </div>;

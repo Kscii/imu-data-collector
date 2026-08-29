@@ -17,6 +17,7 @@ MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v1"
 CONTRACT_VERSION = "imu_benchmark_contract_v2"
 HDF5_SCHEMA_VERSION = "3.1.0"
 SAMPLING_RATE_HZ = 25.0
+DATASET_HANDOFF_VERSION = "0.1.0"
 Kind = Literal["base", "team"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
@@ -39,6 +40,9 @@ class ValidatedSnapshot:
             "current": current,
             "created_at_utc": self.manifest.get("created_at_utc"),
             "contract_version": self.manifest["contract_version"],
+            "handoff_contract_version": self.manifest.get(
+                "handoff_contract_version"
+            ),
             "manifest_sha256": hashlib.sha256(self.manifest_bytes).hexdigest(),
             "source": self.manifest.get("source"),
             "files": [entry for entry, _info in self.files.values()],
@@ -92,6 +96,8 @@ class DatasetCatalog:
             raise ValueError("数据集 manifest schema 不受支持")
         if manifest.get("contract_version") != CONTRACT_VERSION:
             raise ValueError("数据集合同版本不受支持")
+        if kind == "team" and manifest.get("handoff_contract_version") != DATASET_HANDOFF_VERSION:
+            raise ValueError("团队数据 handoff 合同版本不受支持")
         if manifest.get("kind") != kind:
             raise ValueError("数据集 manifest kind 不一致")
         snapshot_id = self._safe_identifier(manifest.get("snapshot_id"), name="snapshot_id")
@@ -208,10 +214,14 @@ class DatasetCatalog:
             "manifest_sha256",
             "updated_at_utc",
         }
+        if kind == "team":
+            required.add("handoff_contract_version")
         if set(current) != required or current.get("schema_version") != CURRENT_SCHEMA:
             raise ValueError("current pointer schema 无效")
         if current.get("kind") != kind:
             raise ValueError("current pointer kind 不一致")
+        if kind == "team" and current.get("handoff_contract_version") != DATASET_HANDOFF_VERSION:
+            raise ValueError("团队 current pointer handoff 合同版本不受支持")
         snapshot_id = self._safe_identifier(current.get("snapshot_id"), name="current snapshot_id")
         expected_manifest = f"{self._prefix(kind)}/{snapshot_id}/manifest.json"
         if current.get("manifest_object") != expected_manifest:

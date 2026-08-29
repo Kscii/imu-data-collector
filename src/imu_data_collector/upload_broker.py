@@ -42,14 +42,17 @@ from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
 from imu_data_collector.models import CaptureManifestV2
 
-EXPERIMENT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
-PACKAGE_PUBLICATION_SCHEMA = "imu_model_package_publication_v1"
-MODEL_STATE_SCHEMA = "imu_model_publication_state_v1"
-EXPERIMENT_PREFIXES = {
+RESULT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
+EXPERIMENT_PUBLICATION_SCHEMA = "imu_experiment_catalog_v0"
+MODEL_PUBLICATION_SCHEMA = "imu_model_release_v0"
+MODEL_CONTRACT_VERSION = "0.1.0"
+MODEL_STATE_SCHEMA = "imu_model_catalog_state_v0"
+RESULT_PREFIXES = {
     "formal_cv": "benchmark-results/temporal-core",
     "engineering": "benchmark-results/engineering",
 }
-PACKAGE_PREFIX = "benchmark-models/packages"
+EXPERIMENT_PREFIX = "benchmark-model-catalog/experiments"
+MODEL_PREFIX = "benchmark-model-catalog/models"
 MODEL_CONTENT_TYPES = {
     "application/gzip",
     "application/json",
@@ -132,14 +135,14 @@ def _expected_model_publication(
     marker = body.marker
     publication_id = body.publication_id
     expected: list[dict[str, Any]] = []
-    if body.publication_kind == "experiment":
+    if body.publication_kind == "result":
         if (
-            marker.get("schema_version") != EXPERIMENT_PUBLICATION_SCHEMA
+            marker.get("schema_version") != RESULT_PUBLICATION_SCHEMA
             or marker.get("run_id") != publication_id
-            or marker.get("evidence_level") not in EXPERIMENT_PREFIXES
+            or marker.get("evidence_level") not in RESULT_PREFIXES
         ):
-            raise HTTPException(status_code=422, detail="实验发布 manifest 无效")
-        prefix = f"{EXPERIMENT_PREFIXES[marker['evidence_level']]}/{publication_id}"
+            raise HTTPException(status_code=422, detail="结果发布 manifest 无效")
+        prefix = f"{RESULT_PREFIXES[marker['evidence_level']]}/{publication_id}"
         marker_key = f"{prefix}/manifest.json"
         bundle = marker.get("bundle")
         if not isinstance(bundle, dict) or bundle.get("filename") != "run.tar.gz":
@@ -188,44 +191,67 @@ def _expected_model_publication(
             expected.append(
                 _artifact(file_id, object_key, item, content_type=content_type)
             )
+    elif body.publication_kind == "experiment":
+        if (
+            marker.get("schema_version") != EXPERIMENT_PUBLICATION_SCHEMA
+            or marker.get("contract_version") != MODEL_CONTRACT_VERSION
+            or marker.get("publication_id") != publication_id
+        ):
+            raise HTTPException(status_code=422, detail="实验目录 metadata 无效")
+        prefix = f"{EXPERIMENT_PREFIX}/{publication_id}"
+        marker_key = f"{prefix}/metadata.json"
+        artifacts = marker.get("artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            raise HTTPException(status_code=422, detail="实验目录缺少 ONNX 制品")
+        for item in artifacts:
+            if not isinstance(item, dict) or not isinstance(item.get("artifact_id"), str):
+                raise HTTPException(status_code=422, detail="实验 ONNX 元数据无效")
+            artifact_id = item["artifact_id"]
+            descriptor = item.get("onnx")
+            if not isinstance(descriptor, dict):
+                raise HTTPException(status_code=422, detail="实验 ONNX 描述符无效")
+            object_key = descriptor.get("object_key")
+            if (
+                not isinstance(object_key, str)
+                or object_key != f"{prefix}/onnx/{artifact_id}.onnx"
+                or descriptor.get("content_type") != "application/octet-stream"
+            ):
+                raise HTTPException(status_code=422, detail="实验 ONNX 对象无效")
+            expected.append(
+                _artifact(
+                    f"onnx-{artifact_id}",
+                    object_key,
+                    descriptor,
+                    content_type="application/octet-stream",
+                )
+            )
     else:
         if (
-            marker.get("schema_version") != PACKAGE_PUBLICATION_SCHEMA
-            or marker.get("package_id") != publication_id
+            marker.get("schema_version") != MODEL_PUBLICATION_SCHEMA
+            or marker.get("contract_version") != MODEL_CONTRACT_VERSION
+            or marker.get("release_id") != publication_id
         ):
-            raise HTTPException(status_code=422, detail="模型包 publication 无效")
-        prefix = f"{PACKAGE_PREFIX}/{publication_id}"
-        marker_key = f"{prefix}/publication.json"
-        bundle = marker.get("bundle")
-        if not isinstance(bundle, dict) or bundle.get("filename") != "package.tar.gz":
-            raise HTTPException(status_code=422, detail="模型包 bundle 无效")
+            raise HTTPException(status_code=422, detail="模型发布 metadata 无效")
+        prefix = f"{MODEL_PREFIX}/{publication_id}"
+        marker_key = f"{prefix}/metadata.json"
+        descriptor = marker.get("model")
+        if not isinstance(descriptor, dict):
+            raise HTTPException(status_code=422, detail="模型发布缺少 model.onnx")
+        object_key = descriptor.get("object_key")
+        if (
+            not isinstance(object_key, str)
+            or object_key != f"{prefix}/model.onnx"
+            or descriptor.get("content_type") != "application/octet-stream"
+        ):
+            raise HTTPException(status_code=422, detail="模型发布对象无效")
         expected.append(
             _artifact(
-                "bundle",
-                f"{prefix}/package.tar.gz",
-                bundle,
-                content_type="application/gzip",
+                "model",
+                object_key,
+                descriptor,
+                content_type="application/octet-stream",
             )
         )
-        files = marker.get("files")
-        if not isinstance(files, list) or not files:
-            raise HTTPException(status_code=422, detail="模型包文件列表无效")
-        for item in files:
-            if not isinstance(item, dict):
-                raise HTTPException(status_code=422, detail="模型包文件列表无效")
-            file_id = item.get("file_id")
-            object_key = item.get("object_key")
-            content_type = item.get("content_type")
-            if (
-                not isinstance(file_id, str)
-                or not isinstance(object_key, str)
-                or not object_key.startswith(f"{prefix}/files/")
-                or content_type not in MODEL_CONTENT_TYPES
-            ):
-                raise HTTPException(status_code=422, detail="模型包对象无效")
-            expected.append(
-                _artifact(file_id, object_key, item, content_type=content_type)
-            )
     actual = [item.model_dump(mode="json") for item in body.artifacts]
     if actual != expected:
         raise HTTPException(status_code=422, detail="上传制品与发布标记推导结果不一致")
@@ -360,8 +386,9 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
                 ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
             ),
             "accepted_model_publication_schema_versions": [
+                RESULT_PUBLICATION_SCHEMA,
                 EXPERIMENT_PUBLICATION_SCHEMA,
-                PACKAGE_PUBLICATION_SCHEMA,
+                MODEL_PUBLICATION_SCHEMA,
             ],
             "model_publication_lifecycle": ["available", "deprecated"],
             "direct_to_bucket_resumable": True,
@@ -747,15 +774,18 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
         )
 
     def model_state_blob(
-        publication_kind: Literal["experiment", "package"], publication_id: str
+        publication_kind: Literal["result", "experiment", "model"],
+        publication_id: str,
     ) -> storage.Blob:
-        if publication_kind == "package":
-            candidates = [f"{PACKAGE_PREFIX}/{publication_id}/state.json"]
-        else:
+        if publication_kind == "result":
             candidates = [
                 f"{root}/{publication_id}/state.json"
-                for root in EXPERIMENT_PREFIXES.values()
+                for root in RESULT_PREFIXES.values()
             ]
+        elif publication_kind == "experiment":
+            candidates = [f"{EXPERIMENT_PREFIX}/{publication_id}/state.json"]
+        else:
+            candidates = [f"{MODEL_PREFIX}/{publication_id}/state.json"]
         for key in candidates:
             blob = bucket.blob(key)
             if blob.exists(client):
@@ -765,7 +795,7 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/model-publications/{publication_kind}/{publication_id}/restore")
     def restore_model_publication(
-        publication_kind: Literal["experiment", "package"],
+        publication_kind: Literal["result", "experiment", "model"],
         publication_id: str,
         body: ModelPublicationRestoreRequest,
         current: Annotated[dict[str, str], Depends(model_actor)],

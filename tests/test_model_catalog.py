@@ -44,37 +44,42 @@ def _put(
 
 def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
     run_id = "engineering-example"
-    prefix = f"benchmark-results/engineering/{run_id}"
-    bundle = _put(store, tmp_path, f"{prefix}/run.tar.gz", b"bundle")
-    onnx = _put(store, tmp_path, f"{prefix}/models/model-fold0/model.onnx", b"onnx")
+    prefix = f"benchmark-model-catalog/experiments/{run_id}"
+    result_prefix = f"benchmark-results/engineering/{run_id}"
+    bundle = _put(store, tmp_path, f"{result_prefix}/run.tar.gz", b"bundle")
+    onnx = _put(store, tmp_path, f"{prefix}/onnx/model-fold0.onnx", b"onnx")
     marker = {
-        "schema_version": "imu_benchmark_result_manifest_v2",
+        "schema_version": "imu_experiment_catalog_v0",
+        "contract_version": "0.1.0",
+        "publication_id": run_id,
         "run_id": run_id,
         "experiment_id": "onnx_full_parity_preflight_v1",
         "evidence_level": "engineering",
         "created_at_utc": "2026-08-29T00:00:00+00:00",
         "scheduled_jobs": 7,
         "source": {"commit": "abc", "dirty": False},
-        "base_snapshot_id": "imu_25hz_snapshot_v2",
-        "snapshot_sha256": "1" * 64,
-        "resolved_config_sha256": "2" * 64,
-        "evaluation_fingerprint": {"id": "fixture"},
-        "data_quality_status": "PASS",
+        "data": {
+            "base_snapshot_id": "imu_25hz_snapshot_v2",
+            "snapshot_sha256": "1" * 64,
+        },
+        "evaluation_fingerprint": "2" * 64,
         "known_limitations": ["engineering evidence"],
-        "bundle": {"filename": "run.tar.gz", **bundle},
-        "files": [],
-        "quick_files": [],
-        "direct_files": [
-            {
-                "file_id": "onnx-model-fold0",
-                "artifact_id": "model-fold0",
-                "role": "onnx",
-                "filename": "model.onnx",
-                "object_key": f"{prefix}/models/model-fold0/model.onnx",
-                "content_type": "application/octet-stream",
-                **onnx,
-            }
-        ],
+        "result_evidence": {
+            "schema_version": "imu_benchmark_result_manifest_v2",
+            "manifest": {
+                "filename": "manifest.json",
+                "object_key": f"{result_prefix}/manifest.json",
+                "size_bytes": 123,
+                "sha256": "3" * 64,
+                "content_type": "application/json",
+            },
+            "bundle": {
+                "filename": "run.tar.gz",
+                "object_key": f"{result_prefix}/run.tar.gz",
+                "content_type": "application/gzip",
+                **bundle,
+            },
+        },
         "methods": [
             {
                 "method_id": "model-natural",
@@ -84,13 +89,42 @@ def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
                 "metrics": {},
             }
         ],
-        "artifacts": [{"artifact_id": "model-fold0"}],
+        "artifacts": [
+            {
+                "artifact_id": "model-fold0",
+                "decision": {
+                    "score_threshold": {
+                        "value": 0.5,
+                        "selection_split": "validation",
+                        "comparison": ">=",
+                    },
+                    "anchor": "window_end",
+                    "trigger_policies": [
+                        {
+                            "policy_id": "one_of_one",
+                            "required_positive_windows": 1,
+                            "lookback_windows": 1,
+                            "consecutive": True,
+                            "cooldown_seconds": 10.0,
+                            "reference_policy": True,
+                            "validation_pareto": True,
+                        }
+                    ],
+                },
+                "onnx": {
+                    "filename": "model-fold0.onnx",
+                    "object_key": f"{prefix}/onnx/model-fold0.onnx",
+                    "content_type": "application/octet-stream",
+                    **onnx,
+                },
+            }
+        ],
     }
-    store.write_json(f"{prefix}/manifest.json", marker, if_generation_match=0)
+    store.write_json(f"{prefix}/metadata.json", marker, if_generation_match=0)
     store.write_json(
         f"{prefix}/state.json",
         {
-            "schema_version": "imu_model_publication_state_v1",
+            "schema_version": "imu_model_catalog_state_v0",
             "kind": "experiment",
             "publication_id": run_id,
             "status": "available",
@@ -103,10 +137,52 @@ def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
     return run_id
 
 
+def _install_model(store: LocalFilesystemStore, tmp_path: Path) -> str:
+    release_id = "model-release-v1"
+    prefix = f"benchmark-model-catalog/models/{release_id}"
+    model = _put(store, tmp_path, f"{prefix}/model.onnx", b"model")
+    marker = {
+        "schema_version": "imu_model_release_v0",
+        "contract_version": "0.1.0",
+        "release_id": release_id,
+        "model_code": "model",
+        "name": "Model release",
+        "created_at_utc": "2026-08-29T01:00:00+00:00",
+        "source": {"commit": "abc", "dirty": False},
+        "decision": {
+            "score_threshold": {"value": 0.5, "comparison": ">="},
+            "trigger_policy": {"policy_id": "one_of_one"},
+            "anchor": "window_end",
+        },
+        "model": {
+            "filename": "model.onnx",
+            "object_key": f"{prefix}/model.onnx",
+            "content_type": "application/octet-stream",
+            **model,
+        },
+    }
+    store.write_json(f"{prefix}/metadata.json", marker, if_generation_match=0)
+    store.write_json(
+        f"{prefix}/state.json",
+        {
+            "schema_version": "imu_model_catalog_state_v0",
+            "kind": "model",
+            "publication_id": release_id,
+            "status": "available",
+            "updated_at_utc": "2026-08-29T01:00:00+00:00",
+            "updated_by": "xfan0282",
+            "history": [],
+        },
+        if_generation_match=0,
+    )
+    return release_id
+
+
 def test_model_catalog_lists_downloads_and_admin_deprecates(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
     run_id = _install_experiment(store, tmp_path)
+    release_id = _install_model(store, tmp_path)
     app = create_annotation_app(settings, store=store)
 
     with TestClient(app) as client:
@@ -123,6 +199,7 @@ def test_model_catalog_lists_downloads_and_admin_deprecates(tmp_path: Path) -> N
 
     assert catalog.status_code == 200
     assert catalog.json()["experiments"][0]["evidence_level"] == "engineering"
+    assert catalog.json()["models"][0]["release_id"] == release_id
     assert detail.status_code == 200
     assert detail.json()["marker"]["methods"][0]["model_id"] == "model"
     assert partial.status_code == 206
@@ -136,7 +213,7 @@ def test_model_catalog_quarantines_artifact_without_sha_metadata(tmp_path: Path)
     store = LocalFilesystemStore(tmp_path / "objects")
     run_id = _install_experiment(store, tmp_path)
     metadata = store._metadata_path(
-        f"benchmark-results/engineering/{run_id}/models/model-fold0/model.onnx"
+        f"benchmark-model-catalog/experiments/{run_id}/onnx/model-fold0.onnx"
     )
     metadata.unlink()
 

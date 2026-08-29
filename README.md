@@ -26,7 +26,7 @@
 [桌面跨平台采集](docs/desktop-platforms.md)；无云密钥桌面上传见
 [桌面 OAuth 与上传代理](docs/desktop-upload.md)。
 
-实验 ONNX、最终模型包、最小权限发布和标注平台模型目录见
+实验 ONNX、最终两文件模型发布、最小权限发布和标注平台模型目录见
 [ONNX 模型目录](docs/model-catalog.md)。
 
 Windows 安装包提供两个入口：普通用户双击“IMU 数采平台”启动系统托盘并自动打开浏览器；
