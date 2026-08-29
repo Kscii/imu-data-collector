@@ -37,12 +37,15 @@ from imu_data_collector.config import (
     load_calibration_evidence,
 )
 from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
+from imu_data_collector.cw12eu import calibrate_counts
 from imu_data_collector.file_lock import exclusive_file_lock
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
     ActivityTaxonomyDefinition,
     ActivityTaxonomyEntry,
+    ActivityTaxonomyMigrationApplyRequest,
+    ActivityTaxonomyMigrationPreviewRequest,
     ActivityTaxonomyUpdateRequest,
     AnnotationCapabilities,
     AnnotationDocument,
@@ -101,6 +104,7 @@ class AnnotationService:
         self.reviews = AnnotationReviewStore(store, self.taxonomy)
         self._release_delete_lock = threading.RLock()
         self._catalog_refresh_lock = threading.Lock()
+        self._taxonomy_migration_lock = threading.RLock()
 
     def _publish_taxonomy(self, definition: ActivityTaxonomyDefinition) -> dict[str, Any]:
         payload = definition.model_dump(mode="json")
@@ -165,11 +169,7 @@ class AnnotationService:
                 for item in (*current.fall, *current.non_fall)
             ):
                 raise ValueError(f"活动标签 code 已存在：{request.code}")
-            entry = ActivityTaxonomyEntry(
-                code=request.code,
-                display_name_zh=request.display_name_zh.strip(),
-                display_name_en=request.display_name_en.strip(),
-            )
+            entry = ActivityTaxonomyEntry(code=request.code, name=request.name)
             field = request.binary_label.value
             return current.model_copy(
                 update={field: [*getattr(current, field), entry]}
@@ -185,10 +185,9 @@ class AnnotationService:
         def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
             found = False
             changes = {
-                name: value.strip() if isinstance(value, str) else value
-                for name, value in {
-                    "display_name_zh": request.display_name_zh,
-                    "display_name_en": request.display_name_en,
+                key: value
+                for key, value in {
+                    "name": request.name,
                     "active": request.active,
                 }.items()
                 if value is not None
@@ -236,6 +235,242 @@ class AnnotationService:
         return self._publish_taxonomy(
             self.taxonomies.mutate(expected_version, update)
         )
+
+    @staticmethod
+    def _taxonomy_entry(
+        definition: dict[str, Any], code: str
+    ) -> tuple[str, dict[str, Any]]:
+        for label in ("fall", "non_fall"):
+            entry = next(
+                (item for item in definition[label] if item["code"] == code), None
+            )
+            if entry is not None:
+                return label, entry
+        raise KeyError(code)
+
+    def preview_taxonomy_migration(
+        self, request: ActivityTaxonomyMigrationPreviewRequest
+    ) -> dict[str, Any]:
+        """冻结当前可变 review 的标签替换影响范围。"""
+
+        if request.source_code == request.target_code:
+            raise ValueError("源标签和目标标签不能相同")
+        definition = self.taxonomy_definition()
+        if definition["version"] != request.expected_version:
+            raise ObjectConflictError("活动标签已经更新，请刷新后重试")
+        source_label, source = self._taxonomy_entry(definition, request.source_code)
+        target_label, target = self._taxonomy_entry(definition, request.target_code)
+        if source_label != target_label:
+            raise ValueError("只能在同一跌倒类型内迁移活动标签")
+        if not target.get("active", True):
+            raise ValueError("目标标签必须处于启用状态")
+
+        recordings: list[dict[str, Any]] = []
+        for manifest in self.catalog.list():
+            try:
+                payload, _generation = self.store.read_json(
+                    self.reviews.key(manifest.recording_id)
+                )
+                review = ReviewDocument.model_validate(payload)
+            except (FileNotFoundError, ValidationError, ValueError):
+                continue
+            segment_count = sum(
+                item.activity_code == request.source_code
+                for item in review.annotations.segments
+            )
+            if not segment_count:
+                continue
+            recordings.append(
+                {
+                    "recording_id": manifest.recording_id,
+                    "data_tier": manifest.data_tier.value,
+                    "workflow_state": review.workflow.state.value,
+                    "review_revision": review.revision,
+                    "annotation_revision": review.annotations.revision,
+                    "segment_count": segment_count,
+                }
+            )
+        recordings.sort(key=lambda item: item["recording_id"])
+        token_payload = {
+            "taxonomy_version": definition["version"],
+            "binary_label": source_label,
+            "source_code": request.source_code,
+            "target_code": request.target_code,
+            "recordings": recordings,
+        }
+        plan_token = hashlib.sha256(
+            json.dumps(
+                token_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            **token_payload,
+            "source_active": bool(source.get("active", True)),
+            "target_active": bool(target.get("active", True)),
+            "affected_recordings": len(recordings),
+            "affected_segments": sum(item["segment_count"] for item in recordings),
+            "plan_token": plan_token,
+        }
+
+    def apply_taxonomy_migration(
+        self,
+        request: ActivityTaxonomyMigrationApplyRequest,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """逐条迁移当前 review；单条失败不会改写该条录制。"""
+
+        expected_confirmation = (
+            f"MIGRATE {request.source_code} TO {request.target_code}"
+        )
+        if request.confirmation != expected_confirmation:
+            raise ValueError(f"二次确认必须完整输入 {expected_confirmation}")
+
+        with self._taxonomy_migration_lock:
+            plan = self.preview_taxonomy_migration(request)
+            if plan["plan_token"] != request.plan_token:
+                raise ObjectConflictError("迁移预览已经过期，请重新预览")
+
+            definition = self.taxonomy_definition()
+            _source_label, source = self._taxonomy_entry(
+                definition, request.source_code
+            )
+            if source.get("active", True):
+                definition = self.update_taxonomy_activity(
+                    request.source_code,
+                    ActivityTaxonomyUpdateRequest(
+                        expected_version=definition["version"], active=False
+                    ),
+                )
+
+            migrated: list[dict[str, Any]] = []
+            conflicts: list[dict[str, str]] = []
+            failed: list[dict[str, str]] = []
+            plan_by_id = {
+                item["recording_id"]: item for item in plan["recordings"]
+            }
+            for recording_id in sorted(plan_by_id):
+                expected = plan_by_id[recording_id]
+                manifest = self.catalog.get(recording_id)
+                if manifest is None:
+                    conflicts.append(
+                        {"recording_id": recording_id, "message": "录制已不在当前索引中"}
+                    )
+                    continue
+                try:
+                    current, _generation = self.reviews.load(manifest)
+                    if current.revision != expected["review_revision"]:
+                        raise ReviewConflictError("review.json 已更新，请重新预览")
+                    annotations = current.annotations.model_copy(
+                        update={
+                            "taxonomy_id": definition["taxonomy_id"],
+                            "taxonomy_version": definition["version"],
+                            "revision": current.annotations.revision + 1,
+                            "segments": [
+                                item.model_copy(
+                                    update={"activity_code": request.target_code}
+                                )
+                                if item.activity_code == request.source_code
+                                else item
+                                for item in current.annotations.segments
+                            ],
+                        }
+                    )
+                    issues = validate_annotations(
+                        annotations, definition, manifest.duration_ns
+                    )
+                    if issues:
+                        raise ValueError("；".join(issues))
+                    candidate = current.model_copy(
+                        update={
+                            "annotations": annotations,
+                            "workflow": workflow_with_timestamp(
+                                current.workflow, last_editor_id=actor_id
+                            ),
+                        }
+                    )
+                    reference = current.active_export
+                    if current.workflow.state == ReviewWorkflowState.COMPLETED:
+                        reference = self._build_training_export(
+                            manifest, candidate, current.revision
+                        )
+
+                    def commit(
+                        latest: ReviewDocument,
+                        next_annotations: AnnotationDocument = annotations,
+                        next_reference: TrainingExportReference | None = reference,
+                    ) -> ReviewDocument:
+                        return latest.model_copy(
+                            update={
+                                "annotations": next_annotations,
+                                "workflow": workflow_with_timestamp(
+                                    latest.workflow, last_editor_id=actor_id
+                                ),
+                                "active_export": next_reference,
+                            }
+                        )
+
+                    updated = self.reviews.mutate(
+                        manifest, current.revision, commit
+                    )
+                    migrated.append(
+                        {
+                            "recording_id": recording_id,
+                            "before_review_revision": current.revision,
+                            "after_review_revision": updated.revision,
+                            "segment_count": expected["segment_count"],
+                            "workflow_state": updated.workflow.state.value,
+                            "export_rebuilt": (
+                                current.workflow.state
+                                == ReviewWorkflowState.COMPLETED
+                            ),
+                        }
+                    )
+                except ReviewConflictError as error:
+                    conflicts.append(
+                        {"recording_id": recording_id, "message": str(error)}
+                    )
+                except Exception as error:
+                    logger.exception(
+                        "活动标签迁移失败 recording_id=%s source=%s target=%s",
+                        recording_id,
+                        request.source_code,
+                        request.target_code,
+                    )
+                    failed.append(
+                        {"recording_id": recording_id, "message": str(error)}
+                    )
+
+            remaining_usage = self._taxonomy_usage().get(request.source_code, 0)
+            timestamp = datetime.now(UTC)
+            receipt_id = (
+                timestamp.strftime("%Y%m%dT%H%M%S%fZ")
+                + "-"
+                + request.plan_token[:12]
+            )
+            receipt = {
+                "schema_version": "1.0.0",
+                "migration_id": receipt_id,
+                "created_at_utc": timestamp.isoformat(),
+                "actor_id": actor_id,
+                "source_code": request.source_code,
+                "target_code": request.target_code,
+                "plan_token": request.plan_token,
+                "taxonomy_version": definition["version"],
+                "migrated": migrated,
+                "conflicts": conflicts,
+                "failed": failed,
+                "remaining_usage": remaining_usage,
+            }
+            receipt_key = f"taxonomy-migrations/{receipt_id}.json"
+            self.store.write_json(receipt_key, receipt, if_generation_match=0)
+            return {
+                **receipt,
+                "receipt_object_key": receipt_key,
+                "taxonomy": self.taxonomy_admin_summary(),
+            }
 
     @contextmanager
     def _cache_lock(self, digest: str) -> Iterator[None]:
@@ -531,6 +766,123 @@ class AnnotationService:
         ):
             raise ValueError(f"校准证据制品校验失败：{role}")
         return artifact, info
+
+    def cached_calibration_evidence_h5(self, recording_id: str) -> Path:
+        """下载并校验不可变校准证据 H5，按内容摘要复用本地缓存。"""
+
+        artifact, _info = self.calibration_evidence_artifact(
+            recording_id, "capture_h5"
+        )
+        digest = str(artifact["sha256"])
+        size_bytes = int(artifact["size_bytes"])
+        object_key = str(artifact["object_key"])
+        directory = self.cache_root / "calibration-objects" / digest
+        path = directory / "capture.h5"
+        marker = directory / "verified.json"
+        expected = {
+            "sha256": digest,
+            "size_bytes": size_bytes,
+            "object_key": object_key,
+        }
+        with self._cache_lock(digest):
+            if path.is_file() and path.stat().st_size == size_bytes:
+                try:
+                    if json.loads(marker.read_text(encoding="utf-8")) == expected:
+                        return path
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    pass
+                if sha256_file(path) == digest:
+                    self._write_cache_marker(marker, expected)
+                    return path
+            path.unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
+            self.store.download_file(object_key, path)
+            if path.stat().st_size != size_bytes or sha256_file(path) != digest:
+                path.unlink(missing_ok=True)
+                raise ValueError("下载后的校准证据 H5 大小或 SHA-256 不匹配")
+            self._write_cache_marker(marker, expected)
+            return path
+
+    def calibration_evidence_analysis(self, recording_id: str) -> dict[str, Any]:
+        """返回证据原始帧，以及用当前权威档案即时推导的 SI 曲线。"""
+
+        path = self.cached_calibration_evidence_h5(recording_id)
+        with h5py.File(path, "r") as handle:
+            time_ns = np.asarray(
+                handle["imu/samples/recording_time_ns"], dtype=np.int64
+            )
+            raw_counts = np.asarray(
+                handle["imu/samples/raw_counts"], dtype=np.int16
+            )
+            trailer_dataset = handle.get("imu/samples/trailer")
+            trailer = (
+                np.asarray(trailer_dataset, dtype=np.uint8)
+                if trailer_dataset is not None
+                else np.empty((len(raw_counts), 0), dtype=np.uint8)
+            )
+            frame_recording_ns = np.asarray(
+                handle["video/frames/recording_time_ns"], dtype=np.int64
+            )
+            media_dataset = handle.get("video/frames/media_time_ns")
+            frame_media_ns = (
+                np.asarray(media_dataset, dtype=np.int64)
+                if media_dataset is not None
+                else frame_recording_ns.copy()
+            )
+
+        si_values: np.ndarray | None = None
+        conversion_error: str | None = None
+        calibration: CalibrationProfile | None = None
+        try:
+            calibration = self._authoritative_calibration()
+            si_values = calibrate_counts(
+                raw_counts,
+                calibration.accel_counts_per_g,
+                calibration.gyro_counts_per_dps,
+                accel_bias_counts=calibration.accel_bias_counts,
+                gyro_bias_counts=calibration.gyro_bias_counts,
+                raw_axis_order=calibration.raw_axis_order,
+                axis_signs=calibration.axis_signs,
+            )
+        except (OSError, ValueError) as error:
+            conversion_error = str(error)
+
+        frame_hex = [
+            " ".join(
+                f"{byte:02X}"
+                for byte in (
+                    row.astype(">i2").tobytes()
+                    + trailer[index].tobytes()
+                )
+            )
+            for index, row in enumerate(raw_counts)
+        ]
+        return {
+            "recording_id": recording_id,
+            "video": {
+                "frame_count": len(frame_recording_ns),
+                "recording_time_ns": frame_recording_ns.tolist(),
+                "media_time_ns": frame_media_ns.tolist(),
+            },
+            "imu": {
+                "sample_index": list(range(len(raw_counts))),
+                "time_ns": time_ns.tolist(),
+                "time_s": (time_ns / 1e9).tolist(),
+                "raw_counts": raw_counts.tolist(),
+                "values_si": si_values.tolist() if si_values is not None else [],
+                "trailer": trailer.tolist(),
+                "frame_hex": frame_hex,
+            },
+            "conversion": {
+                "available": si_values is not None,
+                "source": "runtime_authoritative_profile",
+                "profile_id": calibration.profile_id if calibration else None,
+                "evidence_sha256": (
+                    calibration.evidence_sha256 if calibration else None
+                ),
+                "error": conversion_error,
+            },
+        }
 
     def archive_calibration_evidence(
         self,

@@ -312,9 +312,10 @@ def load_activity_taxonomy(path: Path) -> dict[str, Any]:
             code = item.get("code") if isinstance(item, dict) else None
             if not code or code in codes:
                 raise ValueError(f"Invalid or duplicate activity code: {code!r}")
-            for field_name in ("display_name_zh", "display_name_en"):
-                if not isinstance(item.get(field_name), str) or not item[field_name].strip():
-                    raise ValueError(f"Activity {code!r} requires {field_name}")
+            if not isinstance(item.get("name"), str) or not item["name"].strip():
+                raise ValueError(f"Activity {code!r} requires a non-empty name")
+            if "active" in item and not isinstance(item["active"], bool):
+                raise ValueError(f"Activity {code!r} has invalid active state")
             codes.add(code)
     return payload
 

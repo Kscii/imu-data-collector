@@ -133,7 +133,10 @@ imu-annotation --config /etc/imu-annotation/config.yaml \
 
 归档要求 H5、MKV、MP4 和原 manifest 全部存在并逐一校验 SHA-256；归档完成后写独立清单。
 `--delete-source` 只有在归档复核成功后才删除普通 capture 前缀。校准页只读归档，不能领取、
-标注、完成或进入训练快照。
+标注、完成或进入训练快照。页面同时显示共享录制时间游标的原始计数和 SI 两条完整曲线；视频、
+两条曲线任一处跳转都会定位另外两处。原始计数、4-byte trailer 和完整 16-byte HEX 直接来自
+不可变证据 H5。证据 H5 当时没有可信 SI 时，页面按当前服务器权威 profile 即时推导 SI 并
+明确标识来源，不把派生值回写证据文件；profile 门禁失败时仍允许查看原始计数和视频。
 
 ## 6. 删除和垃圾回收
 

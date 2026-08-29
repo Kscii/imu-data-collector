@@ -152,6 +152,31 @@ type CalibrationEvidence = {
   }[];
 };
 
+type CalibrationEvidenceAnalysis = {
+  recording_id: string;
+  video: {
+    frame_count: number;
+    recording_time_ns: number[];
+    media_time_ns: number[];
+  };
+  imu: {
+    sample_index: number[];
+    time_ns: number[];
+    time_s: number[];
+    raw_counts: number[][];
+    values_si: number[][];
+    trailer: number[][];
+    frame_hex: string[];
+  };
+  conversion: {
+    available: boolean;
+    source: "runtime_authoritative_profile";
+    profile_id: string | null;
+    evidence_sha256: string | null;
+    error: string | null;
+  };
+};
+
 type Segment = {
   segment_id: string;
   start_ns: number;
@@ -205,10 +230,29 @@ type Taxonomy = {
 
 type TaxonomyEntry = {
   code: string;
-  display_name_zh: string;
-  display_name_en: string;
+  name: string;
   active: boolean;
   usage_count?: number;
+};
+
+type TaxonomyMigrationPreview = {
+  taxonomy_version: string;
+  binary_label: "fall" | "non_fall";
+  source_code: string;
+  target_code: string;
+  source_active: boolean;
+  target_active: boolean;
+  affected_recordings: number;
+  affected_segments: number;
+  recordings: {
+    recording_id: string;
+    data_tier: "test" | "prod";
+    workflow_state: "unassigned" | "in_progress" | "completed";
+    review_revision: number;
+    annotation_revision: number;
+    segment_count: number;
+  }[];
+  plan_token: string;
 };
 
 type AppConfig = {
@@ -1051,8 +1095,12 @@ export default function App() {
 function CalibrationEvidencePage() {
   const [profile, setProfile] = useState<CalibrationEvidence | null>(null);
   const [selected, setSelected] = useState("");
+  const [analysis, setAnalysis] = useState<CalibrationEvidenceAnalysis | null>(null);
+  const [analysisError, setAnalysisError] = useState("");
+  const [currentTime, setCurrentTime] = useState(0);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const video = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     api<CalibrationEvidence>("/api/v1/calibration-evidence")
@@ -1063,6 +1111,20 @@ function CalibrationEvidencePage() {
       .catch((value) => setError((value as Error).message));
   }, []);
 
+  useEffect(() => {
+    if (!selected) return;
+    const controller = new AbortController();
+    setAnalysis(null);
+    setAnalysisError("");
+    setCurrentTime(0);
+    api<CalibrationEvidenceAnalysis>(`/api/v1/calibration-evidence/${selected}/analysis`, { signal: controller.signal })
+      .then(setAnalysis)
+      .catch((value) => {
+        if ((value as Error).name !== "AbortError") setAnalysisError((value as Error).message);
+      });
+    return () => controller.abort();
+  }, [selected]);
+
   if (error) return <main><div className="error-banner">{error}</div></main>;
   if (!profile) return <main><section className="panel">正在读取校准证据…</section></main>;
   const current = profile.evidence.find((item) => item.recording_id === selected);
@@ -1071,6 +1133,28 @@ function CalibrationEvidencePage() {
     await navigator.clipboard.writeText(current.recording_id);
     setMessage(`已复制 ${current.recording_id}`);
   };
+  const selectRecordingTime = (time: number) => {
+    setCurrentTime(time);
+    if (!analysis || !video.current || !analysis.video.recording_time_ns.length) return;
+    const index = nearestIndex(
+      analysis.video.recording_time_ns,
+      Math.round(time * 1e9),
+    );
+    video.current.currentTime = analysis.video.media_time_ns[index] / 1e9;
+  };
+  const updateTimeFromVideo = () => {
+    if (!analysis || !video.current || !analysis.video.media_time_ns.length) return;
+    const index = nearestIndex(
+      analysis.video.media_time_ns,
+      Math.round(video.current.currentTime * 1e9),
+    );
+    setCurrentTime(analysis.video.recording_time_ns[index] / 1e9);
+  };
+  const currentSample = analysis
+    ? nearestIndex(analysis.imu.time_s, currentTime)
+    : -1;
+  const rawRow = currentSample >= 0 ? analysis?.imu.raw_counts[currentSample] ?? [] : [];
+  const siRow = currentSample >= 0 ? analysis?.imu.values_si[currentSample] ?? [] : [];
   return <main>
     {message && <div className="success-banner">{message}</div>}
     <section className="panel">
@@ -1095,7 +1179,35 @@ function CalibrationEvidencePage() {
       </aside>
       <section className="calibration-evidence-detail">
         {current && <>
-          <div className="panel calibration-video"><video key={current.recording_id} controls preload="metadata" src={`/api/v1/calibration-evidence/${current.recording_id}/video`} /></div>
+          <div className="panel calibration-video">
+            <div className="panel-title">{tr("证据视频 · 与两条 IMU 曲线共享时间轴", "Evidence video · shared timeline with both IMU plots")}</div>
+            <video ref={video} key={current.recording_id} controls preload="metadata" src={`/api/v1/calibration-evidence/${current.recording_id}/video`} onTimeUpdate={updateTimeFromVideo} onSeeked={updateTimeFromVideo} />
+          </div>
+          {analysisError && <div className="error-banner">{analysisError}</div>}
+          {!analysis && !analysisError && <div className="panel">{tr("正在读取证据时间轴…", "Loading evidence timeline…")}</div>}
+          {analysis && <>
+            <div className="panel calibration-plot-panel">
+              <div className="panel-title">{tr("完整证据 IMU · 原始计数（不可变）", "Full evidence IMU · raw counts (immutable)")}</div>
+              <Plot time={analysis.imu.time_s} values={analysis.imu.raw_counts} cursorTime={currentTime} controlledCursor height={250} onSelectTime={selectRecordingTime} />
+            </div>
+            <div className="panel calibration-plot-panel">
+              <div className="panel-title">{tr("完整证据 IMU · SI（按当前权威校准档案即时推导）", "Full evidence IMU · SI (derived at view time using the current authoritative profile)")}</div>
+              {analysis.conversion.available
+                ? <Plot time={analysis.imu.time_s} values={analysis.imu.values_si} cursorTime={currentTime} controlledCursor height={250} onSelectTime={selectRecordingTime} />
+                : <div className="warning-banner">{tr("SI 暂不可用；原始计数和视频仍可复核。", "SI is currently unavailable; raw counts and video remain available for review.")} {userVisibleMessage(analysis.conversion.error)}</div>}
+            </div>
+            <div className="panel calibration-sample-detail">
+              <div className="panel-title">{tr("当前样本精确值", "Exact values at current sample")}</div>
+              <div className="calibration-sample-grid">
+                <span><strong>{tr("录制时间", "Recording time")}</strong>{currentSample >= 0 ? `${analysis.imu.time_s[currentSample].toFixed(6)} s` : "—"}</span>
+                <span><strong>{tr("样本序号", "Sample index")}</strong>{currentSample >= 0 ? analysis.imu.sample_index[currentSample] : "—"}</span>
+                <span className="calibration-hex"><strong>{tr("BLE 帧（HEX）", "BLE frame (HEX)")}</strong><code>{currentSample >= 0 ? analysis.imu.frame_hex[currentSample] : "—"}</code></span>
+                <span><strong>{tr("原始计数", "Raw counts")}</strong><code>{rawRow.length ? rawRow.map((value, index) => `${["a1", "a2", "a3", "g1", "g2", "g3"][index]}=${value}`).join(", ") : "—"}</code></span>
+                <span><strong>SI</strong><code>{siRow.length ? siRow.map((value, index) => `${["ax", "ay", "az", "gx", "gy", "gz"][index]}=${value.toFixed(6)}`).join(", ") : "—"}</code></span>
+              </div>
+              <p className="stage-help">{tr("原始计数和 HEX 来自不可变证据 H5；SI 不回写原文件，始终由页面所示的当前权威 profile 推导。", "Raw counts and HEX come from the immutable evidence H5. SI is never written back and is always derived from the current authoritative profile shown by this page.")}</p>
+            </div>
+          </>}
           <div className="panel">
             <div className="panel-title">已确认实验语义</div>
             <p><strong>实验：</strong>{localizedField(current, "setup")}</p>
@@ -1241,10 +1353,14 @@ function Metric({ label, value, warn = false }: { label: string; value: string |
 
 function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
   const [definition, setDefinition] = useState<Taxonomy>(taxonomy);
+  const [editingCode, setEditingCode] = useState("");
   const [binaryLabel, setBinaryLabel] = useState<"fall" | "non_fall">("non_fall");
   const [code, setCode] = useState("");
-  const [nameZh, setNameZh] = useState("");
-  const [nameEn, setNameEn] = useState("");
+  const [name, setName] = useState("");
+  const [migrationSource, setMigrationSource] = useState(taxonomy.non_fall[0]?.code ?? "");
+  const [migrationTarget, setMigrationTarget] = useState("");
+  const [migrationPreview, setMigrationPreview] = useState<TaxonomyMigrationPreview | null>(null);
+  const [migrationConfirmation, setMigrationConfirmation] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -1271,14 +1387,12 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
           expected_version: definition.version,
           binary_label: binaryLabel,
           code: code.trim(),
-          display_name_zh: nameZh.trim(),
-          display_name_en: nameEn.trim(),
+          name: name.trim(),
         })
       });
       await refresh();
       setCode("");
-      setNameZh("");
-      setNameEn("");
+      setName("");
       setMessage(tr("活动标签已新增", "Activity label added"));
     } catch (value) {
       setError((value as Error).message);
@@ -1287,7 +1401,7 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
     }
   };
 
-  const updateActivity = async (entry: TaxonomyEntry, changes: Partial<TaxonomyEntry>) => {
+  const updateActivity = async (entry: TaxonomyEntry, changes: { name?: string; active?: boolean }): Promise<boolean> => {
     setError("");
     setMessage("");
     setBusy(entry.code);
@@ -1298,8 +1412,17 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
       });
       await refresh();
       setMessage(tr(`活动标签已更新：${entry.code}`, `Activity label updated: ${entry.code}`));
+      return true;
     } catch (value) {
       setError((value as Error).message);
+      if (value instanceof ApiRequestError && value.status === 409) {
+        try {
+          await refresh();
+        } catch (refreshError) {
+          setError(`${(value as Error).message}；${tr("刷新最新标签失败", "Failed to refresh the latest labels")}: ${(refreshError as Error).message}`);
+        }
+      }
+      return false;
     } finally {
       setBusy("");
     }
@@ -1321,11 +1444,123 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
     }
   };
 
+  const allEntries = [
+    ...definition.fall.map((entry) => ({ ...entry, binaryLabel: "fall" as const })),
+    ...definition.non_fall.map((entry) => ({ ...entry, binaryLabel: "non_fall" as const })),
+  ];
+  const selectedSource = allEntries.find((entry) => entry.code === migrationSource);
+  const migrationTargets = allEntries.filter((entry) => (
+    entry.binaryLabel === selectedSource?.binaryLabel
+    && entry.code !== migrationSource
+    && entry.active
+  ));
+
+  useEffect(() => {
+    if (!selectedSource) {
+      setMigrationSource(allEntries[0]?.code ?? "");
+      return;
+    }
+    if (!migrationTargets.some((entry) => entry.code === migrationTarget)) {
+      setMigrationTarget(migrationTargets[0]?.code ?? "");
+    }
+    setMigrationPreview(null);
+    setMigrationConfirmation("");
+  }, [migrationSource, definition.version]);
+
+  const previewMigration = async () => {
+    if (!migrationSource || !migrationTarget) return;
+    setError("");
+    setMessage("");
+    setBusy("migration-preview");
+    try {
+      const value = await api<TaxonomyMigrationPreview>("/api/v1/taxonomy/migrations/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: definition.version,
+          source_code: migrationSource,
+          target_code: migrationTarget,
+        }),
+      });
+      setMigrationPreview(value);
+      setMigrationConfirmation("");
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const applyMigration = async () => {
+    if (!migrationPreview) return;
+    setError("");
+    setMessage("");
+    setBusy("migration-apply");
+    try {
+      const result = await api<{
+        migrated: unknown[];
+        conflicts: unknown[];
+        failed: unknown[];
+        remaining_usage: number;
+        taxonomy: Taxonomy;
+      }>("/api/v1/taxonomy/migrations/apply", {
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: migrationPreview.taxonomy_version,
+          source_code: migrationPreview.source_code,
+          target_code: migrationPreview.target_code,
+          plan_token: migrationPreview.plan_token,
+          confirmation: migrationConfirmation,
+        }),
+      });
+      setDefinition(result.taxonomy);
+      onChanged(result.taxonomy);
+      setMigrationPreview(null);
+      setMigrationConfirmation("");
+      setMessage(tr(
+        `迁移完成：成功 ${result.migrated.length} 条，冲突 ${result.conflicts.length} 条，失败 ${result.failed.length} 条`,
+        `Migration finished: ${result.migrated.length} succeeded, ${result.conflicts.length} conflicted, ${result.failed.length} failed`,
+      ));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const taxonomyGroup = (label: "fall" | "non_fall") => {
+    const active = definition[label].filter((entry) => entry.active);
+    const inactive = definition[label].filter((entry) => !entry.active);
+    const taxonomyRow = (entry: TaxonomyEntry) => <TaxonomyAdminRow
+      key={entry.code}
+      entry={entry}
+      editing={editingCode === entry.code}
+      editBlocked={editingCode !== "" && editingCode !== entry.code}
+      busy={busy !== ""}
+      onStartEdit={() => setEditingCode(entry.code)}
+      onCancelEdit={() => setEditingCode("")}
+      onSaveName={async (target, nextName) => {
+        const updated = await updateActivity(target, { name: nextName });
+        if (updated) setEditingCode("");
+        return updated;
+      }}
+      onToggle={updateActivity}
+      onDelete={deleteActivity}
+    />;
+    return <section className="panel taxonomy-group" key={label}>
+      <div className="panel-title">{label === "fall" ? tr("跌倒标签", "Fall labels") : tr("非跌倒标签", "Non-fall labels")}</div>
+      {active.map(taxonomyRow)}
+      {inactive.length > 0 && <details className="taxonomy-inactive-group">
+        <summary>{tr(`已停用标签 · ${inactive.length}`, `Inactive labels · ${inactive.length}`)}</summary>
+        {inactive.map(taxonomyRow)}
+      </details>}
+    </section>;
+  };
+
   return <main className="taxonomy-admin">
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel taxonomy-intro">
-      <div><div className="panel-title">活动标签管理</div><strong>当前版本 {definition.version}</strong><p className="stage-help">标签 code 和跌倒类型创建后保持不变。已使用标签只能停用，历史标注仍按原版本解释。</p></div>
+      <div><div className="panel-title">活动标签管理</div><strong>当前版本 {definition.version}</strong><p className="stage-help">code 是不可修改的机器标识，name 是标注页面使用的可修改显示名称。历史版本和训练快照保持不可变。</p></div>
       <span className="state">仅管理员</span>
     </section>
     <section className="panel taxonomy-create">
@@ -1333,37 +1568,108 @@ function TaxonomyAdminPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChan
       <div className="taxonomy-create-fields">
         <label>标签类型<select value={binaryLabel} onChange={(event) => setBinaryLabel(event.target.value as "fall" | "non_fall")}><option value="non_fall">非跌倒</option><option value="fall">跌倒</option></select></label>
         <label>稳定 code<input value={code} onChange={(event) => setCode(event.target.value)} placeholder="例如 stair_climbing" /></label>
-        <label>中文名称<input value={nameZh} onChange={(event) => setNameZh(event.target.value)} /></label>
-        <label>English name<input value={nameEn} onChange={(event) => setNameEn(event.target.value)} /></label>
-        <button className="primary" disabled={busy !== "" || !code.trim() || !nameZh.trim() || !nameEn.trim()} onClick={createActivity}>新增标签</button>
+        <label>{tr("显示名称", "Display name")}<input value={name} onChange={(event) => setName(event.target.value)} placeholder={tr("例如 上楼梯", "For example, Stair climbing")} /></label>
+        <button className="primary" disabled={busy !== "" || !code.trim() || !name.trim()} onClick={createActivity}>新增标签</button>
       </div>
     </section>
-    {(["fall", "non_fall"] as const).map((label) => <section className="panel taxonomy-group" key={label}>
-      <div className="panel-title">{label === "fall" ? "跌倒活动" : "非跌倒活动"}</div>
-      {definition[label].map((entry) => <TaxonomyAdminRow key={entry.code} entry={entry} busy={busy === entry.code} onSave={updateActivity} onDelete={deleteActivity} />)}
-    </section>)}
+    {(["fall", "non_fall"] as const).map(taxonomyGroup)}
+    <section className="panel taxonomy-migration">
+      <div className="panel-title">{tr("历史标签迁移", "Historical label migration")}</div>
+      <p className="stage-help">{tr("预览会冻结当前 taxonomy 版本和受影响 review 修订。执行后仅替换同一跌倒类型的当前标注，自动停用源标签，并为已完成正式数据生成新的活动导出；旧导出和快照不改写。", "Preview freezes the current taxonomy version and affected review revisions. Apply replaces the current label only within the same binary class, disables the source, and creates a new active export for completed production data. Old exports and snapshots remain unchanged.")}</p>
+      <div className="taxonomy-migration-fields">
+        <label>{tr("源标签", "Source label")}<select value={migrationSource} onChange={(event) => setMigrationSource(event.target.value)}>{allEntries.map((entry) => <option value={entry.code} key={entry.code}>{entry.binaryLabel} · {entry.name} ({entry.code}){entry.active ? "" : tr(" · 已停用", " · inactive")}</option>)}</select></label>
+        <label>{tr("目标标签", "Target label")}<select value={migrationTarget} onChange={(event) => { setMigrationTarget(event.target.value); setMigrationPreview(null); setMigrationConfirmation(""); }}>{migrationTargets.map((entry) => <option value={entry.code} key={entry.code}>{entry.name} ({entry.code})</option>)}</select></label>
+        <button disabled={busy !== "" || !migrationSource || !migrationTarget} onClick={previewMigration}>{tr("预览影响范围", "Preview impact")}</button>
+      </div>
+      {migrationPreview && <div className="taxonomy-migration-preview">
+        <strong>{tr(`影响 ${migrationPreview.affected_recordings} 条录制、${migrationPreview.affected_segments} 个区间`, `${migrationPreview.affected_recordings} recordings and ${migrationPreview.affected_segments} intervals affected`)}</strong>
+        <span>{tr("测试与正式数据都会迁移；已完成录制会保持完成状态。", "Both test and production data will be migrated; completed recordings remain completed.")}</span>
+        {migrationPreview.recordings.length > 0 && <details><summary>{tr("查看受影响录制", "Show affected recordings")}</summary><div className="taxonomy-migration-recordings">{migrationPreview.recordings.map((item) => <code key={item.recording_id}>{item.recording_id} · {item.data_tier} · {item.workflow_state} · {item.segment_count}</code>)}</div></details>}
+        <label>{tr("二次确认", "Confirmation")}<input value={migrationConfirmation} onChange={(event) => setMigrationConfirmation(event.target.value)} placeholder={`MIGRATE ${migrationPreview.source_code} TO ${migrationPreview.target_code}`} /></label>
+        <button className="danger" disabled={busy !== "" || migrationConfirmation !== `MIGRATE ${migrationPreview.source_code} TO ${migrationPreview.target_code}`} onClick={applyMigration}>{tr("执行全部当前数据迁移", "Migrate all current data")}</button>
+      </div>}
+    </section>
   </main>;
 }
 
-function TaxonomyAdminRow({ entry, busy, onSave, onDelete }: { entry: TaxonomyEntry; busy: boolean; onSave: (entry: TaxonomyEntry, changes: Partial<TaxonomyEntry>) => Promise<void>; onDelete: (entry: TaxonomyEntry) => Promise<void> }) {
-  const [nameZh, setNameZh] = useState(entry.display_name_zh);
-  const [nameEn, setNameEn] = useState(entry.display_name_en);
+function TaxonomyAdminRow({ entry, editing, editBlocked, busy, onStartEdit, onCancelEdit, onSaveName, onToggle, onDelete }: {
+  entry: TaxonomyEntry;
+  editing: boolean;
+  editBlocked: boolean;
+  busy: boolean;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveName: (entry: TaxonomyEntry, name: string) => Promise<boolean>;
+  onToggle: (entry: TaxonomyEntry, changes: { name?: string; active?: boolean }) => Promise<boolean>;
+  onDelete: (entry: TaxonomyEntry) => Promise<void>;
+}) {
+  const [draftName, setDraftName] = useState(entry.name);
+  const nameInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setNameZh(entry.display_name_zh);
-    setNameEn(entry.display_name_en);
-  }, [entry.display_name_zh, entry.display_name_en]);
+    if (!editing) setDraftName(entry.name);
+  }, [entry.name, editing]);
 
-  const changed = nameZh.trim() !== entry.display_name_zh || nameEn.trim() !== entry.display_name_en;
+  useEffect(() => {
+    if (!editing) return;
+    const frame = window.requestAnimationFrame(() => {
+      nameInput.current?.focus();
+      nameInput.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editing]);
+
+  const normalizedName = draftName.trim();
+  const canSave = !busy && normalizedName !== "" && normalizedName !== entry.name;
+  const saveName = async () => {
+    if (!canSave) return;
+    await onSaveName(entry, normalizedName);
+  };
+  const cancelEdit = () => {
+    if (busy) return;
+    setDraftName(entry.name);
+    onCancelEdit();
+  };
+
   return <div className={`taxonomy-row ${entry.active ? "" : "taxonomy-row-inactive"}`}>
+    {editing
+      ? <div className="taxonomy-name-editor">
+        <input
+          ref={nameInput}
+          aria-label={tr(`${entry.code} 的显示名称`, `Display name for ${entry.code}`)}
+          value={draftName}
+          disabled={busy}
+          onChange={(event) => setDraftName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void saveName();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+        />
+        <button className="primary" disabled={!canSave} onClick={() => void saveName()}>{tr("保存", "Save")}</button>
+        <button disabled={busy} onClick={cancelEdit}>{tr("取消", "Cancel")}</button>
+      </div>
+      : <button
+        type="button"
+        className="taxonomy-name-tag"
+        disabled={busy || editBlocked}
+        title={editBlocked
+          ? tr("请先完成当前名称编辑", "Finish the current name edit first")
+          : tr("点击编辑名称", "Click to edit name")}
+        onClick={onStartEdit}
+      >
+        <span>{entry.name}</span>
+        <span className="taxonomy-name-edit-icon" aria-hidden="true">✎</span>
+      </button>}
     <code>{entry.code}</code>
-    <input aria-label={`${entry.code} 中文名称`} value={nameZh} onChange={(event) => setNameZh(event.target.value)} />
-    <input aria-label={`${entry.code} English name`} value={nameEn} onChange={(event) => setNameEn(event.target.value)} />
     <span>{entry.usage_count ?? 0} 个区间</span>
     <span className={`state ${entry.active ? "state-ready" : "state-needs_attention"}`}>{entry.active ? "启用" : "已停用"}</span>
     <div className="taxonomy-row-actions">
-      <button disabled={busy || !changed || !nameZh.trim() || !nameEn.trim()} onClick={() => onSave(entry, { display_name_zh: nameZh.trim(), display_name_en: nameEn.trim() })}>保存名称</button>
-      <button disabled={busy} onClick={() => onSave(entry, { active: !entry.active })}>{entry.active ? "停用" : "恢复"}</button>
+      <button disabled={busy} onClick={() => onToggle(entry, { active: !entry.active })}>{entry.active ? "停用" : "恢复"}</button>
       {(entry.usage_count ?? 0) === 0
         ? <button className="danger" disabled={busy} onClick={() => onDelete(entry)}>永久删除</button>
         : <span className="taxonomy-delete-rule" title={tr("已被历史标注引用，保留 code 才能继续解释旧数据", "Referenced by historical annotations; keep the code so old data remains interpretable")}>{tr("已使用，仅可停用", "In use; disable only")}</span>}
@@ -1452,7 +1758,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       setDeleteConfirmation("");
       setTaskTab(
         reviewDocument.workflow.state === "completed"
-          ? "review"
+          ? "annotate"
           : syncState.quality === "verified"
             ? "annotate"
             : "sync"
@@ -1796,7 +2102,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
       setSaveState("saved");
       retrySaveRef.current = null;
-      setTaskTab("review");
+      setTaskTab("annotate");
     } catch (value) {
       registerSaveFailure(value);
     }
@@ -2003,7 +2309,7 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
   const activityDisplay = (code: string) => {
     const entry = [...displayTaxonomy.fall, ...displayTaxonomy.non_fall].find((item) => item.code === code);
     if (!entry) return code;
-    return `${isEnglish ? entry.display_name_en : entry.display_name_zh} · ${code}${entry.active ? "" : " · 已停用"}`;
+    return `${entry.name}${entry.active ? "" : tr(" · 已停用", " · inactive")}`;
   };
   const filteredRecordings = recordings.filter((recording) => {
     const needle = recordingQuery.trim().toLowerCase();
@@ -2306,10 +2612,10 @@ function AnnotationPage({ recordings, taxonomy, session, onChanged }: { recordin
             {taskTab === "annotate" && <div className="annotation-tab-layout">
               <div className="panel compact-panel annotation-controls">
                 <div className="panel-title">创建区间</div>
-                <div className="time-readout">{currentTime.toFixed(3)} s · 帧 {currentFrame}</div>
+                <div className="time-readout">{currentTime.toFixed(3)} s · {tr("帧", "frame")} {currentFrame}</div>
                 <div className="mark-buttons"><button disabled={!canMutate} onClick={() => mark("start")}>起点 I</button><button disabled={!canMutate} onClick={() => mark("end")}>终点 O</button><button disabled={!canMutate || annotationKind !== "fall"} onClick={() => mark("impact")}>撞击 2</button></div>
-                <div className="marks"><span>起 {seconds(marks.start)}</span><span>止 {seconds(marks.end)}</span><span>撞击 {seconds(marks.impact)}</span></div>
-                <div className="segment-form"><select disabled={!canMutate} value={annotationKind} onChange={(event) => setAnnotationKind(event.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 训练</option><option value="fall">跌倒 · 训练</option><option value="exclude">明确排除</option></select>{annotationKind === "exclude" ? <select disabled={!canMutate} value={exclusionReason} onChange={(event) => setExclusionReason(event.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canMutate} value={activity} onChange={(event) => setActivity(event.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{isEnglish ? item.display_name_en : item.display_name_zh} · {item.code}</option>)}</select>}<button className="primary" disabled={!canMutate || marks.start === undefined || marks.end === undefined} onClick={addAnnotationInterval}>添加并保存</button></div>
+                <div className="marks"><span>{tr("起", "Start")} {seconds(marks.start)}</span><span>{tr("止", "End")} {seconds(marks.end)}</span><span>{tr("撞击", "Impact")} {seconds(marks.impact)}</span></div>
+                <div className="segment-form"><select disabled={!canMutate} value={annotationKind} onChange={(event) => setAnnotationKind(event.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 训练</option><option value="fall">跌倒 · 训练</option><option value="exclude">明确排除</option></select>{annotationKind === "exclude" ? <select disabled={!canMutate} value={exclusionReason} onChange={(event) => setExclusionReason(event.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canMutate} value={activity} onChange={(event) => setActivity(event.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{item.name}</option>)}</select>}<button className="primary" disabled={!canMutate || marks.start === undefined || marks.end === undefined} onClick={addAnnotationInterval}>添加并保存</button></div>
                 <details><summary>标注规范</summary><p className="stage-help">跌倒区间从首次明确失衡开始，到落地后身体大动作停止并稳定。区间起点同时表示 onset；每个跌倒区间必须有且仅有一个撞击时刻。准备阶段和稳定后的自然状态标为 non_fall。</p></details>
               </div>
               {doc && <section className="panel compact-panel interval-list-panel">
@@ -2389,8 +2695,11 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
     try {
       const result = await api<TrainingSnapshot>("/api/v1/training-snapshots", { method: "POST" });
       setMessage(result.created
-        ? `已创建训练快照 ${result.snapshot_id}`
-        : `内容没有变化，继续使用已有快照 ${result.snapshot_id}`);
+        ? tr(`已创建训练快照 ${result.snapshot_id}`, `Created training snapshot ${result.snapshot_id}`)
+        : tr(
+          `内容没有变化，继续使用已有快照 ${result.snapshot_id}`,
+          `Content is unchanged; reusing existing snapshot ${result.snapshot_id}`,
+        ));
       await refresh();
     } catch (value) {
       setError((value as Error).message);
@@ -2400,7 +2709,10 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
   };
 
   const deleteSnapshot = async (snapshotId: string) => {
-    const confirmation = window.prompt(`清理后平台将不再提供 TAR；已经发布的不可变 benchmark H5 不受影响。请输入：\nDELETE ${snapshotId}`);
+    const confirmation = window.prompt(tr(
+      `清理后平台将不再提供 TAR；已经发布的不可变 benchmark H5 不受影响。请输入：\nDELETE ${snapshotId}`,
+      `After cleanup, the platform will no longer provide the TAR. The published immutable benchmark H5 is unaffected. Enter:\nDELETE ${snapshotId}`,
+    ));
     if (confirmation === null) return;
     setBusy(true);
     setError("");
@@ -2410,7 +2722,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
         method: "DELETE",
         body: JSON.stringify({ confirmation })
       });
-      setMessage(`已清理训练快照 ${snapshotId}`);
+      setMessage(tr(`已清理训练快照 ${snapshotId}`, `Deleted training snapshot ${snapshotId}`));
       await refresh();
     } catch (value) {
       setError((value as Error).message);
@@ -2428,7 +2740,10 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
       <div className="save-row">
         <button className="primary" disabled={busy} onClick={createSnapshot}>{busy ? "正在处理…" : "生成当前训练快照"}</button>
         <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>刷新列表</button>
-        <span>当前操作者 {session.unikey} · 所有成员可生成和下载，管理员可清理历史快照</span>
+        <span>{tr(
+          `当前操作者 ${session.unikey} · 所有成员可生成和下载，管理员可清理历史快照`,
+          `Current operator ${session.unikey} · All members can create and download snapshots; administrators can delete historical snapshots`,
+        )}</span>
       </div>
       {snapshots.length === 0 ? <span className="muted">目前还没有训练快照。</span> : <>
         <SnapshotRow snapshot={snapshots[0]} current session={session} busy={busy} onDelete={deleteSnapshot} />
