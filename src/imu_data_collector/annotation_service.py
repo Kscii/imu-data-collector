@@ -1407,7 +1407,8 @@ class AnnotationService:
         )
         h5_path = self.cached_h5(manifest)
         self._validate_sync_sources(h5_path, document)
-        assessment = assess_conditional_fixed_offset(document)
+        result = self._sync_result(document)
+
         def update(review: ReviewDocument) -> ReviewDocument:
             if review.workflow.state == ReviewWorkflowState.COMPLETED:
                 raise ValueError("已完成的同步必须先重开")
@@ -1422,16 +1423,23 @@ class AnnotationService:
             )
 
         self.reviews.mutate(manifest, expected_revision, update)
-        return self._sync_display(h5_path, assessment.as_dict(), document)
+        return self._sync_display(h5_path, result, document)
 
     def sync(self, recording_id: str) -> dict[str, Any]:
         manifest = self.required_manifest(recording_id)
         document, _generation = self.reviews.load(manifest)
-        if len(document.sync.anchors) == 2:
-            result = assess_conditional_fixed_offset(document.sync).as_dict()
-        else:
-            result = {
-                "policy": document.sync.policy,
+        result = self._sync_result(document.sync)
+        return self._sync_display(
+            self.cached_h5(manifest), result, document.sync
+        )
+
+    @staticmethod
+    def _sync_result(document: SyncDocument) -> dict[str, Any]:
+        if len(document.anchors) <= 1:
+            if document.apply_fixed_offset:
+                raise ValueError("同步锚点未完整时不能应用固定偏移")
+            return {
+                "policy": document.policy,
                 "quality": "missing",
                 "estimated_offset_ns": 0,
                 "applied_offset_ns": 0,
@@ -1440,9 +1448,7 @@ class AnnotationService:
                 "recommendation": "none",
                 "decision": "host_only",
             }
-        return self._sync_display(
-            self.cached_h5(manifest), result, document.sync
-        )
+        return assess_conditional_fixed_offset(document).as_dict()
 
     @staticmethod
     def _validate_sync_sources(path: Path, document: SyncDocument) -> None:
