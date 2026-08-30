@@ -77,6 +77,23 @@ logger = logging.getLogger(__name__)
 ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.1.0",)
 
 
+def _training_snapshot_fingerprint(recordings: list[dict[str, Any]]) -> str:
+    """Bind immutable snapshot identity to both content and handoff contract."""
+
+    identity = {
+        "handoff_contract_version": DATASET_HANDOFF_VERSION,
+        "recordings": recordings,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 class ManifestIndexError(ValueError):
     """可稳定呈现给采集端和管理员的索引失败。"""
 
@@ -2091,14 +2108,7 @@ class AnnotationService:
             if not files:
                 raise ValueError("没有已完成的正式录制可生成训练快照")
             recordings.sort(key=lambda item: (item["participant_id"], item["recording_id"]))
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    recordings,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
+            fingerprint = _training_snapshot_fingerprint(recordings)
             timestamp = datetime.now(UTC)
             snapshot_id = f"snapshot-{fingerprint[:24]}"
             manifest_key = f"training-snapshots/{snapshot_id}/manifest.json"

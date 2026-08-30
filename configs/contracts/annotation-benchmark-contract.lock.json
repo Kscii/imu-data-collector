@@ -5,7 +5,7 @@
     "experiment_catalog": "0.1.0",
     "model_release": "0.1.0"
   },
-  "sha256": "d1a649dcdbd9d4a327e5f51a3f9af664cf0c4762790f725c34c9a26a5226cf7f",
-  "upstream_commit": "66ec3f95723ed06fd88cb4569dfa48a34617c323",
+  "sha256": "693f2171580b9218aa3fefd06a2d5a3874d63781a2677963c54b4fb1c07164a4",
+  "upstream_commit": "9b0e24211d185921ef68365f4d9d90bf8280b919",
   "upstream_repository": "Kscii/imu-fall-benchmark"
 }
