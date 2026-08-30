@@ -1898,7 +1898,9 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       setDeleteArmed(false);
       setDeleteConfirmation("");
       setTaskTab(
-        reviewDocument.participant_assignment.status === "confirmed"
+        reviewDocument.workflow.state === "completed"
+          ? "data"
+          : reviewDocument.participant_assignment.status === "confirmed"
           && syncState.quality === "verified"
           ? "annotate"
           : "sync"
@@ -2263,7 +2265,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       await onChanged();
       setSaveState("saved");
       retrySaveRef.current = null;
-      setTaskTab("annotate");
+      setTaskTab("data");
     } catch (value) {
       registerSaveFailure(value);
     }
@@ -2732,8 +2734,8 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         </section>
 
         <section className="annotation-tools-pane">
-          <nav className="annotation-task-tabs" aria-label="标注任务">
-            {(["sync", "annotate", "data"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : "3 数据"}</button>)}
+          <nav className="annotation-task-tabs" aria-label="标注任务" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+            {(["sync", "annotate", "data"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} style={item === "data" ? { gridColumn: "span 2" } : undefined} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : "3 数据"}</button>)}
           </nav>
 
           <div className={`annotation-task-scroll ${taskTab === "annotate" ? "annotation-task-scroll-annotate" : ""}`}>
@@ -2788,7 +2790,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
               </div>
             </>}
 
-            {taskTab === "annotate" && <><div className="annotation-tab-layout">
+            {taskTab === "annotate" && <div className="annotation-tab-layout">
               <div className="panel compact-panel annotation-controls">
                 <div className="panel-title">创建区间</div>
                 <div className="time-readout">{currentTime.toFixed(3)} s · {tr("帧", "frame")} {currentFrame}</div>
@@ -2820,8 +2822,9 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                   <div className="interval-list-tail" aria-hidden="true" />
                 </div>
               </section>}
-            </div>
+            </div>}
 
+            {taskTab === "data" && review && <>
             {doc && <div className="panel compact-panel review-panel">
               <div className="panel-title">标注完成情况</div>
               <div className="coverage-track" aria-label="标注覆盖时间轴">{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}</div>
@@ -2833,14 +2836,13 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
               {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据允许保存和下载，但不会完成为训练数据。</p>}
               <details><summary>任务技术详情</summary><p className="stage-help">review revision {review?.revision ?? "—"} · 负责人 {review?.workflow.annotator_id ?? "无"} · 最后编辑者 {review?.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>
             </div>}
-            </>}
-
-            {taskTab === "data" && review && <div className="panel compact-panel workflow-panel">
+            <div className="panel compact-panel workflow-panel">
               <div className="panel-title">下载与录制管理</div>
               <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>身份 {status?.participant === "confirmed" ? "已确认" : status?.participant === "selected" ? "待确认" : "未选择"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
               <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned/download`} download>训练 aligned.h5</a>}</div>
               <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
-            </div>}
+            </div>
+            </>}
           </div>
 
           <footer className="annotation-save-bar">
