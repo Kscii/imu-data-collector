@@ -18,6 +18,9 @@ identity:
   # 真实邮箱映射只写入服务器 /etc 配置，不提交仓库。
   email_to_unikey:
     "member@example.com": "xfan0282"
+  # 只存在于服务器私有配置；编号一旦分配不得复用或改绑。
+  subject_ids:
+    "xfan0282": "cw12eu:subject-001"
 
 auth:
   mode: "iap"

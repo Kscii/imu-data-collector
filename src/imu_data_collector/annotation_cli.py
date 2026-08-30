@@ -18,6 +18,7 @@ from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.annotation_service import AnnotationService
 from imu_data_collector.cli import _open_webui_when_ready, _webui_is_ready
 from imu_data_collector.config import load_settings
+from imu_data_collector.identity_migration import CloudIdentityMigration
 from imu_data_collector.models import UNIKEY_RE
 from imu_data_collector.storage import create_object_store
 
@@ -130,6 +131,8 @@ def main() -> None:
             "start",
             "cleanup-orphans",
             "archive-calibration-evidence",
+            "migrate-participant-identity",
+            "rollback-participant-identity",
             "member-list",
             "member-add",
             "member-remove",
@@ -149,6 +152,9 @@ def main() -> None:
     )
     parser.add_argument("--email")
     parser.add_argument("--unikey")
+    parser.add_argument("--plan-token")
+    parser.add_argument("--confirmation")
+    parser.add_argument("--migration-id")
     parser.add_argument(
         "--project",
         default="project-51b589c7-8d5e-4e78-a10",
@@ -159,7 +165,12 @@ def main() -> None:
         _manage_member(args)
         return
     settings = load_settings(args.config)
-    if args.command in {"cleanup-orphans", "archive-calibration-evidence"}:
+    if args.command in {
+        "cleanup-orphans",
+        "archive-calibration-evidence",
+        "migrate-participant-identity",
+        "rollback-participant-identity",
+    }:
         from datetime import timedelta
 
         store = create_object_store(
@@ -174,13 +185,30 @@ def main() -> None:
                 min_age=timedelta(days=args.min_age_days),
                 dry_run=args.dry_run,
             )
-        else:
+        elif args.command == "archive-calibration-evidence":
             if args.delete_source and not args.apply:
                 parser.error("--delete-source 必须与 --apply 一起使用")
             result = service.archive_calibration_evidence(
                 apply=args.apply,
                 delete_source=args.delete_source,
             )
+        else:
+            migration = CloudIdentityMigration(
+                store, service.calibration_recording_ids
+            )
+            if args.command == "migrate-participant-identity":
+                if not args.apply:
+                    result = migration.build_plan()
+                else:
+                    if not args.plan_token or not args.confirmation:
+                        parser.error("--apply 需要 --plan-token 和 --confirmation")
+                    result = migration.apply(args.plan_token, args.confirmation)
+            else:
+                if not args.apply or not args.migration_id or not args.confirmation:
+                    parser.error(
+                        "回滚需要 --apply、--migration-id 和 --confirmation"
+                    )
+                result = migration.rollback(args.migration_id, args.confirmation)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     url = (

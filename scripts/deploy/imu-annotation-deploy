@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "用法：imu-annotation-deploy <部署包> <40位commit> <sha256>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "用法：imu-annotation-deploy <部署包> <40位commit> <sha256> [keep-stopped]" >&2
   exit 2
 fi
 
 bundle=$1
 release_id=$2
 expected_sha256=$3
+keep_stopped=${4:-false}
 release_root=/opt/imu-annotation/releases
 release_dir="${release_root}/${release_id}"
 incoming="${release_root}/.incoming-${release_id}"
@@ -33,6 +34,10 @@ mapfile -t python_candidates < <(
 }
 [[ ${expected_sha256} =~ ^[0-9a-f]{64}$ ]] || {
   echo "SHA-256 格式无效" >&2
+  exit 2
+}
+[[ ${keep_stopped} == true || ${keep_stopped} == false ]] || {
+  echo "keep-stopped 必须是 true 或 false" >&2
   exit 2
 }
 [[ -f ${bundle} ]] || {
@@ -133,6 +138,14 @@ install -m 0644 "${release_dir}/configs/systemd/imu-upload-broker.service" \
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl daemon-reload
+if [[ ${keep_stopped} == true ]]; then
+  systemctl stop imu-annotation-gc.timer
+  systemctl stop imu-upload-broker.service
+  systemctl stop imu-annotation.service
+  rm -f -- "${bundle}"
+  echo "部署完成并保持维护停机：${release_id}"
+  exit 0
+fi
 systemctl enable --now imu-annotation-gc.timer
 systemctl restart imu-annotation.service
 systemctl enable imu-upload-broker.service

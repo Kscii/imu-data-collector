@@ -144,9 +144,11 @@ IMU 包时间最大拟合残差按以下级别解释：
 录制后的修改入口。缺少该字段的本地旧条目统一按安全的 `test` 处理；系统不保留另一种
 legacy 业务状态。
 
-当前允许的参与者配置在 `configs/default.yaml` 的 `identity.allowed_unikeys`。本机采集 WebUI
-使用下拉框减少录入错误。云端标注平台不允许手动切换操作者；Google IAP 登录邮箱必须同时
-存在于服务器私有 `identity.email_to_unikey` 映射，得到的 UniKey 还必须在允许名单中。
+当前允许的参与者配置在 `identity.allowed_unikeys`，但只在标注端使用。采集 WebUI 不选择
+参与者，也不在 H5、manifest、collection 或 recording 文件名中保存 UniKey。任务负责人必须
+在标注端逐帧找到身份依据，选择后再次确认；画面不足时保持未完成，禁止猜测。Google IAP
+登录邮箱仍由私有 `identity.email_to_unikey` 解析为操作者；训练导出再通过不对前端开放的
+`identity.subject_ids` 转为稳定匿名 ID。
 
 摄像头使用 udev 的序列号与 USB interface 组成稳定 `camera_id`。以当前内置摄像头为例，
 WebUI 应选择彩色 1080p30 MJPEG 主节点，而不是同一设备的灰度或 metadata 辅助节点。
@@ -161,8 +163,8 @@ WebUI 应选择彩色 1080p30 MJPEG 主节点，而不是同一设备的灰度�
 - BLE 包数/样本数、回调丢弃数、磁盘剩余空间、编码器错误。
 - 任何设备滑动、重新佩戴或异常都应在会话备注中记录。
 
-第一次联合技术验收使用 `participant_id=xfan0282`、
-`collection_id=xfan0282_test_01`、`data_tier=test`，具体时序与验收记录见
+第一次联合技术验收使用的旧合同曾写入 `participant_id=xfan0282` 和
+`collection_id=xfan0282_test_01`；这些仅作为历史记录，不得用于新采集。具体时序见
 [联合试采 test-01](joint-pilot-test-01.md)。
 
 ## 同步锚点操作

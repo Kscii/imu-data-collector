@@ -124,7 +124,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
             "build_id": CAPTURE_API_BUILD_ID,
             "data_root": str(active.data_root),
             "minimum_free_gib": active.minimum_free_gib,
-            "allowed_unikeys": list(active.identity.allowed_unikeys),
+            "operator_unikeys": list(active.identity.allowed_unikeys),
             "data_tiers": ["test", "prod"],
             "default_data_tier": active.capture.default_data_tier,
             "background_jobs": {

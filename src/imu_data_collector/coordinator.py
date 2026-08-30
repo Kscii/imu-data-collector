@@ -34,6 +34,7 @@ from imu_data_collector.finalization import (
     finalize_recording,
 )
 from imu_data_collector.hdf5_store import CaptureH5Writer
+from imu_data_collector.identity_migration import auto_migrate_local_identity
 from imu_data_collector.maintenance import (
     hard_delete_recording,
     quarantine_incomplete,
@@ -79,8 +80,13 @@ class RecordingCoordinator:
         # 首次安装的 Windows/macOS 用户尚没有数据目录；健康接口需要在录制前
         # 就能统计磁盘空间，因此由应用启动负责创建，而不是等第一条录制。
         self.settings.data_root.mkdir(parents=True, exist_ok=True)
+        identity_migration = auto_migrate_local_identity(self.settings.data_root)
         self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.catalog = RecordingCatalog(settings.catalog_path)
+        if identity_migration is not None:
+            for item in identity_migration["plan"]["captures"]:
+                self.catalog.delete(item["old_recording_id"])
+            rebuild_catalog(self.settings.data_root, self.catalog)
         self.remote = RcloneRemoteStore(settings.upload)
         self.object_store = create_object_store(
             settings.storage.backend,
@@ -1187,7 +1193,6 @@ class RecordingCoordinator:
                 RecordingState.FAILED,
             }:
                 raise RuntimeError(f"cannot start while coordinator is {self.state.value}")
-            self._require_allowed_unikey(request.participant_id, "participant_id")
             self._check_disk()
             camera = await self._resolve_camera(request.camera_id)
             retained_ble = None
@@ -1251,7 +1256,7 @@ class RecordingCoordinator:
                 await self._abort_start(error)
                 raise
             now = datetime.now(UTC)
-            recording_id = f"{now.strftime('%Y%m%dT%H%M%S.%fZ')}_{request.participant_id}"
+            recording_id = now.strftime("%Y%m%dT%H%M%S.%fZ")
             directory = self.settings.data_root / request.collection_id / recording_id
             directory.mkdir(parents=True, exist_ok=False)
             h5_partial = directory / f"{recording_id}.partial.h5"
@@ -1260,7 +1265,6 @@ class RecordingCoordinator:
             summary = RecordingSummary(
                 recording_id=recording_id,
                 collection_id=request.collection_id,
-                participant_id=request.participant_id,
                 data_tier=request.data_tier,
                 state=RecordingState.ARMING,
                 started_at_utc=now.isoformat(),
@@ -1696,7 +1700,6 @@ class RecordingCoordinator:
             start_ns = time.monotonic_ns()
             capture_request = RecordingStartRequest(
                 collection_id="_diagnostics",
-                participant_id=request.operator_id,
                 data_tier="test",
                 body_location="chest",
                 protocol_id="imu_characterization_v1",
@@ -1722,6 +1725,7 @@ class RecordingCoordinator:
                 self.settings.imu,
                 self.taxonomy,
                 recording_kind="imu_characterization",
+                operator_id=request.operator_id,
                 training_eligible=False,
                 video_status="not_requested",
             )

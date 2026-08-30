@@ -10,7 +10,7 @@ capture:
   default_data_tier: "prod"
 
 identity:
-  # 参与者和标注者共用同一白名单；修改后需重启本地服务。
+  # 只供标注端参与者复核、登录和诊断操作者使用；采集端不选择参与者。
   allowed_unikeys:
     - "rkim6933"
     - "zche0826"
@@ -23,6 +23,9 @@ identity:
     - "xliu0452"
   admins:
     - "xfan0282"
+  # 正式服务器必须在私有 /etc 配置中提供追加式一对一 subject_ids；
+  # 默认开发配置留空，因此 v3 正式数据不会意外导出。
+  subject_ids: {}
 
 auth:
   # 本机和 SSH 隧道单人开发使用 local；开放团队访问前必须接入真实身份认证。

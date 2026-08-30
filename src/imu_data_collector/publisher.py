@@ -152,8 +152,8 @@ def _require_annotation_capabilities(
             "标注端尚未公布能力合同，已在上传任何对象前停止"
         ) from error
     capabilities = AnnotationCapabilities.model_validate(payload)
-    if "2.1.0" not in capabilities.accepted_manifest_schema_versions:
-        raise RuntimeError("标注端不接受 manifest schema 2.1.0")
+    if "3.0.0" not in capabilities.accepted_manifest_schema_versions:
+        raise RuntimeError("标注端不接受 manifest schema 3.0.0")
     if source_h5_schema_version not in capabilities.accepted_capture_h5_schema_versions:
         raise RuntimeError(
             "标注端不接受 capture H5 schema " + source_h5_schema_version
@@ -179,15 +179,17 @@ async def prepare_publication(
         h5_identity = {
             "recording_id": str(handle.attrs.get("recording_id", "")),
             "collection_id": str(handle.attrs.get("collection_id", "")),
-            "participant_id": str(handle.attrs.get("participant_id", "")),
             "data_tier": str(handle.attrs.get("data_tier", "")),
         }
         summary_identity = {
             "recording_id": summary.recording_id,
             "collection_id": summary.collection_id,
-            "participant_id": summary.participant_id,
             "data_tier": summary.data_tier.value,
         }
+        if "participant_id" in handle.attrs:
+            raise ValueError("身份中立 H5 禁止包含 participant_id")
+        if str(handle.attrs.get("identity_contract_version", "")) != "2.0.0":
+            raise ValueError("H5 缺少参与者身份 v3 合同")
         if h5_identity != summary_identity:
             raise ValueError("录制目录索引与 H5 冻结身份不一致")
         captured_at_utc = str(handle.attrs.get("started_at_utc", ""))
@@ -258,9 +260,9 @@ async def prepare_publication(
             )
         )
     manifest = CaptureManifestV2(
+        schema_version="3.0.0",
         recording_id=summary.recording_id,
         collection_id=summary.collection_id,
-        participant_id=summary.participant_id,
         data_tier=DataTier(summary.data_tier),
         body_location=body_location,
         captured_at_utc=captured_at_utc,
@@ -301,7 +303,7 @@ async def publish_recording(
         written = await asyncio.to_thread(
             store.write_json,
             manifest_key,
-            manifest.model_dump(mode="json"),
+            manifest.model_dump(mode="json", exclude_none=True),
             if_generation_match=0,
         )
         manifest_generation = written.generation
@@ -322,7 +324,7 @@ async def publish_recording(
             written = await asyncio.to_thread(
                 store.write_json,
                 manifest_key,
-                manifest.model_dump(mode="json"),
+                manifest.model_dump(mode="json", exclude_none=True),
                 if_generation_match=manifest_generation,
             )
             manifest_generation = written.generation

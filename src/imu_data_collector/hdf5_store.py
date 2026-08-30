@@ -78,6 +78,7 @@ class CaptureH5Writer:
         taxonomy: dict[str, Any],
         *,
         recording_kind: str = "capture",
+        operator_id: str | None = None,
         training_eligible: bool = False,
         video_status: str = "required",
     ) -> None:
@@ -88,6 +89,7 @@ class CaptureH5Writer:
         self.imu_settings = imu_settings
         self.taxonomy = taxonomy
         self.recording_kind = recording_kind
+        self.operator_id = operator_id
         if request.data_tier == DataTier.TEST and training_eligible:
             raise ValueError("test 数据永久禁止标记为可训练")
         self.training_eligible = training_eligible
@@ -124,7 +126,8 @@ class CaptureH5Writer:
                 "capture_schema_version": CAPTURE_SCHEMA_VERSION,
                 "recording_id": self.recording_id,
                 "collection_id": self.request.collection_id,
-                "participant_id": self.request.participant_id,
+                "identity_contract_version": "2.0.0",
+                "participant_assignment_source": "review",
                 "data_tier": self.request.data_tier.value,
                 "body_location": self.request.body_location,
                 "protocol_id": self.request.protocol_id,
@@ -149,6 +152,8 @@ class CaptureH5Writer:
                 "video_status": self.video_status,
             }
         )
+        if self.operator_id is not None:
+            handle.attrs["operator_id"] = self.operator_id
         imu = handle.create_group("imu")
         imu.attrs.update(
             {

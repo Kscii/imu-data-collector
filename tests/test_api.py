@@ -40,7 +40,8 @@ def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
         assert config.json()["data_tiers"] == ["test", "prod"]
         assert config.json()["default_data_tier"] == "prod"
         assert config.json()["imu"]["calibration_verified"] is False
-        assert config.json()["allowed_unikeys"] == [
+        assert "allowed_unikeys" not in config.json()
+        assert config.json()["operator_unikeys"] == [
             "rkim6933",
             "zche0826",
             "jzho8728",
@@ -157,7 +158,7 @@ def test_start_contract_rejects_non_unikey_participant_before_hardware_access(
     assert response.status_code == 422
 
 
-def test_start_contract_rejects_well_formed_but_unlisted_unikey(
+def test_start_contract_rejects_removed_participant_field(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -177,7 +178,7 @@ def test_start_contract_rejects_well_formed_but_unlisted_unikey(
         )
 
     assert response.status_code == 422
-    assert "白名单" in response.json()["detail"]["message"]
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
 
 
 def test_start_contract_rejects_unknown_data_tier_before_hardware_access(

@@ -279,7 +279,6 @@ async def test_failed_ble_arming_does_not_create_user_capture_files(
         await coordinator.start(
             RecordingStartRequest(
                 collection_id="arming_failure",
-                participant_id="xfan0282",
                 camera_id="fixture",
             )
         )
@@ -552,7 +551,6 @@ async def test_start_recording_reuses_preview_ble(tmp_path: Path) -> None:
         summary = await coordinator.start(
             RecordingStartRequest(
                 collection_id="reuse_ble",
-                participant_id="xfan0282",
                 camera_id="camera-1",
             )
         )
@@ -605,10 +603,7 @@ async def test_stop_freezes_capture_and_queues_finalization_before_preview_resto
     partial_h5 = directory / f"{recording_id}.partial.h5"
     partial_mkv = directory / f"{recording_id}.partial.mkv"
     partial_mkv.write_bytes(b"fixture mkv")
-    request = RecordingStartRequest(
-        collection_id="validation_lock",
-        participant_id="xfan0282",
-    )
+    request = RecordingStartRequest(collection_id="validation_lock")
     writer = CaptureH5Writer(
         partial_h5,
         request,
@@ -634,7 +629,6 @@ async def test_stop_freezes_capture_and_queues_finalization_before_preview_resto
     summary = RecordingSummary(
         recording_id=recording_id,
         collection_id=request.collection_id,
-        participant_id=request.participant_id,
         data_tier=request.data_tier,
         state=RecordingState.RECORDING,
         started_at_utc="2026-08-27T00:00:00+00:00",

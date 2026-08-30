@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -158,6 +159,8 @@ class IdentitySettings:
     )
     admins: tuple[str, ...] = ("xfan0282",)
     email_to_unikey: dict[str, str] = field(default_factory=dict)
+    # 私有、追加式映射。该字段不得由任何前端 API 返回。
+    subject_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -252,6 +255,22 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
             str(email).strip().lower(): str(unikey)
             for email, unikey in identity_values["email_to_unikey"].items()
         }
+    if "subject_ids" in identity_values:
+        identity_values["subject_ids"] = {
+            str(unikey): str(subject_id)
+            for unikey, subject_id in identity_values["subject_ids"].items()
+        }
+        subject_ids = identity_values["subject_ids"]
+        if len(set(subject_ids.values())) != len(subject_ids):
+            raise ValueError("identity.subject_ids 必须是一对一映射")
+        invalid = [
+            f"{unikey}={subject_id}"
+            for unikey, subject_id in subject_ids.items()
+            if not re.fullmatch(r"[a-z][a-z0-9]{2,31}", unikey)
+            or not re.fullmatch(r"cw12eu:subject-[0-9]{3,}", subject_id)
+        ]
+        if invalid:
+            raise ValueError("identity.subject_ids 格式无效：" + "、".join(invalid))
     identity = IdentitySettings(**identity_values)
     for key in (
         "data_root",

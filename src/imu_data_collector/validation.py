@@ -194,6 +194,13 @@ def validate_capture_h5(
                     if name not in handle["imu"].attrs:
                         issues.append(f"missing IMU calibration attribute {name}")
         if schema_version == CAPTURE_SCHEMA_VERSION:
+            if str(handle.attrs.get("recording_kind", "capture")) == "capture":
+                if "participant_id" in handle.attrs:
+                    issues.append("current capture schema must not contain participant_id")
+                if handle.attrs.get("identity_contract_version") != "2.0.0":
+                    issues.append("current capture schema has invalid identity contract")
+                if handle.attrs.get("participant_assignment_source") != "review":
+                    issues.append("current capture schema must assign participant in review")
             for name in (
                 "host_os",
                 "host_os_version",

@@ -59,6 +59,10 @@ from imu_data_collector.models import (
     IndexReceipt,
     IndexRefreshIssue,
     IndexRefreshResult,
+    ParticipantAssignment,
+    ParticipantAssignmentStatus,
+    ParticipantConfirmRequest,
+    ParticipantSelectRequest,
     ReviewDocument,
     ReviewWorkflowState,
     SyncDocument,
@@ -74,7 +78,7 @@ from imu_data_collector.validation import validate_annotations
 
 logger = logging.getLogger(__name__)
 
-ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.1.0",)
+ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.0.0", "2.1.0", "3.0.0")
 
 
 def _training_snapshot_fingerprint(recordings: list[dict[str, Any]]) -> str:
@@ -745,10 +749,13 @@ class AnnotationService:
     def recording_summary(self, manifest: CaptureManifestV2) -> dict[str, Any]:
         """把不可变 manifest 投影成前端共用的轻量录制摘要。"""
 
+        review, _generation = self.reviews.load(manifest)
+        assignment = review.participant_assignment
         return {
             "recording_id": manifest.recording_id,
             "collection_id": manifest.collection_id,
-            "participant_id": manifest.participant_id,
+            "participant_id": assignment.participant_id,
+            "participant_status": assignment.status.value,
             "data_tier": manifest.data_tier.value,
             "state": "published",
             "started_at_utc": manifest.captured_at_utc,
@@ -1557,6 +1564,78 @@ class AnnotationService:
 
         return self.reviews.mutate(manifest, request.expected_revision, update)
 
+    def select_participant(
+        self,
+        recording_id: str,
+        request: ParticipantSelectRequest,
+        actor_id: str,
+    ) -> ReviewDocument:
+        """记录视频证据并选择身份；该步骤不会让身份获得训练资格。"""
+
+        self._require_allowed_actor(actor_id)
+        if request.participant_id not in self.settings.identity.allowed_unikeys:
+            raise ValueError("participant_id 不在允许名单")
+        manifest = self.required_manifest(recording_id)
+
+        def update(review: ReviewDocument) -> ReviewDocument:
+            self._require_current_annotator(review, actor_id)
+            return review.model_copy(
+                update={
+                    "schema_version": "3.0.0",
+                    "participant_assignment": ParticipantAssignment(
+                        status=ParticipantAssignmentStatus.SELECTED,
+                        participant_id=request.participant_id,
+                        evidence=request.evidence,
+                        selected_by=actor_id,
+                        selected_at_utc=datetime.now(UTC).isoformat(),
+                    ),
+                    "workflow": workflow_with_timestamp(
+                        review.workflow,
+                        last_editor_id=actor_id,
+                    ),
+                    "active_export": None,
+                }
+            )
+
+        return self.reviews.mutate(manifest, request.expected_revision, update)
+
+    def confirm_participant(
+        self,
+        recording_id: str,
+        request: ParticipantConfirmRequest,
+        actor_id: str,
+    ) -> ReviewDocument:
+        """由当前任务负责人对所选身份作第二次显式确认。"""
+
+        self._require_allowed_actor(actor_id)
+        manifest = self.required_manifest(recording_id)
+
+        def update(review: ReviewDocument) -> ReviewDocument:
+            self._require_current_annotator(review, actor_id)
+            assignment = review.participant_assignment
+            if assignment.status != ParticipantAssignmentStatus.SELECTED:
+                raise ValueError("必须先基于视频选择参与者")
+            if assignment.participant_id != request.participant_id:
+                raise ValueError("确认身份与当前选择不一致，请刷新后重试")
+            return review.model_copy(
+                update={
+                    "schema_version": "3.0.0",
+                    "participant_assignment": assignment.model_copy(
+                        update={
+                            "status": ParticipantAssignmentStatus.CONFIRMED,
+                            "confirmed_by": actor_id,
+                            "confirmed_at_utc": datetime.now(UTC).isoformat(),
+                        }
+                    ),
+                    "workflow": workflow_with_timestamp(
+                        review.workflow,
+                        last_editor_id=actor_id,
+                    ),
+                }
+            )
+
+        return self.reviews.mutate(manifest, request.expected_revision, update)
+
     def _authoritative_calibration(self) -> CalibrationProfile:
         """从服务器私有配置和版本化证据文件构造唯一可信校准档案。"""
 
@@ -1647,12 +1726,13 @@ class AnnotationService:
             root_expected = {
                 "recording_id": manifest.recording_id,
                 "collection_id": manifest.collection_id,
-                "participant_id": manifest.participant_id,
                 "data_tier": manifest.data_tier.value,
                 "body_location": manifest.body_location,
                 "capture_schema_version": manifest.source_h5_schema_version,
                 "started_at_utc": manifest.captured_at_utc,
             }
+            if manifest.schema_version != "3.0.0":
+                root_expected["participant_id"] = manifest.participant_id
             for name, expected in root_expected.items():
                 if text(handle.attrs.get(name, "")) != str(expected):
                     raise ValueError(f"H5 与 manifest 的 {name} 不一致")
@@ -1709,6 +1789,17 @@ class AnnotationService:
             raise ValueError("test 数据永久禁止导出到训练集")
         if review.revision != expected_revision:
             raise ReviewConflictError("review.json 已更新，请刷新后重试")
+        assignment = review.participant_assignment
+        if assignment.status != ParticipantAssignmentStatus.CONFIRMED:
+            raise ValueError("训练导出前必须确认参与者身份；无法确认时不得猜测")
+        participant_id = assignment.participant_id
+        if participant_id is None:
+            raise ValueError("已确认身份缺少 participant_id")
+        subject_id = self.settings.identity.subject_ids.get(participant_id)
+        if subject_id is None and manifest.schema_version != "3.0.0":
+            subject_id = f"cw12eu:{participant_id}"
+        if subject_id is None:
+            raise ValueError("该参与者尚未配置私有匿名 subject_id，禁止导出")
         manifest_artifacts = {item.role: item for item in manifest.artifacts}
         for source in review.sources:
             artifact = manifest_artifacts[source.role]
@@ -1753,6 +1844,7 @@ class AnnotationService:
                 calibration_evidence_sha256=authoritative.evidence_sha256,
             ),
             export_taxonomy,
+            subject_id=subject_id,
             source_hashes_verified=True,
         )
         digest = sha256_file(output)
@@ -1819,6 +1911,11 @@ class AnnotationService:
         if review.workflow.state != ReviewWorkflowState.IN_PROGRESS:
             raise ValueError("只有进行中的标注可以完成")
         self._require_current_annotator(review, actor_id)
+        if manifest.data_tier.value == "prod" and (
+            review.participant_assignment.status
+            != ParticipantAssignmentStatus.CONFIRMED
+        ):
+            raise ValueError("完成正式标注前必须确认参与者身份；无法确认时不得猜测")
         if not review.annotations.finalized:
             raise ValueError("完成前必须定稿标注")
         if len(review.sync.anchors) != 2 or assess_conditional_fixed_offset(
@@ -2092,10 +2189,26 @@ class AnnotationService:
                     ):
                         path.unlink(missing_ok=True)
                         raise ValueError("训练导出缓存的大小或 SHA-256 不匹配")
-                files.append((manifest.participant_id, manifest.recording_id, path))
+                participant_id = review.participant_assignment.participant_id
+                if (
+                    review.participant_assignment.status
+                    != ParticipantAssignmentStatus.CONFIRMED
+                    or participant_id is None
+                ):
+                    raise ValueError(
+                        f"已完成录制缺少已确认参与者身份：{manifest.recording_id}"
+                    )
+                subject_id = self.settings.identity.subject_ids.get(participant_id)
+                if subject_id is None and manifest.schema_version != "3.0.0":
+                    subject_id = f"cw12eu:{participant_id}"
+                if subject_id is None:
+                    raise ValueError(
+                        f"参与者缺少匿名 subject_id：{manifest.recording_id}"
+                    )
+                files.append((subject_id, manifest.recording_id, path))
                 recordings.append(
                     {
-                        "participant_id": manifest.participant_id,
+                        "participant_id": subject_id,
                         "recording_id": manifest.recording_id,
                         "source_review_revision": reference.source_review_revision,
                         "export_schema_version": reference.export_schema_version,
@@ -2569,6 +2682,7 @@ class AnnotationService:
             "capture": "published",
             "sync": sync_quality,
             "annotation": review.workflow.state.value,
+            "participant": review.participant_assignment.status.value,
             "calibration": "verified" if manifest.calibration.verified else "unverified",
             "export": (
                 "exported"

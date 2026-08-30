@@ -180,7 +180,7 @@ class RecordingCatalog:
                 (
                     payload["recording_id"],
                     payload["collection_id"],
-                    payload["participant_id"],
+                    payload["participant_id"] or "",
                     payload["data_tier"],
                     payload["state"],
                     payload["started_at_utc"],
@@ -481,7 +481,7 @@ class RecordingCatalog:
                 """,
                 (
                     payload["collection_id"],
-                    payload["participant_id"],
+                    payload["participant_id"] or "",
                     payload["data_tier"],
                     payload["state"],
                     payload["started_at_utc"],
@@ -640,7 +640,7 @@ class RecordingCatalog:
         return RecordingSummary(
             recording_id=row["recording_id"],
             collection_id=row["collection_id"],
-            participant_id=row["participant_id"],
+            participant_id=row["participant_id"] or None,
             data_tier=row["data_tier"],
             state=RecordingState(row["state"]),
             started_at_utc=row["started_at_utc"],

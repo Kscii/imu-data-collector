@@ -551,7 +551,7 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             "upload_id": upload_id,
             "actor": current,
             "expires_at_utc": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
-            "manifest": manifest.model_dump(mode="json"),
+            "manifest": manifest.model_dump(mode="json", exclude_none=True),
         }
         bucket.blob(f"_upload_sessions/{upload_id}.json").upload_from_string(
             json.dumps(plan, ensure_ascii=False),

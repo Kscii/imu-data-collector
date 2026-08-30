@@ -52,7 +52,6 @@ def test_capture_h5_file_descriptor_is_not_inheritable(tmp_path: Path) -> None:
         tmp_path / "descriptor.h5",
         RecordingStartRequest(
             collection_id="descriptor_check",
-            participant_id="xfan0282",
         ),
         "descriptor-recording",
         1_000_000_000,
@@ -114,7 +113,6 @@ def build_capture(
         path,
         RecordingStartRequest(
             collection_id="pilot",
-            participant_id="xfan0282",
             data_tier=data_tier,
         ),
         "recording-1",
@@ -363,7 +361,6 @@ def test_auxiliary_notifications_are_preserved_without_blocking_validation(
         path,
         RecordingStartRequest(
             collection_id="auxiliary_check",
-            participant_id="xfan0282",
         ),
         "auxiliary-recording",
         1_000_000_000,
@@ -402,7 +399,6 @@ def test_unknown_notification_still_blocks_production_readiness(tmp_path: Path) 
         path,
         RecordingStartRequest(
             collection_id="unknown_check",
-            participant_id="xfan0282",
         ),
         "unknown-recording",
         1_000_000_000,
@@ -471,7 +467,7 @@ def test_verified_calibration_is_frozen_and_values_si_use_target_axes(
     )
     writer = CaptureH5Writer(
         path,
-        RecordingStartRequest(collection_id="pilot", participant_id="xfan0282"),
+        RecordingStartRequest(collection_id="pilot"),
         "calibrated",
         1_000_000_000,
         settings,
@@ -500,9 +496,7 @@ def test_verified_calibration_is_frozen_and_values_si_use_target_axes(
 def test_prod_tier_is_default_but_explicit_test_can_never_be_training_eligible(
     tmp_path: Path,
 ) -> None:
-    default_request = RecordingStartRequest(
-        collection_id="pilot", participant_id="xfan0282"
-    )
+    default_request = RecordingStartRequest(collection_id="pilot")
     assert default_request.data_tier == DataTier.PROD
     request = default_request.model_copy(update={"data_tier": DataTier.TEST})
 
@@ -520,9 +514,7 @@ def test_prod_tier_is_default_but_explicit_test_can_never_be_training_eligible(
 
 
 def test_formal_recording_start_is_frozen_before_first_packet(tmp_path: Path) -> None:
-    request = RecordingStartRequest(
-        collection_id="pilot", participant_id="xfan0282", data_tier="test"
-    )
+    request = RecordingStartRequest(collection_id="pilot", data_tier="test")
     path = tmp_path / "start.partial.h5"
     writer = CaptureH5Writer(
         path,
@@ -655,7 +647,6 @@ def test_characterization_h5_and_report_are_never_training_eligible(
         path,
         RecordingStartRequest(
             collection_id="_diagnostics",
-            participant_id="xfan0282",
             protocol_id="imu_characterization_v1",
         ),
         "characterization-1",
@@ -709,7 +700,6 @@ def test_opposite_pose_pair_produces_conservative_accel_candidate(
             path,
             RecordingStartRequest(
                 collection_id="_diagnostics",
-                participant_id="xfan0282",
                 protocol_id="imu_characterization_v1",
             ),
             path.stem,
@@ -754,7 +744,6 @@ def test_interrupted_characterization_recovery_preserves_partial(
         partial,
         RecordingStartRequest(
             collection_id="_diagnostics",
-            participant_id="xfan0282",
             protocol_id="imu_characterization_v1",
         ),
         "interrupted",

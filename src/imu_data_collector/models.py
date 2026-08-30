@@ -118,17 +118,16 @@ class ExclusionReason(StrEnum):
 
 
 class RecordingStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     collection_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
-    participant_id: str
     data_tier: DataTier = DataTier.PROD
     body_location: str = "chest"
     protocol_id: str = "fall_binary_v1"
     camera_id: str | None = Field(default=None, max_length=512)
 
     @model_validator(mode="after")
-    def validate_identity(self) -> RecordingStartRequest:
-        if not UNIKEY_RE.fullmatch(self.participant_id):
-            raise ValueError("participant_id must be a lowercase UniKey-like identifier")
+    def validate_capture_contract(self) -> RecordingStartRequest:
         if self.body_location != "chest":
             raise ValueError("v1 supports chest placement only")
         return self
@@ -414,16 +413,84 @@ class ReviewWorkflow(BaseModel):
         return self
 
 
+class ParticipantAssignmentStatus(StrEnum):
+    """参与者身份必须先选择，再由任务负责人显式确认。"""
+
+    UNASSIGNED = "unassigned"
+    SELECTED = "selected"
+    CONFIRMED = "confirmed"
+
+
+class ParticipantEvidence(BaseModel):
+    video_frame_index: int = Field(ge=0)
+    video_time_ns: int = Field(ge=0)
+
+
+class ParticipantAssignment(BaseModel):
+    """仅存在于私有 review 中，不回写采集制品或公开文件名。"""
+
+    status: ParticipantAssignmentStatus = ParticipantAssignmentStatus.UNASSIGNED
+    participant_id: str | None = None
+    evidence: ParticipantEvidence | None = None
+    selected_by: str | None = None
+    selected_at_utc: str | None = None
+    confirmed_by: str | None = None
+    confirmed_at_utc: str | None = None
+
+    @model_validator(mode="after")
+    def validate_assignment(self) -> ParticipantAssignment:
+        for field_name in ("participant_id", "selected_by", "confirmed_by"):
+            value = getattr(self, field_name)
+            if value is not None and not UNIKEY_RE.fullmatch(value):
+                raise ValueError(f"{field_name} must be a lowercase UniKey-like identifier")
+        if self.status == ParticipantAssignmentStatus.UNASSIGNED:
+            if any(
+                value is not None
+                for value in (
+                    self.participant_id,
+                    self.evidence,
+                    self.selected_by,
+                    self.selected_at_utc,
+                    self.confirmed_by,
+                    self.confirmed_at_utc,
+                )
+            ):
+                raise ValueError("unassigned participant must not carry identity data")
+        elif not all(
+            value is not None
+            for value in (
+                self.participant_id,
+                self.evidence,
+                self.selected_by,
+                self.selected_at_utc,
+            )
+        ):
+            raise ValueError("selected participant requires identity, evidence and selector")
+        if self.status == ParticipantAssignmentStatus.CONFIRMED and not all(
+            value is not None
+            for value in (self.confirmed_by, self.confirmed_at_utc)
+        ):
+            raise ValueError("confirmed participant requires confirmer and timestamp")
+        if self.status != ParticipantAssignmentStatus.CONFIRMED and any(
+            value is not None for value in (self.confirmed_by, self.confirmed_at_utc)
+        ):
+            raise ValueError("unconfirmed participant must not carry confirmation data")
+        return self
+
+
 class ReviewDocument(BaseModel):
     """原始 H5/MKV 之外唯一可变的同步与标注快照。"""
 
-    schema_version: Literal["2.0.0"] = "2.0.0"
+    schema_version: Literal["2.0.0", "3.0.0"] = "3.0.0"
     recording_id: str
     revision: int = Field(default=0, ge=0)
     sources: list[SourceArtifact]
     sync: SyncDocument
     annotations: AnnotationDocument
     workflow: ReviewWorkflow = Field(default_factory=ReviewWorkflow)
+    participant_assignment: ParticipantAssignment = Field(
+        default_factory=ParticipantAssignment
+    )
     active_export: TrainingExportReference | None = None
 
 
@@ -440,6 +507,17 @@ class AnnotationReviewWorkflowRequest(BaseModel):
     action: Literal["assign", "complete", "reopen"]
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2000)
+
+
+class ParticipantSelectRequest(BaseModel):
+    participant_id: str = Field(pattern=r"^[a-z][a-z0-9]{2,31}$")
+    expected_revision: int = Field(ge=0)
+    evidence: ParticipantEvidence
+
+
+class ParticipantConfirmRequest(BaseModel):
+    participant_id: str = Field(pattern=r"^[a-z][a-z0-9]{2,31}$")
+    expected_revision: int = Field(ge=0)
 
 
 class RecordingDeleteRequest(BaseModel):
@@ -589,7 +667,7 @@ class BackgroundJobStatus(BaseModel):
 class RecordingSummary(BaseModel):
     recording_id: str
     collection_id: str
-    participant_id: str
+    participant_id: str | None = None
     data_tier: DataTier
     state: RecordingState
     started_at_utc: str
@@ -654,10 +732,13 @@ class CalibrationProfile(BaseModel):
 class CaptureManifestV2(BaseModel):
     """采集端与标注端之间唯一稳定的公开交接合同。"""
 
-    schema_version: Literal["2.1.0"] = "2.1.0"
+    schema_version: Literal["2.0.0", "2.1.0", "3.0.0"] = "3.0.0"
     recording_id: str
     collection_id: str
-    participant_id: str
+    participant_id: str | None = None
+    identity_mode: Literal["capture_declared", "annotation_required"] = (
+        "annotation_required"
+    )
     data_tier: DataTier
     body_location: Literal["chest"] = "chest"
     captured_at_utc: str
@@ -667,8 +748,27 @@ class CaptureManifestV2(BaseModel):
     calibration: CalibrationProfile = Field(default_factory=CalibrationProfile)
     artifacts: list[ArtifactDescriptor]
 
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_identity_contract(cls, value: object) -> object:
+        """旧调用方未写 schema 时仍按 2.1 读取；新发布对象显式写 3.0。"""
+
+        if isinstance(value, dict) and value.get("participant_id"):
+            output = dict(value)
+            output.setdefault("schema_version", "2.1.0")
+            output.setdefault("identity_mode", "capture_declared")
+            return output
+        return value
+
     @model_validator(mode="after")
     def validate_artifacts(self) -> CaptureManifestV2:
+        if self.schema_version == "3.0.0":
+            if self.participant_id is not None:
+                raise ValueError("manifest 3.0 禁止包含 participant_id")
+            if self.identity_mode != "annotation_required":
+                raise ValueError("manifest 3.0 必须由标注端确认参与者")
+        elif not self.participant_id:
+            raise ValueError("legacy manifest requires participant_id")
         roles = [item.role for item in self.artifacts]
         required = {"capture_h5", "video_mkv", "preview_mp4"}
         if set(roles) != required or len(roles) != len(required):

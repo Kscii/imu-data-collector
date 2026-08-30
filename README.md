@@ -11,8 +11,9 @@
 - 采样率：供应商口头信息为 30 Hz，但当前样机多次短测和两次 10 分钟静态均稳定在约 25 Hz；平台按 25 Hz 保存实际时间戳，不把原始 IMU 伪造成 30 Hz。
 - 摄像头：Linux 罗技 C930c 已验收 MJPEG 1920×1080、30 fps，固定手动曝光后实测输入约 30 FPS；Windows/macOS 从系统后端选择能够达到 30 FPS 的最高分辨率，并以实际 FPS/PTS 门禁代替不可移植的 UVC 控件假设。浏览器预览独立限为约 10 FPS。保存 H.264、约 6 Mbit/s、无音频；同时存在兼容的内置与外接相机时默认优先外接相机。
 - 产物：一次佩戴录制对应本地同名 `.h5`/`.mkv`；后台发布时增加可重建 `preview.mp4` 和不可变 `manifest.json`。标注端另写当前 `review.json` 快照，原始制品不再因同步或标注而修改。
-- 身份：本机采集端从 9 个 UniKey 白名单选择参与者；公网标注端由 Google IAP 验证登录账号，
-  再由服务器私有邮箱映射得到唯一 UniKey。操作者身份不能由浏览器请求体自报。
+- 身份：采集端不选择或保存参与者，录制 ID 只有 UTC 时间戳；任务负责人在标注端依据视频证据
+  选择并再次确认参与者。公网标注端由 Google IAP 验证登录账号，再由服务器私有邮箱映射得到
+  操作者 UniKey。训练制品只写 `cw12eu:subject-NNN`，私有映射不得暴露给浏览器或 benchmark。
 - 数据级别：录制开始时显式选择 `test` 或 `prod`；全平台新会话默认选择 `prod`，浏览器会话中
   已保存的人工选择优先。`prod` 仍需通过全部质量门禁，流程试验必须主动改选 `test`。
 - 存储：原始媒体不进 Git/Git LFS；Linux 管理机保留 ADC/GCS 发布能力，团队桌面安装包改由 Google Desktop OAuth + PKCE 登录，经独立上传代理完成 token exchange 并获得单录制 GCS 可恢复上传会话。安装包不含 client secret；refresh token 只进入操作系统凭据库，OAuth secret 与 GCS 服务账号只存在于代理 VM；标注端从 `gs://soft3888-label` 索引 manifest。
