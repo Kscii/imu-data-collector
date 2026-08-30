@@ -323,6 +323,38 @@ def test_packet_timestamp_fit_rms_remains_blocking(tmp_path: Path) -> None:
     assert len(report.warnings) == 1
 
 
+@pytest.mark.parametrize(
+    ("maximum_gap_ns", "ready"),
+    [
+        (2_000_000_000, True),
+        (2_000_000_001, False),
+    ],
+)
+def test_imu_notification_gap_blocks_only_above_two_seconds(
+    tmp_path: Path,
+    maximum_gap_ns: int,
+    ready: bool,
+) -> None:
+    path = build_capture(tmp_path)
+    with h5py.File(path, "r+") as handle:
+        receive = handle["imu/packets/receive_time_ns"]
+        receive[:] = np.asarray(
+            [
+                1_100_000_000,
+                1_100_000_000 + maximum_gap_ns,
+                1_180_000_000 + maximum_gap_ns,
+            ],
+            dtype=np.int64,
+        )
+
+    report = validate_capture_h5(path, taxonomy())
+
+    assert report.ready is ready
+    assert (
+        "IMU notification gap exceeds 2 seconds" in report.issues
+    ) is not ready
+
+
 def test_auxiliary_notifications_are_preserved_without_blocking_validation(
     tmp_path: Path,
 ) -> None:

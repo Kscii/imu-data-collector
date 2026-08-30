@@ -29,6 +29,7 @@ class ValidationReport:
 
 PACKET_FIT_RESIDUAL_WARNING_NS = 200_000_000
 PACKET_FIT_RESIDUAL_BLOCK_NS = 500_000_000
+IMU_NOTIFICATION_GAP_BLOCK_NS = 2_000_000_000
 
 
 def validate_annotations(
@@ -367,8 +368,11 @@ def validate_capture_h5(
                     f"IMU observed rate {observed_rate_hz:.3f} Hz is outside "
                     f"the expected ±5% range"
                 )
-            if len(receive) > 1 and np.max(np.diff(receive)) > 1_500_000_000:
-                issues.append("IMU notification gap exceeds 1.5 seconds")
+            if (
+                len(receive) > 1
+                and np.max(np.diff(receive)) > IMU_NOTIFICATION_GAP_BLOCK_NS
+            ):
+                issues.append("IMU notification gap exceeds 2 seconds")
             if fit_rms_ns > 100_000_000:
                 issues.append("IMU packet timestamp fit RMS exceeds 0.1 seconds")
             if fit_max_ns > PACKET_FIT_RESIDUAL_BLOCK_NS:
