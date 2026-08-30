@@ -70,6 +70,13 @@ def _publish_legacy_fixture(
             }
         )
         handle.create_dataset("imu/samples/raw_counts", data=np.arange(24).reshape(4, 6))
+        handle.create_dataset(
+            "imu/samples/empty_optional",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(16,),
+            dtype=np.int64,
+        )
         video = handle.create_group("video")
         video.attrs["path"] = mkv_path.name
     mkv_path.write_bytes(b"mkv")
@@ -252,6 +259,7 @@ def test_cloud_migration_archives_neutralizes_reopens_and_guards_rollback(
         np.testing.assert_array_equal(
             handle["imu/samples/raw_counts"], np.arange(24).reshape(4, 6)
         )
+        assert handle["imu/samples/empty_optional"].shape == (0,)
     migrated_review, generation = store.read_json(f"reviews/{new_id}/review.json")
     assert migrated_review["workflow"]["state"] == "in_progress"
     assert migrated_review["participant_assignment"]["status"] == "unassigned"
