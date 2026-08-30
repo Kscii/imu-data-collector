@@ -23,8 +23,8 @@
   大小/SHA-256 一致、manifest-last，且不产生重复录制或错误 `published` 状态。
 - [~] 修复英文模式中已报告的同步、完整 IMU 与数据集目录残留中文；自动化测试与双前端构建
   已通过，等待生产部署后用英语浏览器做截图复核。
-- [ ] 完成当前生产版本部署和冒烟：systemd/API 健康、IAP 登录、中文与英文标注页、团队目录、
-  H5/manifest 下载均正常。
+- [~] 当前主线已由 GitHub Actions 原子部署，生产 systemd、回环/公网健康、团队 Current、H5
+  拉取和 ONNX 实验目录扫描均通过；仍需在中文与英文浏览器各做一次 IAP 页面和下载人工复核。
 
 ## P0：真实采集安全
 
@@ -46,11 +46,6 @@
 
 ## P1：训练仓库交接
 
-- [~] 首个不可变团队快照已发布：`snapshot-e82b4d9a92ae78f4c7c069cf`，包含 2 条 prod 录制、
-  6430 行、39 条 annotation、3 个 impact event；SOFT3888 `validate-team` 已通过，云端目录
-  已识别为 HDF5 3.1.0、25 Hz、`training_only`。
-- [ ] 在全新 WSL2 benchmark 环境完成 Google 首次登录后，运行 `data pull`、`data status`、
-  `validate-data` 和 `doctor`，确认 base/team current、SHA-256、逻辑摘要和 participant fold。
 - [ ] 冻结团队快照撤回与替换操作手册：旧 snapshot 永不原地覆盖，`current.json` 只切换到
   已完整校验的不可变版本；误发布通过新指针和撤回记录处理。
 
@@ -70,4 +65,5 @@
 - 桌面平台：[docs/desktop-platforms.md](docs/desktop-platforms.md)、
   [docs/macos-desktop.md](docs/macos-desktop.md)
 - 数据生命周期与生产验收：[docs/data-lifecycle.md](docs/data-lifecycle.md)、
-  [docs/production-acceptance.md](docs/production-acceptance.md)
+  [docs/production-acceptance.md](docs/production-acceptance.md)、
+  [2026-08-30 自动化与 WSL2 验收记录](docs/production-acceptance-session-2026-08-30.md)
