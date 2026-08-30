@@ -84,7 +84,13 @@ def _dataset_contract(path: Path) -> dict[str, tuple[str, tuple[int, ...], str]]
             if not isinstance(item, h5py.Dataset):
                 return
             digest = hashlib.sha256()
-            if item.shape:
+            if item.size == 0:
+                # h5py rejects iter_chunks() for chunked datasets whose current
+                # extent is zero.  Their logical content is nevertheless the
+                # well-defined empty byte sequence; dtype and shape are checked
+                # separately in the contract tuple below.
+                pass
+            elif item.shape:
                 blocks = (
                     item.iter_chunks()
                     if item.chunks
