@@ -466,7 +466,7 @@ class AnnotationSaveRequest(BaseModel):
 
 
 class SyncSaveRequest(BaseModel):
-    """带 review 乐观锁的正式同步保存请求。"""
+    """带 review 乐观锁的同步草稿或正式同步保存请求。"""
 
     expected_revision: int = Field(ge=0)
     document: SyncDocument

@@ -290,6 +290,67 @@ def _ready_review(service, recording_id: str) -> None:
     )
 
 
+def test_sync_draft_allows_first_anchor_then_formal_pair(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    initial = service.review(recording_id)
+    assigned = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="assign", expected_revision=initial.revision
+        ),
+        "xfan0282",
+    )
+    start = SyncAnchor(
+        imu_time_ns=200_000_000,
+        video_time_ns=199_999_998,
+        role="start_tap",
+        source_video_frame=6,
+        source_imu_sample=5,
+        video_interval_start_ns=166_666_665,
+        imu_interval_start_ns=160_000_000,
+        reviewer_id="xfan0282",
+    )
+
+    draft = service.save_sync(
+        recording_id,
+        SyncDocument(anchors=[start]),
+        "xfan0282",
+        assigned.revision,
+    )
+
+    assert draft["quality"] == "missing"
+    assert [item["role"] for item in draft["anchors"]] == ["start_tap"]
+    saved_draft = service.review(recording_id)
+    assert saved_draft.sync.anchors == [start]
+
+    end = SyncAnchor(
+        imu_time_ns=1_600_000_000,
+        video_time_ns=1_599_999_984,
+        role="end_tap",
+        source_video_frame=48,
+        source_imu_sample=40,
+        video_interval_start_ns=1_566_666_651,
+        imu_interval_start_ns=1_560_000_000,
+        reviewer_id="xfan0282",
+    )
+    verified = service.save_sync(
+        recording_id,
+        SyncDocument(anchors=[start, end]),
+        "xfan0282",
+        saved_draft.revision,
+    )
+
+    assert verified["quality"] == "verified"
+    assert [item["role"] for item in verified["anchors"]] == [
+        "start_tap",
+        "end_tap",
+    ]
+
+
 def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
