@@ -7,6 +7,9 @@ from collections.abc import Callable
 from imu_data_collector.models import (
     AnnotationDocument,
     CaptureManifestV2,
+    ParticipantAssignment,
+    ParticipantAssignmentStatus,
+    ParticipantEvidence,
     ReviewDocument,
     ReviewWorkflow,
     SourceArtifact,
@@ -31,7 +34,9 @@ class AnnotationReviewStore:
 
     def _initial(self, manifest: CaptureManifestV2) -> ReviewDocument:
         by_role = {item.role: item for item in manifest.artifacts}
+        legacy_identity = manifest.schema_version != "3.0.0" and manifest.participant_id
         return ReviewDocument(
+            schema_version="2.0.0" if legacy_identity else "3.0.0",
             recording_id=manifest.recording_id,
             sources=[
                 SourceArtifact(
@@ -53,6 +58,22 @@ class AnnotationReviewStore:
                 taxonomy_version=str(self.taxonomy["version"]),
             ),
             workflow=ReviewWorkflow(),
+            participant_assignment=(
+                ParticipantAssignment(
+                    status=ParticipantAssignmentStatus.CONFIRMED,
+                    participant_id=manifest.participant_id,
+                    evidence=ParticipantEvidence(
+                        video_frame_index=0,
+                        video_time_ns=0,
+                    ),
+                    selected_by=manifest.participant_id,
+                    selected_at_utc=manifest.captured_at_utc,
+                    confirmed_by=manifest.participant_id,
+                    confirmed_at_utc=manifest.captured_at_utc,
+                )
+                if legacy_identity
+                else ParticipantAssignment()
+            ),
         )
 
     def load(self, manifest: CaptureManifestV2) -> tuple[ReviewDocument, int]:

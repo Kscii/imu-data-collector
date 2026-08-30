@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 import tarfile
 from pathlib import Path
 
@@ -442,6 +443,7 @@ def export_aligned(
     imu_settings: ImuSettings,
     taxonomy: dict,
     *,
+    subject_id: str | None = None,
     source_hashes_verified: bool = False,
 ) -> Path:
     if document.workflow.state not in {
@@ -479,7 +481,18 @@ def export_aligned(
             source["video/frames/recording_time_ns"], dtype=np.int64
         )
         source_rate_hz = float(source["imu"].attrs.get("observed_rate_hz", 0.0))
-        participant_id = f"cw12eu:{source.attrs['participant_id']}"
+        if subject_id is None:
+            legacy_participant = source.attrs.get("participant_id")
+            if legacy_participant is None:
+                raise ValueError("训练导出缺少匿名 subject_id")
+            participant_id = f"cw12eu:{legacy_participant}"
+        else:
+            if not re.fullmatch(
+                r"cw12eu:(?:subject-[0-9]{3,}|[a-z][a-z0-9]{2,31})",
+                subject_id,
+            ):
+                raise ValueError("训练导出 subject_id 格式无效")
+            participant_id = subject_id
         recording_id = f"cw12eu:{source.attrs['recording_id']}"
         body_location = str(source.attrs["body_location"])
 

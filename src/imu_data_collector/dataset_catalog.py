@@ -17,7 +17,7 @@ MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v1"
 CONTRACT_VERSION = "imu_benchmark_contract_v2"
 HDF5_SCHEMA_VERSION = "3.1.0"
 SAMPLING_RATE_HZ = 25.0
-DATASET_HANDOFF_VERSION = "0.1.0"
+DATASET_HANDOFF_VERSION = "0.3.0"
 Kind = Literal["base", "team"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")

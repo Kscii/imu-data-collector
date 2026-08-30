@@ -57,13 +57,11 @@ def _require_safe_partial(
         identity = {
             "recording_id": str(handle.attrs.get("recording_id", "")),
             "collection_id": str(handle.attrs.get("collection_id", "")),
-            "participant_id": str(handle.attrs.get("participant_id", "")),
             "data_tier": str(handle.attrs.get("data_tier", "")),
         }
     expected = {
         "recording_id": summary.recording_id,
         "collection_id": summary.collection_id,
-        "participant_id": summary.participant_id,
         "data_tier": summary.data_tier.value,
     }
     if identity != expected:

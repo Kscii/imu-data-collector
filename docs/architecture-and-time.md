@@ -93,7 +93,7 @@ schema `1.3.0` 起保留以下不可变或可重建证据：
       <recording_id>.h5
       <recording_id>.characterization.json
   <collection_id>/
-    <UTC_timestamp>_<participant_unikey>/
+    <UTC_timestamp>/
       <recording_id>.h5
       <recording_id>.mkv
 ```
@@ -113,7 +113,8 @@ GCS 交接层按 `captures/<recording_id>/` 保存 H5、MKV、MP4 与 manifest�
 
 ```text
 /
-  attrs: participant_id, recording_id, data_tier, clock_domain, schema_version, ...
+  attrs: recording_id, collection_id, identity_contract_version,
+         participant_assignment_source, data_tier, clock_domain, schema_version, ...
   imu/packets/: payload_values, payload_offsets, receive_time_ns, packet_kind,
                 parse_valid,
                 fitted_packet_end_time_ns, fit_residual_ns

@@ -34,6 +34,7 @@ from imu_data_collector.cw12eu import (
     parse_notification,
 )
 from imu_data_collector.host import find_executable, platform_id
+from imu_data_collector.identity_migration import apply_local_plan, build_local_plan
 from imu_data_collector.models import (
     CharacterizationStage,
     CharacterizationStageRequest,
@@ -148,6 +149,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     characterize.add_argument("--seconds", type=float, default=30.0)
     characterize.add_argument("--notes", default="")
+    migrate_identity = subparsers.add_parser(
+        "migrate-participant-identity",
+        help="把本地普通录制迁移为身份中立命名；默认只输出计划",
+    )
+    migrate_identity.add_argument("--apply", action="store_true")
+    migrate_identity.add_argument("--plan-token")
+    migrate_identity.add_argument("--confirmation")
     return parser
 
 
@@ -582,6 +590,20 @@ def main() -> None:
                 ensure_ascii=False,
             )
         )
+    elif args.command == "migrate-participant-identity":
+        plan = build_local_plan(settings.data_root)
+        if not args.apply:
+            result = plan
+        else:
+            if not args.plan_token or not args.confirmation:
+                raise SystemExit("--apply 需要 --plan-token 和 --confirmation")
+            result = apply_local_plan(
+                settings.data_root,
+                plan,
+                plan_token=args.plan_token,
+                confirmation=args.confirmation,
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(
             json.dumps(

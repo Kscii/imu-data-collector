@@ -8,10 +8,10 @@ from imu_data_collector.publisher import publish_recording
 from imu_data_collector.storage import LocalFilesystemStore
 
 
-async def test_publish_uses_h5_formal_start_and_repairs_legacy_manifest(
+async def test_publish_uses_h5_formal_start_and_repairs_stale_manifest(
     tmp_path: Path, monkeypatch
 ) -> None:
-    recording_id = "20260827T014121.043236Z_xfan0282"
+    recording_id = "20260827T014121.043236Z"
     formal_start = "2026-08-27T01:41:21.351792+00:00"
     directory = tmp_path / recording_id
     directory.mkdir()
@@ -22,11 +22,12 @@ async def test_publish_uses_h5_formal_start_and_repairs_legacy_manifest(
         handle.attrs.update(
             {
                 "recording_id": recording_id,
-                "collection_id": "xfan0282_test_01",
-                "participant_id": "xfan0282",
+                "collection_id": "20260827_session_01",
+                "identity_contract_version": "2.0.0",
+                "participant_assignment_source": "review",
                 "data_tier": "prod",
                 "body_location": "chest",
-                "capture_schema_version": "1.5.0",
+                "capture_schema_version": "1.7.0",
                 "started_at_utc": formal_start,
                 "duration_ns": 26_523_294_758,
                 "calibration_verified": False,
@@ -45,8 +46,7 @@ async def test_publish_uses_h5_formal_start_and_repairs_legacy_manifest(
     store = LocalFilesystemStore(settings.storage.root)
     summary = RecordingSummary(
         recording_id=recording_id,
-        collection_id="xfan0282_test_01",
-        participant_id="xfan0282",
+        collection_id="20260827_session_01",
         data_tier=DataTier.PROD,
         state=RecordingState.READY,
         started_at_utc="2026-08-27T01:41:21.043236+00:00",

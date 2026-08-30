@@ -27,6 +27,7 @@ from imu_data_collector.constants import (
     CAPTURE_SCHEMA_VERSION,
 )
 from imu_data_collector.coordinator import RecordingCoordinator
+from imu_data_collector.dataset_catalog import DATASET_HANDOFF_VERSION
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ArtifactDescriptor,
@@ -402,7 +403,7 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         assert removed_write.status_code in {404, 405}
 
 
-def test_annotation_rejects_manifest_2_0_and_publishes_current_capability(
+def test_annotation_reads_legacy_manifests_and_publishes_v3_capability(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
@@ -416,19 +417,23 @@ def test_annotation_rejects_manifest_2_0_and_publishes_current_capability(
         capabilities, _generation = store.read_json(
             "contracts/annotation-capabilities.json"
         )
-        assert capabilities["accepted_manifest_schema_versions"] == ["2.1.0"]
+        assert capabilities["accepted_manifest_schema_versions"] == [
+            "2.0.0",
+            "2.1.0",
+            "3.0.0",
+        ]
         assert capabilities["accepted_capture_h5_schema_versions"] == list(
             ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
         )
         result = client.post("/api/v1/index/refresh").json()
 
-    assert result["imported"] == 0
-    assert result["skipped"] == 1
-    assert result["issues"][0]["code"] == "unsupported_schema"
+    assert result["imported"] == 1
+    assert result["skipped"] == 0
+    assert result["issues"] == []
     receipt, _generation = store.read_json(
         f"index-receipts/{recording_id}.json"
     )
-    assert receipt["status"] == "rejected"
+    assert receipt["status"] == "indexed"
     assert receipt["manifest_generation"] > 0
 
 
@@ -785,7 +790,7 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
     assert activated.status_code == 200
     assert activated.json()["benchmark"]["is_current"] is True
     current, _generation = store.read_json(current_key)
-    assert current["handoff_contract_version"] == "0.1.0"
+    assert current["handoff_contract_version"] == DATASET_HANDOFF_VERSION
     assert [item["snapshot_id"] for item in listed.json()] == [
         created.json()["snapshot_id"]
     ]
@@ -812,7 +817,7 @@ def test_training_snapshot_contract_version_avoids_legacy_id_collision(
         reference, _info = service.active_export(recording_id)
         recordings = [
             {
-                "participant_id": manifest.participant_id,
+                "participant_id": f"cw12eu:{manifest.participant_id}",
                 "recording_id": recording_id,
                 "source_review_revision": reference.source_review_revision,
                 "export_schema_version": reference.export_schema_version,

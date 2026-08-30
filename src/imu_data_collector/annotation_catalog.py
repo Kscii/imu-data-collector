@@ -61,7 +61,7 @@ class AnnotationCatalog:
                 """,
                 (
                     manifest.recording_id,
-                    manifest.participant_id,
+                    manifest.participant_id or "",
                     manifest.collection_id,
                     manifest.data_tier.value,
                     manifest.captured_at_utc,

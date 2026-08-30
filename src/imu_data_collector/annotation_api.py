@@ -36,6 +36,8 @@ from imu_data_collector.models import (
     AnnotationRecordingDeleteRequest,
     AnnotationReviewWorkflowRequest,
     AnnotationSaveRequest,
+    ParticipantConfirmRequest,
+    ParticipantSelectRequest,
     SyncSaveRequest,
     TrainingSnapshotDeleteRequest,
 )
@@ -646,6 +648,38 @@ def create_annotation_app(
             ).model_dump(
                 mode="json"
             )
+        except ReviewConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.put("/api/v1/recordings/{recording_id}/participant")
+    def select_participant(
+        recording_id: str,
+        body: ParticipantSelectRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        required(recording_id)
+        try:
+            return service.select_participant(
+                recording_id, body, current_actor(request).unikey
+            ).model_dump(mode="json")
+        except ReviewConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/recordings/{recording_id}/participant/confirm")
+    def confirm_participant(
+        recording_id: str,
+        body: ParticipantConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        required(recording_id)
+        try:
+            return service.confirm_participant(
+                recording_id, body, current_actor(request).unikey
+            ).model_dump(mode="json")
         except ReviewConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:

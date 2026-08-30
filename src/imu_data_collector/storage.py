@@ -61,6 +61,14 @@ class ObjectStore(Protocol):
 
     def delete(self, key: str, *, if_generation_match: int | None) -> bool: ...
 
+    def copy(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        if_source_generation_match: int,
+    ) -> ObjectInfo: ...
+
 
 def _safe_key(key: str) -> Path:
     pure = PurePosixPath(key)
@@ -216,6 +224,33 @@ class LocalFilesystemStore:
         self._metadata_path(key).unlink(missing_ok=True)
         return True
 
+    def copy(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        if_source_generation_match: int,
+    ) -> ObjectInfo:
+        source = self.resolve(source_key)
+        if not source.is_file():
+            raise FileNotFoundError(source_key)
+        if source.stat().st_mtime_ns != if_source_generation_match:
+            raise ObjectConflictError("源对象 generation 已更新")
+        destination = self.resolve(destination_key)
+        if destination.exists():
+            raise ObjectConflictError(f"对象已存在：{destination_key}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+        source_metadata = self._metadata_path(source_key)
+        destination_metadata = self._metadata_path(destination_key)
+        if source_metadata.is_file():
+            destination_metadata.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_metadata, destination_metadata)
+        return self._info(destination_key, destination)
+
     def _info(self, key: str, path: Path) -> ObjectInfo:
         stat = path.stat()
         metadata_path = self._metadata_path(key)
@@ -353,6 +388,31 @@ class GcsObjectStore:
         except PreconditionFailed as error:
             raise ObjectConflictError("对象 generation 已更新") from error
         return True
+
+    def copy(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        if_source_generation_match: int,
+    ) -> ObjectInfo:
+        _safe_key(source_key)
+        _safe_key(destination_key)
+        try:
+            copied = self.bucket.copy_blob(
+                self.bucket.blob(source_key, generation=if_source_generation_match),
+                self.bucket,
+                destination_key,
+                source_generation=if_source_generation_match,
+                if_generation_match=0,
+                timeout=900,
+            )
+        except NotFound as error:
+            raise FileNotFoundError(source_key) from error
+        except PreconditionFailed as error:
+            raise ObjectConflictError(f"对象已存在或源已更新：{destination_key}") from error
+        copied.reload()
+        return self._info(copied)
 
 
 def create_object_store(

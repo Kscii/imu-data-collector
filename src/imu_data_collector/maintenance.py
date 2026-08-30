@@ -85,7 +85,11 @@ def rebuild_catalog(data_root: Path, catalog: RecordingCatalog) -> dict[str, int
                 summary = RecordingSummary(
                     recording_id=recording_id,
                     collection_id=str(handle.attrs["collection_id"]),
-                    participant_id=str(handle.attrs["participant_id"]),
+                    participant_id=(
+                        str(handle.attrs["participant_id"])
+                        if "participant_id" in handle.attrs
+                        else None
+                    ),
                     # 旧本地文件缺少用途字段时只允许回收到安全的 test 档，
                     # 绝不因目录重建而获得训练资格。
                     data_tier=str(handle.attrs.get("data_tier", "test")),
