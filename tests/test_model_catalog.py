@@ -43,15 +43,63 @@ def _put(
     return {"size_bytes": len(payload), "sha256": digest}
 
 
-def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
+def _selection_evidence() -> dict:
+    return {
+        "source_run_id": "selection-run",
+        "source_commit": "a" * 40,
+        "model_id": "model",
+        "training_recipe": "natural",
+        "data_snapshot_fingerprint": "1" * 64,
+        "split_fingerprint": "2" * 64,
+        "selection_scope": "validation_only_oof",
+        "metric_split": "validation_oof",
+        "selection_eligible": True,
+        "source_stride_seconds": 1.0,
+        "participant_once": {
+            "status": "PASS",
+            "participant_count": 5,
+            "appearances_per_participant": 1,
+            "validation_fold_participant_counts": [1, 1, 1, 1, 1],
+            "assignment_sha256": "3" * 64,
+        },
+        "threshold_selection": {
+            "method": "validation_balanced_accuracy",
+            "tie_break": "lower_threshold",
+        },
+        "trigger_policy_selection": {
+            "method": "validation_pareto",
+            "tie_break": "policy_id",
+        },
+    }
+
+
+def _golden_fixtures() -> list[dict]:
+    return [
+        {
+            "fixture_id": name,
+            "input_values": [[0.0] * 6 for _ in range(50)],
+            "expected_fall_score": 0.0,
+            "atol": 1e-6,
+            "rtol": 1e-6,
+        }
+        for name in ("stationary", "adl-like", "impact-like")
+    ]
+
+
+def _install_experiment(
+    store: LocalFilesystemStore, tmp_path: Path, *, legacy: bool = False
+) -> str:
     run_id = "engineering-example"
     prefix = f"benchmark-model-catalog/experiments/{run_id}"
     result_prefix = f"benchmark-results/engineering/{run_id}"
     bundle = _put(store, tmp_path, f"{result_prefix}/run.tar.gz", b"bundle")
+    result_manifest = _put(
+        store, tmp_path, f"{result_prefix}/manifest.json", b'{"run":"fixture"}'
+    )
     onnx = _put(store, tmp_path, f"{prefix}/onnx/model-fold0.onnx", b"onnx")
     marker = {
-        "schema_version": "imu_experiment_catalog_v0",
-        "contract_version": "0.1.0",
+        "schema_version": "imu_experiment_catalog_v1",
+        "contract_version": "1.0.0",
         "publication_id": run_id,
         "run_id": run_id,
         "experiment_id": "onnx_full_parity_preflight_v1",
@@ -70,9 +118,8 @@ def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
             "manifest": {
                 "filename": "manifest.json",
                 "object_key": f"{result_prefix}/manifest.json",
-                "size_bytes": 123,
-                "sha256": "3" * 64,
                 "content_type": "application/json",
+                **result_manifest,
             },
             "bundle": {
                 "filename": "run.tar.gz",
@@ -87,12 +134,19 @@ def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
                 "model_id": "model",
                 "training_recipe": "natural",
                 "folds": 1,
+                "fold_count": 1,
+                "metric_split": "test",
+                "selection_eligible": False,
                 "metrics": {},
+                "artifact_ids": ["model-fold0"],
             }
         ],
         "artifacts": [
             {
                 "artifact_id": "model-fold0",
+                "method_id": "model-natural",
+                "fold": 0,
+                "metrics": {"metric_split": "test", "selection_eligible": False},
                 "decision": {
                     "score_threshold": {
                         "value": 0.5,
@@ -121,6 +175,16 @@ def _install_experiment(store: LocalFilesystemStore, tmp_path: Path) -> str:
             }
         ],
     }
+    if legacy:
+        marker["schema_version"] = "imu_experiment_catalog_v0"
+        marker["contract_version"] = "0.1.0"
+        for method in marker["methods"]:
+            method.pop("metric_split")
+            method.pop("selection_eligible")
+        for artifact in marker["artifacts"]:
+            artifact.pop("method_id")
+            artifact["metrics"].pop("metric_split")
+            artifact["metrics"].pop("selection_eligible")
     store.write_json(f"{prefix}/metadata.json", marker, if_generation_match=0)
     store.write_json(
         f"{prefix}/state.json",
@@ -143,18 +207,89 @@ def _install_model(store: LocalFilesystemStore, tmp_path: Path) -> str:
     prefix = f"benchmark-model-catalog/models/{release_id}"
     model = _put(store, tmp_path, f"{prefix}/model.onnx", b"model")
     marker = {
-        "schema_version": "imu_model_release_v0",
-        "contract_version": "0.1.0",
+        "schema_version": "imu_model_release_v1",
+        "contract_version": "1.0.0",
         "release_id": release_id,
         "model_code": "model",
         "name": "Model release",
         "created_at_utc": "2026-08-29T01:00:00+00:00",
-        "source": {"commit": "abc", "dirty": False},
+        "release_stage": "research_candidate",
+        "source": {
+            "selection_evidence": _selection_evidence(),
+            "final_training": {
+                "commit": "a" * 40,
+                "dirty": False,
+                "seed": 3888,
+                "fixed_epoch_source": "validation_oof",
+                "training_scope": "development_participants",
+                "actual_epochs": 4,
+            },
+        },
+        "data": {
+            "snapshot_fingerprint": "1" * 64,
+            "split_fingerprint": "2" * 64,
+        },
+        "input": {
+            "semantic": "si_window",
+            "dtype": "float32",
+            "shape": [None, 50, 6],
+            "sampling_rate_hz": 25,
+            "channels": ["ax", "ay", "az", "gx", "gy", "gz"],
+            "axis_frame": "sensor_local",
+            "gravity": "retained",
+        },
+        "output": {
+            "semantic": "fall_score",
+            "dtype": "float32",
+            "shape": [None],
+            "probability_calibrated": False,
+        },
+        "preprocessing": {
+            "location": "onnx_graph",
+            "normalization": {
+                "embedded": True,
+                "mean": [0.0] * 6,
+                "scale": [1.0] * 6,
+            },
+        },
+        "windowing": {
+            "window_seconds": 2.0,
+            "training_stride_seconds": 0.5,
+            "inference_interval_seconds": 1.0,
+            "anchor": "window_end",
+            "reset_on": ["new_sequence", "stream_gap"],
+            "refill_frames_after_reset": 50,
+        },
         "decision": {
             "score_threshold": {"value": 0.5, "comparison": ">="},
-            "trigger_policy": {"policy_id": "one_of_one"},
-            "anchor": "window_end",
+            "trigger_policy": {
+                "policy_id": "one_of_one",
+                "required_positive_windows": 1,
+                "lookback_windows": 1,
+                "consecutive": True,
+                "cooldown_seconds": 10.0,
+            },
+            "status": "provisional_validation_derived",
         },
+        "metrics": {
+            "metric_split": "validation_oof",
+            "selection_eligible": True,
+            "final_model_independently_evaluated": False,
+        },
+        "verification": {
+            "golden_fixtures": _golden_fixtures()
+        },
+        "validation": {
+            "onnx_checker": {"status": "PASS"},
+            "python_onnxruntime_parity": {
+                "status": "PASS",
+                "scope": "all_final_training_windows",
+                "windows": 10,
+            },
+            "external_runtime": {"status": "not_tested"},
+            "device_replay": {"status": "not_tested"},
+        },
+        "known_limitations": ["fixture"],
         "model": {
             "filename": "model.onnx",
             "object_key": f"{prefix}/model.onnx",
@@ -197,6 +332,9 @@ def test_model_catalog_lists_downloads_and_admin_deprecates(
             f"/api/v1/model-catalog/experiment/{run_id}/files/onnx-model-fold0/download",
             headers={"Range": "bytes=1-2"},
         )
+        bundle = client.get(
+            f"/api/v1/model-catalog/experiment/{run_id}/files/result-bundle/download"
+        )
         deprecated = client.post(
             f"/api/v1/model-catalog/experiment/{run_id}/deprecate",
             json={"expected_generation": detail.json()["state_generation"]},
@@ -207,8 +345,15 @@ def test_model_catalog_lists_downloads_and_admin_deprecates(
     assert catalog.json()["models"][0]["release_id"] == release_id
     assert detail.status_code == 200
     assert detail.json()["marker"]["methods"][0]["model_id"] == "model"
+    assert {item["file_id"] for item in detail.json()["files"]} == {
+        "onnx-model-fold0",
+        "result-bundle",
+    }
     assert partial.status_code == 206
     assert partial.content == b"nn"
+    assert bundle.status_code == 200
+    assert bundle.content == b"bundle"
+    assert bundle.headers["x-content-sha256"] == hashlib.sha256(b"bundle").hexdigest()
     assert deprecated.status_code == 200
     assert deprecated.json()["status"] == "deprecated"
     assert deprecated.json()["history"][-1]["actor"] == "xfan0282"
@@ -227,3 +372,30 @@ def test_model_catalog_quarantines_artifact_without_sha_metadata(tmp_path: Path)
     assert summary["experiments"] == []
     assert len(summary["invalid_publications"]) == 1
     assert "身份" in summary["invalid_publications"][0]["detail"]
+
+
+def test_legacy_experiment_is_read_only_and_hidden_after_deprecation(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    run_id = _install_experiment(store, tmp_path, legacy=True)
+    app = create_annotation_app(settings, store=store)
+
+    with TestClient(app) as client:
+        detail = client.get(f"/api/v1/model-catalog/experiment/{run_id}")
+        deprecated = client.post(
+            f"/api/v1/model-catalog/experiment/{run_id}/deprecate",
+            json={"expected_generation": detail.json()["state_generation"]},
+        )
+        ordinary = client.get("/api/v1/model-catalog")
+        audit = client.get("/api/v1/model-catalog?include_deprecated=true")
+
+    assert detail.status_code == 200
+    assert detail.json()["contract_status"] == "legacy_pre_v1"
+    assert detail.json()["interpretation"] == {
+        "metric_split": "test",
+        "selection_eligible": False,
+        "contract_status": "legacy_pre_v1",
+    }
+    assert deprecated.status_code == 200
+    assert ordinary.json()["experiments"] == []
+    assert audit.json()["experiments"][0]["contract_status"] == "legacy_pre_v1"

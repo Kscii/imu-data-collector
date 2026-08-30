@@ -9,12 +9,21 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
+from imu_data_collector.artifact_contract import (
+    require_compatible_version,
+    validate_experiment_marker_v1,
+    validate_model_marker_v1,
+)
 from imu_data_collector.storage import ObjectConflictError, ObjectInfo, ObjectStore
 
-EXPERIMENT_SCHEMA = "imu_experiment_catalog_v0"
-EXPERIMENT_CONTRACT_VERSION = "0.1.0"
-MODEL_SCHEMA = "imu_model_release_v0"
-MODEL_CONTRACT_VERSION = "0.1.0"
+EXPERIMENT_SCHEMA = "imu_experiment_catalog_v1"
+EXPERIMENT_CONTRACT_VERSION = "1.0.0"
+LEGACY_EXPERIMENT_SCHEMA = "imu_experiment_catalog_v0"
+LEGACY_EXPERIMENT_CONTRACT_VERSION = "0.1.0"
+MODEL_SCHEMA = "imu_model_release_v1"
+MODEL_CONTRACT_VERSION = "1.0.0"
+LEGACY_MODEL_SCHEMA = "imu_model_release_v0"
+LEGACY_MODEL_CONTRACT_VERSION = "0.1.0"
 STATE_SCHEMA = "imu_model_catalog_state_v0"
 EXPERIMENT_ROOT = "benchmark-model-catalog/experiments"
 MODEL_ROOT = "benchmark-model-catalog/models"
@@ -88,14 +97,28 @@ class ModelCatalog:
     def _experiment(self, marker_key: str) -> dict[str, Any]:
         marker, marker_generation = self.store.read_json(marker_key)
         publication_id = marker.get("publication_id")
+        schema = marker.get("schema_version")
         if (
-            marker.get("schema_version") != EXPERIMENT_SCHEMA
-            or marker.get("contract_version") != EXPERIMENT_CONTRACT_VERSION
-            or not isinstance(publication_id, str)
+            not isinstance(publication_id, str)
             or not _ID.fullmatch(publication_id)
             or marker.get("evidence_level") not in {"formal_cv", "engineering"}
         ):
             raise ValueError("实验目录 metadata 无效")
+        if schema == EXPERIMENT_SCHEMA:
+            require_compatible_version(
+                marker.get("contract_version"),
+                EXPERIMENT_CONTRACT_VERSION,
+                name="实验目录合同版本",
+            )
+            validate_experiment_marker_v1(marker)
+            contract_status = "v1"
+        elif (
+            schema == LEGACY_EXPERIMENT_SCHEMA
+            and marker.get("contract_version") == LEGACY_EXPERIMENT_CONTRACT_VERSION
+        ):
+            contract_status = "legacy_pre_v1"
+        else:
+            raise ValueError("实验目录 schema 或合同版本不受支持")
         prefix = f"{EXPERIMENT_ROOT}/{publication_id}"
         if marker_key != f"{prefix}/metadata.json":
             raise ValueError("实验目录 metadata 路径无效")
@@ -157,13 +180,15 @@ class ModelCatalog:
             descriptor = result_evidence.get(name)
             if not isinstance(descriptor, dict):
                 raise ValueError("实验目录 result 证据描述符无效")
-            _artifact_identity(descriptor)
             object_key = _safe_key(descriptor.get("object_key"))
             if (
                 descriptor.get("filename") != filename
                 or not object_key.startswith("benchmark-results/")
             ):
                 raise ValueError("实验目录 result 证据对象键无效")
+            verified = self._verify_file(descriptor, object_key=object_key)[0]
+            if name == "bundle":
+                files["result-bundle"] = verified
         return {
             "kind": "experiment",
             "publication_id": publication_id,
@@ -174,18 +199,33 @@ class ModelCatalog:
             "state": state,
             "state_generation": state_generation,
             "files": files,
+            "contract_status": contract_status,
         }
 
     def _model(self, marker_key: str) -> dict[str, Any]:
         marker, marker_generation = self.store.read_json(marker_key)
         release_id = marker.get("release_id")
+        schema = marker.get("schema_version")
         if (
-            marker.get("schema_version") != MODEL_SCHEMA
-            or marker.get("contract_version") != MODEL_CONTRACT_VERSION
-            or not isinstance(release_id, str)
+            not isinstance(release_id, str)
             or not _ID.fullmatch(release_id)
         ):
             raise ValueError("模型发布 metadata 无效")
+        if schema == MODEL_SCHEMA:
+            require_compatible_version(
+                marker.get("contract_version"),
+                MODEL_CONTRACT_VERSION,
+                name="模型发布合同版本",
+            )
+            validate_model_marker_v1(marker)
+            contract_status = "v1"
+        elif (
+            schema == LEGACY_MODEL_SCHEMA
+            and marker.get("contract_version") == LEGACY_MODEL_CONTRACT_VERSION
+        ):
+            contract_status = "legacy_pre_v1"
+        else:
+            raise ValueError("模型发布 schema 或合同版本不受支持")
         prefix = f"{MODEL_ROOT}/{release_id}"
         if marker_key != f"{prefix}/metadata.json":
             raise ValueError("模型发布 metadata 路径无效")
@@ -205,7 +245,14 @@ class ModelCatalog:
             not isinstance(threshold, dict)
             or threshold.get("comparison") != ">="
             or not isinstance(trigger, dict)
-            or decision.get("anchor") != "window_end"
+            or (
+                contract_status == "v1"
+                and decision.get("status") != "provisional_validation_derived"
+            )
+            or (
+                contract_status == "legacy_pre_v1"
+                and decision.get("anchor") != "window_end"
+            )
         ):
             raise ValueError("模型发布缺少固定阈值或触发策略")
         return {
@@ -219,6 +266,7 @@ class ModelCatalog:
             "files": {
                 "model": self._verify_file(descriptor, object_key=object_key)[0]
             },
+            "contract_status": contract_status,
         }
 
     def refresh(self, *, force: bool = False) -> dict[str, Any]:
@@ -274,6 +322,9 @@ class ModelCatalog:
             "updated_at_utc": entry["state"].get("updated_at_utc"),
             "created_at_utc": marker.get("created_at_utc"),
             "source": marker.get("source"),
+            "schema_version": marker.get("schema_version"),
+            "contract_version": marker.get("contract_version"),
+            "contract_status": entry["contract_status"],
         }
         if entry["kind"] == "experiment":
             data = marker.get("data") or {}
@@ -286,19 +337,28 @@ class ModelCatalog:
                 "method_count": len(marker["methods"]),
                 "artifact_count": len(marker["artifacts"]),
                 "base_snapshot_id": data.get("base_snapshot_id"),
+                "metric_split": "test",
+                "selection_eligible": False,
             }
         return {
             **base,
             "release_id": entry["publication_id"],
             "model_code": marker.get("model_code"),
             "name": marker.get("name"),
+            "release_stage": marker.get("release_stage"),
             "model_sha256": (marker.get("model") or {}).get("sha256"),
         }
 
-    def summary(self, *, refresh: bool = True) -> dict[str, Any]:
+    def summary(
+        self, *, refresh: bool = True, include_deprecated: bool = False
+    ) -> dict[str, Any]:
         if refresh:
             self._ensure()
-        entries = [self._summary_entry(entry) for entry in self._entries.values()]
+        entries = [
+            self._summary_entry(entry)
+            for entry in self._entries.values()
+            if include_deprecated or entry["state"]["status"] != "deprecated"
+        ]
         entries.sort(
             key=lambda item: (
                 str(item.get("created_at_utc") or ""),
@@ -325,7 +385,19 @@ class ModelCatalog:
             **self._summary_entry(entry),
             "marker": entry["marker"],
             "state": entry["state"],
-            "files": list(entry["files"].values()),
+            "interpretation": {
+                "metric_split": (
+                    "test" if entry["kind"] == "experiment" else None
+                ),
+                "selection_eligible": (
+                    False if entry["kind"] == "experiment" else None
+                ),
+                "contract_status": entry["contract_status"],
+            },
+            "files": [
+                {"file_id": file_id, **descriptor}
+                for file_id, descriptor in entry["files"].items()
+            ],
         }
 
     def file(

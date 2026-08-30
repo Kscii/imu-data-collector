@@ -23,6 +23,11 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import storage
 from google.oauth2 import id_token as google_id_token
 
+from imu_data_collector.artifact_contract import (
+    require_compatible_version,
+    validate_experiment_marker_v1,
+    validate_model_marker_v1,
+)
 from imu_data_collector.broker_models import (
     BrokerArtifactSession,
     BrokerOAuthTokenRequest,
@@ -43,9 +48,9 @@ from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERS
 from imu_data_collector.models import CaptureManifestV2
 
 RESULT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
-EXPERIMENT_PUBLICATION_SCHEMA = "imu_experiment_catalog_v0"
-MODEL_PUBLICATION_SCHEMA = "imu_model_release_v0"
-MODEL_CONTRACT_VERSION = "0.1.0"
+EXPERIMENT_PUBLICATION_SCHEMA = "imu_experiment_catalog_v1"
+MODEL_PUBLICATION_SCHEMA = "imu_model_release_v1"
+MODEL_CONTRACT_VERSION = "1.0.0"
 MODEL_STATE_SCHEMA = "imu_model_catalog_state_v0"
 RESULT_PREFIXES = {
     "formal_cv": "benchmark-results/temporal-core",
@@ -194,10 +199,18 @@ def _expected_model_publication(
     elif body.publication_kind == "experiment":
         if (
             marker.get("schema_version") != EXPERIMENT_PUBLICATION_SCHEMA
-            or marker.get("contract_version") != MODEL_CONTRACT_VERSION
             or marker.get("publication_id") != publication_id
         ):
             raise HTTPException(status_code=422, detail="实验目录 metadata 无效")
+        try:
+            require_compatible_version(
+                marker.get("contract_version"),
+                MODEL_CONTRACT_VERSION,
+                name="实验目录合同版本",
+            )
+            validate_experiment_marker_v1(marker)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         prefix = f"{EXPERIMENT_PREFIX}/{publication_id}"
         marker_key = f"{prefix}/metadata.json"
         artifacts = marker.get("artifacts")
@@ -228,10 +241,18 @@ def _expected_model_publication(
     else:
         if (
             marker.get("schema_version") != MODEL_PUBLICATION_SCHEMA
-            or marker.get("contract_version") != MODEL_CONTRACT_VERSION
             or marker.get("release_id") != publication_id
         ):
             raise HTTPException(status_code=422, detail="模型发布 metadata 无效")
+        try:
+            require_compatible_version(
+                marker.get("contract_version"),
+                MODEL_CONTRACT_VERSION,
+                name="模型发布合同版本",
+            )
+            validate_model_marker_v1(marker)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         prefix = f"{MODEL_PREFIX}/{publication_id}"
         marker_key = f"{prefix}/metadata.json"
         descriptor = marker.get("model")

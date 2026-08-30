@@ -255,8 +255,11 @@ def create_annotation_app(
     @app.get("/api/v1/model-catalog")
     def model_catalog_summary(
         refresh: Annotated[bool, Query()] = False,
+        include_deprecated: Annotated[bool, Query()] = False,
     ) -> dict[str, Any]:
-        return model_catalog.refresh(force=True) if refresh else model_catalog.summary()
+        if refresh:
+            model_catalog.refresh(force=True)
+        return model_catalog.summary(include_deprecated=include_deprecated)
 
     @app.get("/api/v1/model-catalog/{kind}/{publication_id}")
     def model_catalog_detail(

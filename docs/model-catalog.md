@@ -1,16 +1,20 @@
 # ONNX 模型目录
 
-数据标注平台的“模型”页面只负责浏览、校验状态和下载，不在服务器或浏览器中执行推理，
+数据标注平台的“研究模型与交叉验证证据”页面只负责浏览、校验状态和下载，不在服务器或浏览器中执行推理，
 也不会给任何发布自动标记 `current`、`recommended` 或 `best`。
 
 ## 两类发布
 
-- 实验 ONNX：正式 5-fold 交叉验证和受控的 1-fold 工程验证分开显示。表格按
-  `model_id + training_recipe` 聚合，显示各 fold 的均值和样本标准差；单个 fold 的
+- 交叉验证证据：正式 5-fold 交叉验证和受控的 1-fold 工程验证分开显示。表格默认按
+  `model_id + training_recipe` 排列，显示各 test fold 的均值和样本标准差；单个 fold 的
   ONNX、统一 metadata 和既有完整 result bundle 仍可下载复核。
-- 模型发布：面向后续运行时集成的独立两文件制品，只包含 `model.onnx` 和
+- 研究候选模型：面向后续运行时集成研究的独立两文件制品，只包含 `model.onnx` 和
   `metadata.json`。metadata 固定阈值与触发策略；Python parity 不代表 Android Runtime
   或实体机已经通过。
+
+CV test-fold 指标始终是 `selection_eligible=false` 的审计证据。页面不会默认按这些指标
+排名；用户主动排序也不能把排序结果解释为最佳、推荐或可部署模型。研究候选模型必须内嵌
+validation OOF、participant-once、阈值和触发策略选择摘要。
 
 对象前缀固定为：
 
@@ -47,22 +51,28 @@ cloud:
 
 ## 目录缓存和异常隔离
 
-服务端目录缓存 60 秒，页面提供“刷新 Bucket”按钮强制重扫。扫描时同时核对发布标记、
+服务端目录缓存 60 秒，页面提供“刷新目录”按钮强制重扫。详情按需加载。扫描时同时核对发布标记、
 `state.json`、对象大小和对象 `sha256` metadata。缺文件、缺 SHA 或对象身份不一致的发布会
 进入 `invalid_publications`，不会作为可下载模型展示。
+
+冻结前发布的 `imu_experiment_catalog_v0 / 0.1.0` 只按 `legacy_pre_v1` 解释，缺失的指标范围
+一律保守视为 `metric_split=test`、`selection_eligible=false`。它可以通过
+`include_deprecated=true` 审计，但 v1 迁移验证后会从普通页面隐藏；云端对象不删除、不覆盖。
 
 标注 API：
 
 ```text
 GET  /api/v1/model-catalog
 GET  /api/v1/model-catalog?refresh=true
+GET  /api/v1/model-catalog?include_deprecated=true
 GET  /api/v1/model-catalog/{experiment|model}/{id}
 GET  /api/v1/model-catalog/{experiment|model}/{id}/marker/download
 GET  /api/v1/model-catalog/{experiment|model}/{id}/files/{file_id}/download
 POST /api/v1/model-catalog/{experiment|model}/{id}/deprecate
 ```
 
-文件下载支持单段 HTTP Range，并返回 `X-Content-SHA256`。
+文件下载使用稳定 `file_id`，支持单段 HTTP Range，并返回 `X-Content-SHA256`。实验详情的下载
+区只保留 `metadata.json` 与完整 result bundle；所选方法的 fold ONNX 在方法详情内按 0–4 排序。
 
 跨仓库的规范源及版本策略见同步副本
 [`docs/contracts/annotation-benchmark-contract.zh-CN.md`](contracts/annotation-benchmark-contract.zh-CN.md)，
