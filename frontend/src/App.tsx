@@ -16,7 +16,7 @@ document.title = __APP_KIND__ === "annotation"
   : tr("IMU 数采平台", "IMU Data Collector");
 
 type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models";
-type AnnotationTaskTab = "sync" | "annotate" | "data";
+type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
 const CAPTURE_FORM_KEY = "imu-capture-form-v1";
@@ -2673,7 +2673,6 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
           {saveState === "saving" ? "正在保存…" : saveState === "saved" ? "已保存" : saveState === "error" ? "保存失败" : saveState === "conflict" ? "版本冲突" : "无待保存修改"}
         </span>
         {(canClaim || canTakeOver) && <button className="primary" onClick={() => changeWorkflow("assign")}>{canTakeOver ? "接管任务" : "领取任务"}</button>}
-        {canReopen && <button onClick={() => changeWorkflow("reopen")}>重开任务</button>}
         {(saveState === "error" || saveState === "conflict") && <button className="danger" onClick={saveState === "conflict" ? reloadCurrentRecording : () => retrySaveRef.current?.()}>{saveState === "conflict" ? "重新载入" : "重试保存"}</button>}
       </section>
 
@@ -2734,8 +2733,8 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         </section>
 
         <section className="annotation-tools-pane">
-          <nav className="annotation-task-tabs" aria-label="标注任务" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
-            {(["sync", "annotate", "data"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} style={item === "data" ? { gridColumn: "span 2" } : undefined} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : "3 数据"}</button>)}
+          <nav className="annotation-task-tabs" aria-label="标注任务">
+            {(["sync", "annotate", "data", "manage"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : item === "data" ? "3 数据" : "4 管理"}</button>)}
           </nav>
 
           <div className={`annotation-task-scroll ${taskTab === "annotate" ? "annotation-task-scroll-annotate" : ""}`}>
@@ -2834,15 +2833,20 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                 ? <div className="success-banner compact-banner">任务已完成；可在“数据”中下载当前导出，重开后才能修改。</div>
                 : <div className="save-row"><button className="primary" disabled={!canMutate || review?.participant_assignment.status !== "confirmed" || selectedRecording?.data_tier !== "prod" || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={finalizeAndComplete}>完成标注并生成训练 H5</button></div>}
               {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据允许保存和下载，但不会完成为训练数据。</p>}
-              <details><summary>任务技术详情</summary><p className="stage-help">review revision {review?.revision ?? "—"} · 负责人 {review?.workflow.annotator_id ?? "无"} · 最后编辑者 {review?.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>
             </div>}
             <div className="panel compact-panel workflow-panel">
-              <div className="panel-title">下载与录制管理</div>
-              <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>身份 {status?.participant === "confirmed" ? "已确认" : status?.participant === "selected" ? "待确认" : "未选择"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
+              <div className="panel-title">数据文件</div>
               <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned/download`} download>训练 aligned.h5</a>}</div>
-              <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
             </div>
             </>}
+
+            {taskTab === "manage" && review && <div className="panel compact-panel workflow-panel">
+              <div className="panel-title">录制管理</div>
+              <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>工作流 {review.workflow.state === "completed" ? "已完成" : review.workflow.state === "in_progress" ? "标注中" : "未领取"}</span><span>身份 {status?.participant === "confirmed" ? "已确认" : status?.participant === "selected" ? "待确认" : "未选择"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
+              {doc && <details><summary>任务技术详情</summary><p className="stage-help">review revision {review.revision} · 负责人 {review.workflow.annotator_id ?? "无"} · 最后编辑者 {review.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>}
+              {canReopen && <div className="save-row"><button onClick={() => changeWorkflow("reopen")}>重开任务</button><span>重开后当前训练导出失效，需要重新完成标注。</span></div>}
+              <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
+            </div>}
           </div>
 
           <footer className="annotation-save-bar">
