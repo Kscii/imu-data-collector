@@ -49,6 +49,7 @@ from imu_data_collector.storage import (
 )
 
 logger = logging.getLogger(__name__)
+MODEL_VIEWERS = frozenset({"xfan0282"})
 
 
 def create_annotation_app(
@@ -140,6 +141,12 @@ def create_annotation_app(
             raise HTTPException(status_code=403, detail="该操作仅限管理员")
         return actor
 
+    def model_actor(request: Request) -> Actor:
+        actor = current_actor(request)
+        if actor.unikey not in MODEL_VIEWERS:
+            raise HTTPException(status_code=403, detail="模型页面暂未对当前账号开放")
+        return actor
+
     def required(recording_id: str):
         try:
             return service.required_manifest(recording_id)
@@ -166,6 +173,7 @@ def create_annotation_app(
             "local_actor_id": active.auth.local_actor_id,
             "auth_mode": active.auth.mode,
             "current_unikey": actor.unikey,
+            "can_view_models": actor.unikey in MODEL_VIEWERS,
             "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "storage": {
                 "backend": active.storage.backend,
@@ -256,17 +264,20 @@ def create_annotation_app(
 
     @app.get("/api/v1/model-catalog")
     def model_catalog_summary(
+        request: Request,
         refresh: Annotated[bool, Query()] = False,
         include_deprecated: Annotated[bool, Query()] = False,
     ) -> dict[str, Any]:
+        model_actor(request)
         if refresh:
             model_catalog.refresh(force=True)
         return model_catalog.summary(include_deprecated=include_deprecated)
 
     @app.get("/api/v1/model-catalog/{kind}/{publication_id}")
     def model_catalog_detail(
-        kind: Literal["experiment", "model"], publication_id: str
+        kind: Literal["experiment", "model"], publication_id: str, request: Request
     ) -> dict[str, Any]:
+        model_actor(request)
         try:
             return model_catalog.detail(kind, publication_id)
         except KeyError as error:
@@ -274,8 +285,9 @@ def create_annotation_app(
 
     @app.get("/api/v1/model-catalog/{kind}/{publication_id}/marker/download")
     def model_catalog_marker_download(
-        kind: Literal["experiment", "model"], publication_id: str
+        kind: Literal["experiment", "model"], publication_id: str, request: Request
     ) -> Response:
+        model_actor(request)
         try:
             payload, filename = model_catalog.marker(kind, publication_id)
         except KeyError as error:
@@ -294,8 +306,10 @@ def create_annotation_app(
         kind: Literal["experiment", "model"],
         publication_id: str,
         file_id: str,
+        request: Request,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> StreamingResponse:
+        model_actor(request)
         try:
             descriptor, info = model_catalog.file(kind, publication_id, file_id)
         except KeyError as error:
@@ -341,6 +355,7 @@ def create_annotation_app(
         body: ModelPublicationRestoreRequest,
         request: Request,
     ) -> dict[str, Any]:
+        model_actor(request)
         actor = admin_actor(request)
         try:
             return model_catalog.deprecate(

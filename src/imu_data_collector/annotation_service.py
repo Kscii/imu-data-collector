@@ -756,6 +756,8 @@ class AnnotationService:
             "collection_id": manifest.collection_id,
             "participant_id": assignment.participant_id,
             "participant_status": assignment.status.value,
+            "workflow_state": review.workflow.state.value,
+            "annotator_id": review.workflow.annotator_id,
             "data_tier": manifest.data_tier.value,
             "state": "published",
             "started_at_utc": manifest.captured_at_utc,
@@ -1570,7 +1572,7 @@ class AnnotationService:
         request: ParticipantSelectRequest,
         actor_id: str,
     ) -> ReviewDocument:
-        """记录视频证据并选择身份；该步骤不会让身份获得训练资格。"""
+        """由当前任务负责人选择参与者；一次保存即完成身份确认。"""
 
         self._require_allowed_actor(actor_id)
         if request.participant_id not in self.settings.identity.allowed_unikeys:
@@ -1579,15 +1581,17 @@ class AnnotationService:
 
         def update(review: ReviewDocument) -> ReviewDocument:
             self._require_current_annotator(review, actor_id)
+            selected_at = datetime.now(UTC).isoformat()
             return review.model_copy(
                 update={
                     "schema_version": "3.0.0",
                     "participant_assignment": ParticipantAssignment(
-                        status=ParticipantAssignmentStatus.SELECTED,
+                        status=ParticipantAssignmentStatus.CONFIRMED,
                         participant_id=request.participant_id,
-                        evidence=request.evidence,
                         selected_by=actor_id,
-                        selected_at_utc=datetime.now(UTC).isoformat(),
+                        selected_at_utc=selected_at,
+                        confirmed_by=actor_id,
+                        confirmed_at_utc=selected_at,
                     ),
                     "workflow": workflow_with_timestamp(
                         review.workflow,
@@ -1614,7 +1618,7 @@ class AnnotationService:
             self._require_current_annotator(review, actor_id)
             assignment = review.participant_assignment
             if assignment.status != ParticipantAssignmentStatus.SELECTED:
-                raise ValueError("必须先基于视频选择参与者")
+                raise ValueError("必须先选择参与者")
             if assignment.participant_id != request.participant_id:
                 raise ValueError("确认身份与当前选择不一致，请刷新后重试")
             return review.model_copy(

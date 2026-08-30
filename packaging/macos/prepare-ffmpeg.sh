@@ -45,7 +45,7 @@ curl -fL --retry 3 \
   "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/$FFMPEG_TAG.tar.gz" \
   -o "$SOURCE/ffmpeg.tar.gz"
 curl -fL --retry 3 \
-  "https://code.videolan.org/videolan/x264/-/archive/$X264_COMMIT/x264-$X264_COMMIT.tar.gz" \
+  "https://codeload.github.com/mirror/x264/tar.gz/$X264_COMMIT" \
   -o "$SOURCE/x264.tar.gz"
 if [[ "$(uname -m)" == "x86_64" ]]; then
   curl -fL --retry 3 \

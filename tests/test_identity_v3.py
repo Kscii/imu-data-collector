@@ -20,8 +20,6 @@ from imu_data_collector.models import (
     CalibrationProfile,
     CaptureManifestV2,
     DataTier,
-    ParticipantConfirmRequest,
-    ParticipantEvidence,
     ParticipantSelectRequest,
     RecordingStartRequest,
     ReviewWorkflowState,
@@ -139,7 +137,7 @@ def test_capture_request_rejects_removed_participant_identity() -> None:
         RecordingStartRequest(collection_id="20260830_session_01", participant_id="xfan0282")
 
 
-def test_participant_requires_evidence_selection_and_explicit_confirmation(
+def test_participant_selection_immediately_confirms_without_evidence(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
@@ -196,24 +194,12 @@ def test_participant_requires_evidence_selection_and_explicit_confirmation(
         ParticipantSelectRequest(
             participant_id="xfan0282",
             expected_revision=review.revision,
-            evidence=ParticipantEvidence(
-                video_frame_index=12,
-                video_time_ns=400_000_000,
-            ),
         ),
         "xfan0282",
     )
-    assert selected.participant_assignment.status == "selected"
-    assert selected.participant_assignment.evidence.video_frame_index == 12
-    confirmed = service.confirm_participant(
-        recording_id,
-        ParticipantConfirmRequest(
-            participant_id="xfan0282", expected_revision=selected.revision
-        ),
-        "xfan0282",
-    )
-    assert confirmed.participant_assignment.status == "confirmed"
-    assert confirmed.participant_assignment.confirmed_by == "xfan0282"
+    assert selected.participant_assignment.status == "confirmed"
+    assert selected.participant_assignment.evidence is None
+    assert selected.participant_assignment.confirmed_by == "xfan0282"
 
 
 def test_cloud_migration_archives_neutralizes_reopens_and_guards_rollback(

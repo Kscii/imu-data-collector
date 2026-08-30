@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project="${GCP_PROJECT_ID:-project-51b589c7-8d5e-4e78-a10}"
+url_map="${URL_MAP_NAME:-imu-annotation-map}"
+host="${ANNOTATION_HOST:-imu.kscii.tech}"
+bucket="${MAINTENANCE_BUCKET:-soft3888-label-maintenance}"
+backend_bucket="${MAINTENANCE_BACKEND_BUCKET:-imu-annotation-maintenance}"
+application_backend="${ANNOTATION_BACKEND_SERVICE:-imu-annotation-backend}"
+location="${MAINTENANCE_BUCKET_LOCATION:-australia-southeast1}"
+confirmation="${1:-}"
+
+expected="CONFIGURE MAINTENANCE ${host}"
+if [[ "${confirmation}" != "${expected}" ]]; then
+  echo "用法：$0 '${expected}'" >&2
+  exit 2
+fi
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+workspace=$(mktemp -d)
+trap 'rm -rf -- "${workspace}"' EXIT
+before="${workspace}/url-map-before.yaml"
+after="${workspace}/url-map-after.yaml"
+
+gcloud compute url-maps export "${url_map}" --project "${project}" --destination "${before}" --quiet
+fingerprint=$(gcloud compute url-maps describe "${url_map}" --project "${project}" --global --format='value(fingerprint)')
+application_service=$(gcloud compute backend-services describe "${application_backend}" --project "${project}" --global --format='value(selfLink)')
+
+if ! gcloud storage buckets describe "gs://${bucket}" --project "${project}" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://${bucket}" \
+    --project "${project}" \
+    --location "${location}" \
+    --uniform-bucket-level-access \
+    --no-public-access-prevention
+fi
+gcloud storage cp "${script_dir}/maintenance.html" "gs://${bucket}/maintenance.html" \
+  --cache-control='no-store,max-age=0' \
+  --content-type='text/html; charset=utf-8'
+gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
+  --member='allUsers' \
+  --role='roles/storage.objectViewer'
+
+if ! gcloud compute backend-buckets describe "${backend_bucket}" --project "${project}" --global >/dev/null 2>&1; then
+  gcloud compute backend-buckets create "${backend_bucket}" \
+    --project "${project}" \
+    --gcs-bucket-name "${bucket}"
+fi
+error_service=$(gcloud compute backend-buckets describe "${backend_bucket}" --project "${project}" --global --format='value(selfLink)')
+
+uv run python "${script_dir}/patch-maintenance-url-map.py" \
+  --input "${before}" \
+  --output "${after}" \
+  --host "${host}" \
+  --matcher-name 'imu-annotation-maintenance-aware' \
+  --application-service "${application_service}" \
+  --error-service "${error_service}" \
+  --fingerprint "${fingerprint}"
+
+gcloud compute url-maps validate --project "${project}" --source "${after}" --global
+uv run python "${script_dir}/apply-maintenance-url-map.py" \
+  --project "${project}" \
+  --url-map "${url_map}" \
+  --host "${host}" \
+  --matcher-name 'imu-annotation-maintenance-aware' \
+  --application-service "${application_service}" \
+  --error-service "${error_service}"
+gcloud compute url-maps describe "${url_map}" --project "${project}" --global \
+  --format='yaml(hostRules,pathMatchers.defaultService,pathMatchers.defaultCustomErrorResponsePolicy)'
+
+echo "维护错误页已配置：${host} 的 5xx 会由 gs://${bucket}/maintenance.html 响应，并保留原始状态码。"

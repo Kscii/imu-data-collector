@@ -28,8 +28,8 @@ benchmark-model-catalog/models/<release_id>/
 
 ## 权限与发布链路
 
-- IAP 白名单成员都能查看和下载。
-- 标注平台管理员可以在网页把发布标记为已弃用。
+- 模型页面当前临时只向 `xfan0282` 显示；服务端对目录、详情和下载 API 使用同一门禁，不能靠直链绕过。
+- `xfan0282` 可以在网页把发布标记为已弃用。
 - 白名单成员可以在 benchmark CLI 使用当前 `gcloud` Google 登录发布。
 - 只有管理员可以通过 benchmark CLI 恢复已弃用发布。
 

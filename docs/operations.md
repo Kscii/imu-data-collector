@@ -145,8 +145,8 @@ IMU 包时间最大拟合残差按以下级别解释：
 legacy 业务状态。
 
 当前允许的参与者配置在 `identity.allowed_unikeys`，但只在标注端使用。采集 WebUI 不选择
-参与者，也不在 H5、manifest、collection 或 recording 文件名中保存 UniKey。任务负责人必须
-在标注端逐帧找到身份依据，选择后再次确认；画面不足时保持未完成，禁止猜测。Google IAP
+参与者，也不在 H5、manifest、collection 或 recording 文件名中保存 UniKey。任务负责人在
+标注端“同步”步骤直接选择一个 UniKey，一次保存即确认，不保存证据帧。Google IAP
 登录邮箱仍由私有 `identity.email_to_unikey` 解析为操作者；训练导出再通过不对前端开放的
 `identity.subject_ids` 转为稳定匿名 ID。
 

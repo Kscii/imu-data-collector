@@ -6,6 +6,7 @@
 浏览器
   -> https://imu.kscii.tech
   -> Google Cloud 外部 HTTPS Load Balancer
+     -> 5xx 时读取独立维护页 Backend Bucket
   -> Identity-Aware Proxy
   -> soft3888-label:8766
   -> IMU 标注服务
@@ -16,6 +17,7 @@
 - VM：`soft3888-label`，zone `australia-southeast1-a`
 - backend service：`imu-annotation-backend`
 - bucket：`gs://soft3888-label`
+- 维护页 bucket：`gs://soft3888-label-maintenance`（只含公开静态维护页）
 - 域名：`imu.kscii.tech`
 
 Cloudflare 的 `imu` A 记录必须为 DNS only，让 Google 托管证书和 IAP 终止 HTTPS。VM 目标
@@ -118,6 +120,26 @@ curl --fail http://127.0.0.1:8766/api/v1/health
 
 随后按 [生产验收与监控](production-acceptance.md) 完成公网、权限、标注、快照和恢复检查。健康
 接口不含敏感数据，其余 API 都要求可信身份。SQLite 只是可重建索引，事实数据在 GCS。
+
+## 应用停机时的维护提示
+
+维护页不能由 `imu-annotation.service` 自己提供，否则进程停机或部署失败时页面也会消失。
+生产 URL map 仅在 `imu.kscii.tech` 的应用后端返回 `5xx` 时，从独立 Backend Bucket 返回
+`scripts/deploy/maintenance.html`；不覆盖原始状态码，因此公网健康检查仍会失败，
+`upload.imu.kscii.tech` 也不会收到 HTML 错误页。私有数据 Bucket 继续保持 public access
+prevention，只有单独的维护页 Bucket 可公开读取。
+
+首次配置或需要幂等修复时，在已登录正确项目的受控终端运行：
+
+```bash
+./scripts/deploy/configure-maintenance-error-page \
+  'CONFIGURE MAINTENANCE imu.kscii.tech'
+```
+
+脚本先导出当前 URL map，再创建或复用维护 Bucket 与 Backend Bucket，验证修改后的 URL map
+后才导入。验收应分别确认：正常服务仍进入 IAP；临时停止 8766 后域名显示维护页且 HTTP
+状态仍为 5xx；上传域名 `/health` 不受影响。回滚时从 URL map 删除
+`imu-annotation-maintenance-aware` matcher，并把 `imu.kscii.tech` host rule 恢复到原应用 matcher。
 
 ## 校准证据迁移
 

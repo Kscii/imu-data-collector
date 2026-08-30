@@ -34,6 +34,7 @@ class ValidatedSnapshot:
     files: dict[str, tuple[dict[str, Any], ObjectInfo]]
 
     def public_dict(self, *, current: bool) -> dict[str, Any]:
+        public_files = [entry for entry, _info in self.files.values()]
         return {
             "kind": self.kind,
             "snapshot_id": self.snapshot_id,
@@ -45,7 +46,10 @@ class ValidatedSnapshot:
             ),
             "manifest_sha256": hashlib.sha256(self.manifest_bytes).hexdigest(),
             "source": self.manifest.get("source"),
-            "files": [entry for entry, _info in self.files.values()],
+            "total_duration_seconds": sum(
+                float(entry["duration_seconds"]) for entry in public_files
+            ),
+            "files": public_files,
         }
 
 
@@ -176,6 +180,9 @@ class DatasetCatalog:
                 value = entry.get(name, 0)
                 if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                     raise ValueError(f"manifest {name} 无效")
+            entry["duration_seconds"] = entry["rows"] / float(
+                entry["sampling_rate_hz"]
+            )
             info = self.store.stat(expected_key)
             if info is None or info.size_bytes != size:
                 raise ValueError(f"数据文件缺失或大小不一致：{filename}")

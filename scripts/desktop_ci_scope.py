@@ -46,11 +46,39 @@ def is_annotation_only_path(path: str) -> bool:
     )
 
 
-def desktop_build_required(paths: Iterable[str]) -> bool:
-    """空集合和任何未知/共享路径都保守地要求构建桌面安装包。"""
+def is_frontend_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return bool(
+        normalized
+        and not normalized.startswith("/")
+        and ".." not in normalized.split("/")
+        and normalized.startswith("frontend/")
+    )
+
+
+def desktop_scope(paths: Iterable[str]) -> str:
+    """返回 build、skip 或 compare_capture。"""
 
     changed = tuple(paths)
-    return not changed or any(not is_annotation_only_path(path) for path in changed)
+    if not changed:
+        return "build"
+    if all(is_annotation_only_path(path) for path in changed):
+        return "skip"
+    if all(
+        is_annotation_only_path(path)
+        or is_frontend_path(path)
+        for path in changed
+    ):
+        return "compare_capture"
+    return "build"
+
+
+def desktop_build_required(paths: Iterable[str]) -> bool:
+    """向后兼容调用方；只有明确 skip 才直接跳过。"""
+
+    return desktop_scope(paths) != "skip"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -72,7 +100,7 @@ def main() -> None:
         for item in payload.split(separator)
         if item
     ]
-    print("true" if desktop_build_required(paths) else "false")
+    print(desktop_scope(paths))
 
 
 if __name__ == "__main__":

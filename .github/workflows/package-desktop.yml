@@ -19,8 +19,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - name: 区分标注端专属变更与桌面端变更
-        id: scope
+      - name: 区分标注端专属、共享前端与桌面端变更
+        id: classify
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -28,19 +28,63 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [[ "${EVENT_NAME}" != "pull_request" ]]; then
-            echo "build_desktop=true" >> "${GITHUB_OUTPUT}"
+            echo "scope=build" >> "${GITHUB_OUTPUT}"
             echo "手动运行或桌面版本标签：构建桌面安装包。"
             exit 0
           fi
 
           changed_files="${RUNNER_TEMP}/desktop-scope-files"
           git diff --name-only --no-renames -z "${BASE_SHA}" "${HEAD_SHA}" > "${changed_files}"
-          decision="$(python3 scripts/desktop_ci_scope.py --null < "${changed_files}")"
-          echo "build_desktop=${decision}" >> "${GITHUB_OUTPUT}"
-          if [[ "${decision}" == "true" ]]; then
-            echo "包含桌面端或共享代码变更：构建 Windows/macOS 安装包。"
+          scope="$(python3 scripts/desktop_ci_scope.py --null < "${changed_files}")"
+          echo "scope=${scope}" >> "${GITHUB_OUTPUT}"
+          echo "路径判定：${scope}"
+      - uses: actions/setup-node@v7.0.0
+        if: steps.classify.outputs.scope == 'compare_capture'
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 比较 PR 前后的采集端 WebUI 产物
+        id: compare
+        if: steps.classify.outputs.scope == 'compare_capture'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base_tree="${RUNNER_TEMP}/capture-base-tree"
+          base_dist="${RUNNER_TEMP}/capture-base-dist"
+          head_dist="${RUNNER_TEMP}/capture-head-dist"
+          git worktree add --detach "${base_tree}" "${BASE_SHA}"
+          (
+            cd "${base_tree}/frontend"
+            npm ci
+            IMU_FRONTEND_OUT_DIR="${base_dist}" npm run build:capture
+          )
+          (
+            cd frontend
+            npm ci
+            IMU_FRONTEND_OUT_DIR="${head_dist}" npm run build:capture
+          )
+          if diff --recursive --brief "${base_dist}" "${head_dist}"; then
+            echo "capture_changed=false" >> "${GITHUB_OUTPUT}"
+            echo "采集端产物逐文件一致。"
           else
-            echo "仅包含标注端专属或 CI/文档变更：跳过 Windows/macOS 安装包。"
+            echo "capture_changed=true" >> "${GITHUB_OUTPUT}"
+            echo "采集端产物发生变化。"
+          fi
+      - name: 输出桌面构建结论
+        id: scope
+        shell: bash
+        env:
+          SCOPE: ${{ steps.classify.outputs.scope }}
+          CAPTURE_CHANGED: ${{ steps.compare.outputs.capture_changed }}
+        run: |
+          if [[ "${SCOPE}" == "skip" ]] || [[ "${SCOPE}" == "compare_capture" && "${CAPTURE_CHANGED}" == "false" ]]; then
+            echo "build_desktop=false" >> "${GITHUB_OUTPUT}"
+            echo "采集端不受影响：跳过 Windows/macOS 安装包。"
+          else
+            echo "build_desktop=true" >> "${GITHUB_OUTPUT}"
+            echo "包含桌面端变更：构建 Windows/macOS 安装包。"
           fi
 
   windows:
