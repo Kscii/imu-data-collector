@@ -785,7 +785,7 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
     assert activated.status_code == 200
     assert activated.json()["benchmark"]["is_current"] is True
     current, _generation = store.read_json(current_key)
-    assert current["handoff_contract_version"] == "0.1.0"
+    assert current["handoff_contract_version"] == "0.2.0"
     assert [item["snapshot_id"] for item in listed.json()] == [
         created.json()["snapshot_id"]
     ]

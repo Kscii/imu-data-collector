@@ -1,6 +1,7 @@
 import hashlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from imu_data_collector.annotation_api import create_annotation_app
@@ -45,6 +46,7 @@ def _install_snapshot(
     created_at_utc: str,
     dataset_id: str,
     current: bool = False,
+    handoff_version: str | None = "0.2.0",
 ) -> dict:
     prefix = "benchmark-datasets/base" if kind == "base" else "benchmark-datasets/team/cw12eu"
     filename = f"{dataset_id}.h5"
@@ -89,8 +91,8 @@ def _install_snapshot(
             }
         ],
     }
-    if kind == "team":
-        manifest["handoff_contract_version"] = "0.1.0"
+    if kind == "team" and handoff_version is not None:
+        manifest["handoff_contract_version"] = handoff_version
     manifest_key = f"{prefix}/{snapshot_id}/manifest.json"
     store.write_json(manifest_key, manifest, if_generation_match=0)
     manifest_sha = hashlib.sha256(store.read_bytes(manifest_key)).hexdigest()
@@ -103,8 +105,8 @@ def _install_snapshot(
             "manifest_sha256": manifest_sha,
             "updated_at_utc": created_at_utc,
         }
-        if kind == "team":
-            current_payload["handoff_contract_version"] = "0.1.0"
+        if kind == "team" and handoff_version is not None:
+            current_payload["handoff_contract_version"] = handoff_version
         store.write_json(
             f"{prefix}/current.json",
             current_payload,
@@ -153,6 +155,29 @@ def test_catalog_lists_current_then_newest_history_and_optional_team(
     ]
     assert team["available"] is False
     assert team["current"] is None
+
+
+def test_catalog_reads_unversioned_team_snapshot_as_legacy_with_warning(
+    tmp_path: Path,
+) -> None:
+    store = LocalFilesystemStore(tmp_path / "objects")
+    _install_snapshot(
+        store,
+        tmp_path,
+        kind="team",
+        snapshot_id="legacy-team",
+        created_at_utc="2026-08-29T03:00:00Z",
+        dataset_id="cw12eu",
+        current=True,
+        handoff_version=None,
+    )
+
+    with pytest.warns(RuntimeWarning, match="legacy"):
+        team = DatasetCatalog(store).collection("team")
+
+    assert team["available"] is True
+    assert team["current"]["snapshot_id"] == "legacy-team"
+    assert team["current"]["handoff_contract_version"] is None
 
 
 def test_invalid_current_and_history_are_reported_but_not_downloadable(
