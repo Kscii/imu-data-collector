@@ -26,6 +26,9 @@
 [桌面跨平台采集](docs/desktop-platforms.md)；无云密钥桌面上传见
 [桌面 OAuth 与上传代理](docs/desktop-upload.md)。
 
+实验 ONNX、最终两文件模型发布、最小权限发布和标注平台模型目录见
+[ONNX 模型目录](docs/model-catalog.md)。
+
 Windows 安装包提供两个入口：普通用户双击“IMU 数采平台”启动系统托盘并自动打开浏览器；
 关闭浏览器不退出后端，双击托盘图标可重新打开，右键“退出”才释放设备。`imu-collector.exe`
 继续作为 `doctor`、`devices` 等诊断命令的控制台入口。托盘不会随登录自启，录制进行中也会

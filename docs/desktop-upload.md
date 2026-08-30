@@ -84,6 +84,8 @@ identity:
 IMU_GOOGLE_OAUTH_CLIENT_ID=<desktop-client-id>.apps.googleusercontent.com
 IMU_GOOGLE_OAUTH_CLIENT_SECRET=<Google 桌面客户端签发的 client secret>
 IMU_UPLOAD_BROKER_HOST=0.0.0.0
+# 可选；默认已经包含当前 Google Cloud SDK audience。多个值用逗号分隔。
+IMU_MODEL_PUBLISH_GOOGLE_AUDIENCES=32555940559.apps.googleusercontent.com
 ```
 
 systemd 单元通过 `EnvironmentFile=-/etc/imu-annotation/upload-broker.env` 加载该文件；减号表示

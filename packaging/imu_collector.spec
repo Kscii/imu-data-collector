@@ -34,6 +34,7 @@ for source in (
     "annotation_api.py",
     "annotation_service.py",
     "annotation_catalog.py",
+    "model_catalog.py",
     "taxonomy_store.py",
 ):
     datas.append((str(root / "src" / "imu_data_collector" / source), "imu_data_collector"))

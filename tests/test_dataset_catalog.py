@@ -89,20 +89,25 @@ def _install_snapshot(
             }
         ],
     }
+    if kind == "team":
+        manifest["handoff_contract_version"] = "0.1.0"
     manifest_key = f"{prefix}/{snapshot_id}/manifest.json"
     store.write_json(manifest_key, manifest, if_generation_match=0)
     manifest_sha = hashlib.sha256(store.read_bytes(manifest_key)).hexdigest()
     if current:
+        current_payload = {
+            "schema_version": "imu_benchmark_current_v1",
+            "kind": kind,
+            "snapshot_id": snapshot_id,
+            "manifest_object": manifest_key,
+            "manifest_sha256": manifest_sha,
+            "updated_at_utc": created_at_utc,
+        }
+        if kind == "team":
+            current_payload["handoff_contract_version"] = "0.1.0"
         store.write_json(
             f"{prefix}/current.json",
-            {
-                "schema_version": "imu_benchmark_current_v1",
-                "kind": kind,
-                "snapshot_id": snapshot_id,
-                "manifest_object": manifest_key,
-                "manifest_sha256": manifest_sha,
-                "updated_at_utc": created_at_utc,
-            },
+            current_payload,
             if_generation_match=0,
         )
     return {"manifest": manifest, "payload": payload, "manifest_key": manifest_key}

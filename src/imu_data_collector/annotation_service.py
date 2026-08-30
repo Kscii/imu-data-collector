@@ -38,6 +38,7 @@ from imu_data_collector.config import (
 )
 from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
 from imu_data_collector.cw12eu import calibrate_counts
+from imu_data_collector.dataset_catalog import DATASET_HANDOFF_VERSION
 from imu_data_collector.file_lock import exclusive_file_lock
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
@@ -74,6 +75,23 @@ from imu_data_collector.validation import validate_annotations
 logger = logging.getLogger(__name__)
 
 ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.1.0",)
+
+
+def _training_snapshot_fingerprint(recordings: list[dict[str, Any]]) -> str:
+    """Bind immutable snapshot identity to both content and handoff contract."""
+
+    identity = {
+        "handoff_contract_version": DATASET_HANDOFF_VERSION,
+        "recordings": recordings,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 class ManifestIndexError(ValueError):
@@ -1848,7 +1866,7 @@ class AnnotationService:
         fingerprint: str,
         created_at_utc: str,
     ) -> dict[str, Any]:
-        """发布不可变合并 HDF5，并用 generation 前置条件推进 team current。"""
+        """发布待验证的不可变合并 HDF5；不在此步骤推进 team current。"""
 
         merged = self.cache_root / "benchmark-snapshots" / snapshot_id / "cw12eu.h5"
         merge_training_exports(files, merged)
@@ -1915,6 +1933,7 @@ class AnnotationService:
             "schema_version": "imu_benchmark_dataset_manifest_v1",
             "kind": "team",
             "contract_version": "imu_benchmark_contract_v2",
+            "handoff_contract_version": DATASET_HANDOFF_VERSION,
             "snapshot_id": snapshot_id,
             "created_at_utc": created_at_utc,
             "files": [file_entry],
@@ -1941,24 +1960,6 @@ class AnnotationService:
                 raise ValueError("同一 benchmark snapshot 的 manifest 内容不一致") from error
 
         current_key = "benchmark-datasets/team/cw12eu/current.json"
-        current = {
-            "schema_version": "imu_benchmark_current_v1",
-            "kind": "team",
-            "snapshot_id": snapshot_id,
-            "manifest_object": manifest_key,
-            "manifest_sha256": manifest_sha256,
-            "updated_at_utc": created_at_utc,
-        }
-        try:
-            existing_current, generation = self.store.read_json(current_key)
-        except FileNotFoundError:
-            existing_current, generation = None, 0
-        if existing_current != current:
-            self.store.write_json(
-                current_key,
-                current,
-                if_generation_match=generation,
-            )
         return {
             "snapshot_id": snapshot_id,
             "hdf5_object_key": file_entry["object_key"],
@@ -1969,6 +1970,78 @@ class AnnotationService:
             "manifest_sha256": manifest_sha256,
             "current_object_key": current_key,
         }
+
+    def activate_benchmark_snapshot(
+        self, snapshot_id: str, actor_id: str
+    ) -> dict[str, Any]:
+        """验证已暂存对象的身份后，以 CAS 切换团队 current。"""
+
+        self._require_allowed_actor(actor_id)
+        self._validate_snapshot_id(snapshot_id)
+        snapshot_key = f"training-snapshots/{snapshot_id}/manifest.json"
+        try:
+            payload, _snapshot_generation = self.store.read_json(snapshot_key)
+        except FileNotFoundError as error:
+            raise KeyError(snapshot_id) from error
+        benchmark = payload.get("benchmark")
+        if not isinstance(benchmark, dict):
+            raise ValueError("该训练快照没有 benchmark HDF5")
+        manifest_key = str(benchmark.get("manifest_object_key") or "")
+        manifest_bytes = self.store.read_bytes(manifest_key)
+        if hashlib.sha256(manifest_bytes).hexdigest() != benchmark.get(
+            "manifest_sha256"
+        ):
+            raise ValueError("benchmark manifest SHA-256 不一致")
+        manifest = json.loads(manifest_bytes)
+        if (
+            manifest.get("snapshot_id") != snapshot_id
+            or manifest.get("kind") != "team"
+            or manifest.get("handoff_contract_version") != DATASET_HANDOFF_VERSION
+        ):
+            raise ValueError("benchmark manifest 与待激活快照不一致")
+        artifact = self.store.stat(str(benchmark.get("hdf5_object_key") or ""))
+        if (
+            artifact is None
+            or artifact.size_bytes != int(benchmark.get("hdf5_size_bytes", -1))
+            or artifact.metadata.get("sha256") != benchmark.get("hdf5_sha256")
+            or artifact.metadata.get("logical_content_sha256")
+            != benchmark.get("logical_content_sha256")
+        ):
+            raise ValueError("benchmark HDF5 与待激活快照不一致")
+        current_key = str(benchmark["current_object_key"])
+        current = {
+            "schema_version": "imu_benchmark_current_v1",
+            "kind": "team",
+            "snapshot_id": snapshot_id,
+            "manifest_object": manifest_key,
+            "manifest_sha256": benchmark["manifest_sha256"],
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "handoff_contract_version": DATASET_HANDOFF_VERSION,
+        }
+        try:
+            existing, generation = self.store.read_json(current_key)
+        except FileNotFoundError:
+            existing, generation = None, 0
+        if existing is None or any(
+            existing.get(name) != current[name]
+            for name in (
+                "schema_version",
+                "kind",
+                "snapshot_id",
+                "manifest_object",
+                "manifest_sha256",
+                "handoff_contract_version",
+            )
+        ):
+            self.store.write_json(
+                current_key, current, if_generation_match=generation
+            )
+        logger.info(
+            "激活 benchmark 团队快照 snapshot_id=%s actor_id=%s",
+            snapshot_id,
+            actor_id,
+        )
+        return self._snapshot_summary(payload)
 
     def create_training_snapshot(self, actor_id: str) -> dict[str, Any]:
         """冻结点击时的已完成 prod 集合，并按内容幂等生成训练快照。"""
@@ -2035,14 +2108,7 @@ class AnnotationService:
             if not files:
                 raise ValueError("没有已完成的正式录制可生成训练快照")
             recordings.sort(key=lambda item: (item["participant_id"], item["recording_id"]))
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    recordings,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
+            fingerprint = _training_snapshot_fingerprint(recordings)
             timestamp = datetime.now(UTC)
             snapshot_id = f"snapshot-{fingerprint[:24]}"
             manifest_key = f"training-snapshots/{snapshot_id}/manifest.json"
@@ -2159,8 +2225,21 @@ class AnnotationService:
             reverse=True,
         )
 
-    @staticmethod
-    def _snapshot_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    def _snapshot_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        benchmark = payload.get("benchmark")
+        if isinstance(benchmark, dict):
+            benchmark = dict(benchmark)
+            try:
+                current, _generation = self.store.read_json(
+                    str(benchmark["current_object_key"])
+                )
+            except FileNotFoundError:
+                current = None
+            benchmark["is_current"] = bool(
+                current
+                and current.get("snapshot_id") == benchmark.get("snapshot_id")
+                and current.get("manifest_sha256") == benchmark.get("manifest_sha256")
+            )
         return {
             "snapshot_id": str(payload["snapshot_id"]),
             "created_at_utc": payload.get("created_at_utc"),
@@ -2170,7 +2249,7 @@ class AnnotationService:
             "archive_sha256": str(payload["archive_sha256"]),
             "archive_size_bytes": int(payload.get("archive_size_bytes", 0)),
             "recording_count": len(payload.get("recordings", [])),
-            "benchmark": payload.get("benchmark"),
+            "benchmark": benchmark,
         }
 
     def training_snapshot_download(self, snapshot_id: str) -> tuple[dict[str, Any], Any]:

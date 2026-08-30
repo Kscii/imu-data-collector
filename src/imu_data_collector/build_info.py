@@ -10,6 +10,7 @@ _ANNOTATION_API_SOURCES = (
     "annotation_api.py",
     "annotation_service.py",
     "annotation_catalog.py",
+    "model_catalog.py",
     "taxonomy_store.py",
     "models.py",
 )

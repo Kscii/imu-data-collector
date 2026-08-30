@@ -89,6 +89,10 @@ class DesktopCloudSettings:
     google_oauth_client_id: str | None = None
     # 只允许上传代理从服务器私有环境变量注入；桌面安装包禁止携带。
     google_oauth_client_secret: str | None = None
+    # gcloud auth print-identity-token 使用的受信 OAuth audience；仅供模型发布 CLI。
+    model_publish_google_audiences: tuple[str, ...] = (
+        "32555940559.apps.googleusercontent.com",
+    )
     authorization_endpoint: str = "https://accounts.google.com/o/oauth2/v2/auth"
     token_endpoint: str = "https://oauth2.googleapis.com/token"
     revocation_endpoint: str = "https://oauth2.googleapis.com/revoke"
@@ -217,6 +221,10 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     cloud_values = values.pop("cloud", {})
     if "scopes" in cloud_values:
         cloud_values["scopes"] = tuple(cloud_values["scopes"])
+    if "model_publish_google_audiences" in cloud_values:
+        cloud_values["model_publish_google_audiences"] = tuple(
+            cloud_values["model_publish_google_audiences"]
+        )
     cloud = DesktopCloudSettings(**cloud_values)
     background_job_values = values.pop("background_jobs", {})
     if "retry_delays_seconds" in background_job_values:
@@ -283,6 +291,10 @@ def load_settings(config_path: Path | None = None) -> Settings:
         settings.cloud.google_oauth_client_id = google_oauth_client_id
     if google_oauth_client_secret := os.environ.get("IMU_GOOGLE_OAUTH_CLIENT_SECRET"):
         settings.cloud.google_oauth_client_secret = google_oauth_client_secret
+    if model_audiences := os.environ.get("IMU_MODEL_PUBLISH_GOOGLE_AUDIENCES"):
+        settings.cloud.model_publish_google_audiences = tuple(
+            item.strip() for item in model_audiences.split(",") if item.strip()
+        )
     if broker_server_host := os.environ.get("IMU_UPLOAD_BROKER_HOST"):
         settings.cloud.broker_server_host = broker_server_host
     if broker_server_port := os.environ.get("IMU_UPLOAD_BROKER_PORT"):

@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import imu_data_collector.broker_client as broker_client
+import imu_data_collector.build_info as build_info
 import imu_data_collector.desktop_auth as desktop_auth
 from imu_data_collector import upload_broker
 from imu_data_collector.config import (
@@ -23,6 +26,15 @@ from imu_data_collector.config import (
 )
 from imu_data_collector.desktop_auth import DesktopOAuthManager
 from imu_data_collector.models import ArtifactDescriptor, CaptureManifestV2
+
+
+def test_pyinstaller_bundles_every_build_id_source() -> None:
+    spec = Path("packaging/imu_collector.spec").read_text(encoding="utf-8")
+    for source in {
+        *build_info._CAPTURE_API_SOURCES,
+        *build_info._ANNOTATION_API_SOURCES,
+    }:
+        assert f'"{source}"' in spec
 
 
 def _test_id_token(email: str) -> str:
@@ -326,6 +338,11 @@ class _FakeBlob:
         assert self.content is not None
         return self.content
 
+    def open(self, mode: str):
+        assert mode == "rb"
+        assert self.content is not None
+        return io.BytesIO(self.content)
+
     def create_resumable_upload_session(self, **_kwargs) -> str:
         return f"https://storage.example/{self.name}"
 
@@ -533,3 +550,190 @@ def test_upload_broker_requires_whitelisted_google_identity(monkeypatch, tmp_pat
         for item in payload["sessions"]
     )
     assert bucket.blob(f"_upload_sessions/{payload['upload_id']}.json").exists(None)
+
+
+def _model_release_request() -> tuple[dict, dict[str, bytes]]:
+    prefix = "benchmark-model-catalog/models/threshold-impact-v1"
+    payloads = {"model": b"onnx"}
+    descriptors = [
+        {
+            "file_id": "model",
+            "object_key": f"{prefix}/model.onnx",
+            "size_bytes": len(payloads["model"]),
+            "sha256": hashlib.sha256(payloads["model"]).hexdigest(),
+            "content_type": "application/octet-stream",
+        },
+    ]
+    marker = {
+        "schema_version": "imu_model_release_v0",
+        "contract_version": "0.1.0",
+        "release_id": "threshold-impact-v1",
+        "created_at_utc": "2026-08-29T00:00:00+00:00",
+        "model_code": "threshold-impact",
+        "model": {
+            "filename": "model.onnx",
+            "object_key": descriptors[0]["object_key"],
+            "size_bytes": descriptors[0]["size_bytes"],
+            "sha256": descriptors[0]["sha256"],
+            "content_type": "application/octet-stream",
+        },
+    }
+    return {
+        "publication_kind": "model",
+        "publication_id": "threshold-impact-v1",
+        "marker": marker,
+        "artifacts": descriptors,
+    }, payloads
+
+
+def _experiment_catalog_request() -> tuple[dict, dict[str, bytes]]:
+    publication_id = "engineering-example"
+    prefix = f"benchmark-model-catalog/experiments/{publication_id}"
+    payloads = {"onnx-model-fold0": b"onnx"}
+    descriptor = {
+        "filename": "model-fold0.onnx",
+        "object_key": f"{prefix}/onnx/model-fold0.onnx",
+        "size_bytes": len(payloads["onnx-model-fold0"]),
+        "sha256": hashlib.sha256(payloads["onnx-model-fold0"]).hexdigest(),
+        "content_type": "application/octet-stream",
+    }
+    marker = {
+        "schema_version": "imu_experiment_catalog_v0",
+        "contract_version": "0.1.0",
+        "publication_id": publication_id,
+        "artifacts": [{"artifact_id": "model-fold0", "onnx": descriptor}],
+    }
+    return {
+        "publication_kind": "experiment",
+        "publication_id": publication_id,
+        "marker": marker,
+        "artifacts": [
+            {
+                "file_id": "onnx-model-fold0",
+                **{
+                    key: descriptor[key]
+                    for key in (
+                        "object_key",
+                        "size_bytes",
+                        "sha256",
+                        "content_type",
+                    )
+                },
+            }
+        ],
+    }, payloads
+
+
+def test_model_broker_constrains_keys_verifies_payload_and_writes_marker_last(
+    monkeypatch, tmp_path
+) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    request, payloads = _model_release_request()
+    headers = {"Authorization": "Bearer gcloud-signed-id-token"}
+    with TestClient(app) as client:
+        started = client.post("/v1/model-uploads", json=request, headers=headers)
+        assert started.status_code == 200, started.json()
+        plan = started.json()
+        assert not bucket.blob(
+            "benchmark-model-catalog/models/threshold-impact-v1/metadata.json"
+        ).exists(None)
+        for session in plan["sessions"]:
+            blob = bucket.blob(session["object_key"])
+            blob.content = payloads[session["file_id"]]
+            blob.size = len(blob.content)
+            blob.generation = 1
+        completed = client.post(
+            "/v1/model-uploads/complete",
+            json={"upload_id": plan["upload_id"]},
+            headers=headers,
+        )
+        state = bucket.blob(
+            "benchmark-model-catalog/models/threshold-impact-v1/state.json"
+        )
+        marker = bucket.blob(
+            "benchmark-model-catalog/models/threshold-impact-v1/metadata.json"
+        )
+        restored = client.post(
+            "/v1/model-publications/model/threshold-impact-v1/restore",
+            json={"expected_generation": 1},
+            headers=headers,
+        )
+
+    assert completed.status_code == 200, completed.json()
+    assert state.exists(None)
+    assert marker.exists(None)
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["history"][-1]["action"] == "restore"
+
+
+def test_model_broker_rejects_caller_selected_object_key(monkeypatch, tmp_path) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    request, _payloads = _model_release_request()
+    request["artifacts"][0]["object_key"] = "captures/other/manifest.json"
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/model-uploads",
+            json=request,
+            headers={"Authorization": "Bearer gcloud-signed-id-token"},
+        )
+
+    assert response.status_code == 422
+    assert "推导结果" in response.json()["detail"]
+
+
+def test_model_broker_accepts_independent_experiment_catalog(monkeypatch, tmp_path) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    request, payloads = _experiment_catalog_request()
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    headers = {"Authorization": "Bearer gcloud-signed-id-token"}
+    with TestClient(app) as client:
+        started = client.post("/v1/model-uploads", json=request, headers=headers)
+        assert started.status_code == 200, started.json()
+        plan = started.json()
+        for session in plan["sessions"]:
+            blob = bucket.blob(session["object_key"])
+            blob.content = payloads[session["file_id"]]
+            blob.size = len(blob.content)
+            blob.generation = 1
+        completed = client.post(
+            "/v1/model-uploads/complete",
+            json={"upload_id": plan["upload_id"]},
+            headers=headers,
+        )
+
+    assert completed.status_code == 200, completed.json()
+    assert completed.json()["marker_object"] == (
+        "benchmark-model-catalog/experiments/engineering-example/metadata.json"
+    )

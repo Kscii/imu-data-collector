@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import sqlite3
 import time
@@ -11,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.annotation_catalog import AnnotationCatalog
+from imu_data_collector.annotation_service import _training_snapshot_fingerprint
 from imu_data_collector.capture_api import create_capture_app
 from imu_data_collector.config import (
     AnnotationSettings,
@@ -768,12 +771,21 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
         _install_completed_review(app, store, tmp_path, recording_id)
         created = client.post("/api/v1/training-snapshots")
         repeated = client.post("/api/v1/training-snapshots")
+        current_key = "benchmark-datasets/team/cw12eu/current.json"
+        assert store.stat(current_key) is None
+        activated = client.post(
+            f"/api/v1/training-snapshots/{created.json()['snapshot_id']}/activate-benchmark"
+        )
         listed = client.get("/api/v1/training-snapshots")
 
     assert created.status_code == 200
     assert created.json()["created"] is True
     assert repeated.json()["created"] is False
     assert repeated.json()["snapshot_id"] == created.json()["snapshot_id"]
+    assert activated.status_code == 200
+    assert activated.json()["benchmark"]["is_current"] is True
+    current, _generation = store.read_json(current_key)
+    assert current["handoff_contract_version"] == "0.1.0"
     assert [item["snapshot_id"] for item in listed.json()] == [
         created.json()["snapshot_id"]
     ]
@@ -782,6 +794,69 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
     sidecar, _generation = store.read_json(sidecar_key)
     assert sidecar["archive_object_key"] == archive_key
     assert [item["recording_id"] for item in sidecar["recordings"]] == [recording_id]
+
+
+def test_training_snapshot_contract_version_avoids_legacy_id_collision(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
+    app = create_annotation_app(settings, store)
+    service = app.state.annotation_service
+
+    with TestClient(app) as client:
+        client.post("/api/v1/index/refresh")
+        _install_completed_review(app, store, tmp_path, recording_id)
+        manifest = service.required_manifest(recording_id)
+        reference, _info = service.active_export(recording_id)
+        recordings = [
+            {
+                "participant_id": manifest.participant_id,
+                "recording_id": recording_id,
+                "source_review_revision": reference.source_review_revision,
+                "export_schema_version": reference.export_schema_version,
+                "hdf5_schema_version": reference.hdf5_schema_version,
+                "sampling_rate_hz": reference.sampling_rate_hz,
+                "aligned_object_key": reference.object_key,
+                "aligned_sha256": reference.sha256,
+                "logical_content_sha256": reference.logical_content_sha256,
+            }
+        ]
+        legacy_fingerprint = hashlib.sha256(
+            json.dumps(
+                recordings,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        legacy_id = f"snapshot-{legacy_fingerprint[:24]}"
+        store.write_json(
+            f"training-snapshots/{legacy_id}/manifest.json",
+            {"schema_version": "2.0.0", "created_at_utc": "2026-08-28T00:00:00+00:00"},
+            if_generation_match=0,
+        )
+        store.write_json(
+            f"benchmark-datasets/team/cw12eu/{legacy_id}/manifest.json",
+            {
+                "schema_version": "imu_benchmark_dataset_manifest_v1",
+                "created_at_utc": "2026-08-28T00:00:00+00:00",
+            },
+            if_generation_match=0,
+        )
+
+        created = client.post("/api/v1/training-snapshots")
+
+    expected_fingerprint = _training_snapshot_fingerprint(recordings)
+    assert created.status_code == 200
+    assert created.json()["content_fingerprint"] == expected_fingerprint
+    assert created.json()["snapshot_id"] == f"snapshot-{expected_fingerprint[:24]}"
+    assert created.json()["snapshot_id"] != legacy_id
+    legacy, _generation = store.read_json(
+        f"benchmark-datasets/team/cw12eu/{legacy_id}/manifest.json"
+    )
+    assert "handoff_contract_version" not in legacy
 
 
 def test_training_snapshot_range_download_and_admin_cleanup(tmp_path: Path) -> None:
