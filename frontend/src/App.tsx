@@ -371,6 +371,8 @@ type ModelMethod = {
   training_recipe: string;
   fold_count: number;
   input_semantic: "si_window" | "normalized_window" | "engineered_features";
+  metric_split: "test";
+  selection_eligible: false;
   metrics: {
     window: Record<string, MetricSummary>;
     event: Record<string, MetricSummary>;
@@ -381,6 +383,7 @@ type ModelMethod = {
 
 type ModelArtifact = {
   artifact_id: string;
+  method_id?: string;
   model_id: string;
   training_recipe: string;
   fold: number;
@@ -413,7 +416,13 @@ type ModelCatalogSummaryEntry = {
   release_id?: string;
   model_code?: string;
   name?: string;
+  release_stage?: "research_candidate";
   model_sha256?: string;
+  schema_version?: string;
+  contract_version?: string;
+  contract_status?: "v1" | "legacy_pre_v1";
+  metric_split?: "test";
+  selection_eligible?: false;
 };
 
 type ModelCatalogDocument = {
@@ -436,6 +445,11 @@ type ModelCatalogFile = {
 type ModelCatalogDetail = ModelCatalogSummaryEntry & {
   marker: Record<string, any>;
   state: Record<string, any>;
+  interpretation: {
+    metric_split: "test" | null;
+    selection_eligible: false | null;
+    contract_status: "v1" | "legacy_pre_v1";
+  };
   files: ModelCatalogFile[];
 };
 
@@ -2904,12 +2918,12 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
 
 const MODEL_METRICS = [
   { id: "balanced_accuracy", scope: "window", labelZh: "平衡准确率", labelEn: "Balanced accuracy", core: true },
-  { id: "sensitivity", scope: "window", labelZh: "灵敏度", labelEn: "Sensitivity", core: true },
+  { id: "sensitivity", scope: "window", labelZh: "窗口灵敏度", labelEn: "Window sensitivity", core: true },
   { id: "f1", scope: "window", labelZh: "F1", labelEn: "F1", core: true },
   { id: "auprc", scope: "window", labelZh: "AUPRC", labelEn: "AUPRC", core: true },
   { id: "event_sensitivity", scope: "event", labelZh: "事件灵敏度", labelEn: "Event sensitivity", core: true },
-  { id: "adl_alarm_episodes_per_hour", scope: "alarm", labelZh: "误报/小时", labelEn: "False alarms/hour", core: true },
-  { id: "onset_latency_p95_s", scope: "alarm", labelZh: "延迟 P95", labelEn: "Latency P95", core: true },
+  { id: "adl_alarm_episodes_per_hour", scope: "alarm", labelZh: "ADL 报警事件/小时", labelEn: "ADL alarm episodes/hour", core: true },
+  { id: "onset_latency_p95_s", scope: "alarm", labelZh: "Onset 检测延迟 P95（秒）", labelEn: "Onset detection latency P95 (s)", core: true },
   { id: "specificity", scope: "window", labelZh: "特异度", labelEn: "Specificity", core: false },
   { id: "precision", scope: "window", labelZh: "精确率", labelEn: "Precision", core: false },
   { id: "mcc", scope: "window", labelZh: "MCC", labelEn: "MCC", core: false },
@@ -2952,38 +2966,34 @@ function ModelCatalogPage({ session }: { session: Session }) {
 
   const formal = catalog?.experiments.filter((item) => item.evidence_level === "formal_cv" && item.status === "available") ?? [];
   const engineering = catalog?.experiments.filter((item) => item.evidence_level === "engineering" && item.status === "available") ?? [];
-  const deprecatedExperiments = catalog?.experiments.filter((item) => item.status === "deprecated") ?? [];
   const availableModels = catalog?.models.filter((item) => item.status === "available") ?? [];
-  const deprecatedModels = catalog?.models.filter((item) => item.status === "deprecated") ?? [];
 
   return <main className="model-catalog-page">
     {error && <div className="error-banner">{error}</div>}
     <section className="panel model-catalog">
       <div className="model-catalog-heading">
         <div>
-          <div className="panel-title">{tr("模型与 ONNX 制品", "Models and ONNX artifacts")}</div>
+          <div className="panel-title">{tr("研究模型与交叉验证证据", "Research models and cross-validation evidence")}</div>
           <p className="stage-help">{tr(
-            "这里保存可审计的实验 ONNX 与最终模型发布。指标只用于展示已有证据；本页面不执行在线推理，也不指定推荐或最佳模型。",
-            "This catalog stores auditable experimental ONNX artifacts and final model releases. It displays existing evidence only; it does not run inference or designate a recommended or best model.",
+            "这里保存交叉验证实验 ONNX 和研究候选模型包。实验 test-fold 指标仅用于审计与结果说明；本页面不执行在线推理，也不指定最佳或推荐模型。",
+            "This catalog stores cross-validation ONNX evidence and research-candidate model packages. Test-fold metrics are for audit and reporting only; this page does not run online inference or designate a best or recommended model.",
           )}</p>
         </div>
-        <button disabled={busy} onClick={() => void refresh(true)}>{busy ? tr("正在刷新…", "Refreshing…") : tr("刷新 Bucket", "Refresh bucket")}</button>
+        <button disabled={busy} onClick={() => void refresh(true)}>{busy ? tr("正在刷新…", "Refreshing…") : tr("刷新目录", "Refresh catalog")}</button>
       </div>
       <div className="model-section-tabs">
-        <button className={section === "models" ? "active" : ""} onClick={() => setSection("models")}>{tr("模型发布", "Model releases")}</button>
-        <button className={section === "experiments" ? "active" : ""} onClick={() => setSection("experiments")}>{tr("实验 ONNX", "Experimental ONNX")}</button>
+        <button className={section === "models" ? "active" : ""} onClick={() => setSection("models")}>{tr("研究候选模型", "Research candidates")}</button>
+        <button className={section === "experiments" ? "active" : ""} onClick={() => setSection("experiments")}>{tr("交叉验证证据", "Cross-validation evidence")}</button>
       </div>
       {!catalog && !error && <span className="muted">{tr("正在读取模型目录…", "Loading model catalog…")}</span>}
       {catalog?.invalid_publications.map((item) => <div className="warning-banner compact-banner" key={item.object_key}><code>{item.object_key}</code> · {userVisibleMessage(item.detail)}</div>)}
       {catalog && section === "models" && <div className="model-publication-list">
-        {availableModels.length === 0 && <div className="placeholder compact">{tr("尚未发布最终模型", "No final model release has been published")}</div>}
+        {availableModels.length === 0 && <div className="placeholder compact">{tr("尚未发布研究候选模型", "No research-candidate model release has been published")}</div>}
         {availableModels.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}
-        {deprecatedModels.length > 0 && <details className="model-deprecated-group"><summary>{tr("已弃用模型", "Deprecated model releases")} · {deprecatedModels.length}</summary>{deprecatedModels.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>}
       </div>}
       {catalog && section === "experiments" && <div className="model-publication-list">
         <ModelExperimentGroup title={tr("正式交叉验证", "Formal cross-validation")} entries={formal} session={session} onChanged={() => refresh(true)} empty={tr("尚无正式交叉验证发布", "No formal cross-validation publication")} />
         <details className="model-experiment-group" open={formal.length === 0}><summary>{tr("工程验证", "Engineering validation")} · {engineering.length}</summary>{engineering.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>
-        {deprecatedExperiments.length > 0 && <details className="model-deprecated-group"><summary>{tr("已弃用实验", "Deprecated experiments")} · {deprecatedExperiments.length}</summary>{deprecatedExperiments.map((item) => <ModelPublicationCard key={item.publication_id} summary={item} session={session} onChanged={() => refresh(true)} />)}</details>}
       </div>}
     </section>
   </main>;
@@ -2999,13 +3009,17 @@ function ModelPublicationCard({ summary, session, onChanged }: { summary: ModelC
   const [busy, setBusy] = useState(false);
   const base = `/api/v1/model-catalog/${summary.kind}/${encodeURIComponent(summary.publication_id)}`;
 
-  useEffect(() => {
-    const controller = new AbortController();
-    api<ModelCatalogDetail>(base, { signal: controller.signal }).then(setDetail).catch((value) => {
-      if ((value as Error).name !== "AbortError") setError((value as Error).message);
-    });
-    return () => controller.abort();
-  }, [base]);
+  const loadDetail = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setDetail(await api<ModelCatalogDetail>(base));
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const deprecate = async () => {
     if (!window.confirm(tr("确认将此发布标记为已弃用？文件仍会保留。", "Mark this publication as deprecated? Its files will be retained."))) return;
@@ -3027,21 +3041,47 @@ function ModelPublicationCard({ summary, session, onChanged }: { summary: ModelC
   return <article className={`model-publication ${summary.status === "deprecated" ? "deprecated" : ""}`}>
     <div className="model-publication-heading">
       <div><strong>{title}</strong><code>{summary.publication_id}</code><span>{summary.created_at_utc ? new Date(summary.created_at_utc).toLocaleString() : "—"}</span></div>
-      <div className="save-row"><span className={`model-state ${summary.status}`}>{summary.status === "available" ? tr("可用", "Available") : tr("已弃用", "Deprecated")}</span>{session.is_admin && summary.status === "available" && <button className="danger secondary-danger" disabled={busy} onClick={() => void deprecate()}>{tr("标记为已弃用", "Deprecate")}</button>}</div>
+      <div className="save-row">
+        {summary.contract_status === "legacy_pre_v1" && <span className="model-state legacy">Legacy pre-v1</span>}
+        {summary.release_stage === "research_candidate" && <span className="model-state research">research_candidate</span>}
+        <span className={`model-state ${summary.status}`}>{summary.status === "available" ? tr("可用", "Available") : tr("已弃用", "Deprecated")}</span>
+        {!detail && <button disabled={busy} onClick={() => void loadDetail()}>{busy ? tr("正在读取…", "Loading…") : tr("查看详情", "View details")}</button>}
+        {detail && <button onClick={() => setDetail(null)}>{tr("收起详情", "Hide details")}</button>}
+        {session.is_admin && summary.status === "available" && <button className="danger secondary-danger" disabled={busy} onClick={() => void deprecate()}>{tr("标记为已弃用", "Deprecate")}</button>}
+      </div>
     </div>
     {error && <div className="error-banner compact-banner">{error}</div>}
-    {!detail && !error && <span className="muted">{tr("正在读取发布详情…", "Loading publication details…")}</span>}
     {detail && summary.kind === "experiment" && <ExperimentEvidence detail={detail} />}
     {detail && summary.kind === "model" && <ModelReleaseEvidence detail={detail} />}
   </article>;
 }
 
-function ModelDownloads({ detail }: { detail: ModelCatalogDetail }) {
+function ModelDownloads({ detail, fileIds }: { detail: ModelCatalogDetail; fileIds?: string[] }) {
   const base = `/api/v1/model-catalog/${detail.kind}/${encodeURIComponent(detail.publication_id)}`;
+  const files = fileIds ? detail.files.filter((file) => fileIds.includes(file.file_id)) : detail.files;
   return <div className="model-downloads">
-    {detail.files.map((file) => <a className="button-link" key={file.file_id} href={`${base}/files/${encodeURIComponent(file.file_id)}/download`} download title={file.sha256}>{file.file_id === "result-bundle" ? tr("下载完整实验结果", "Download full experiment result") : `${tr("下载", "Download")} ${file.filename}`} · {formatDatasetBytes(file.size_bytes)}</a>)}
+    {files.map((file) => <a className="button-link" key={file.file_id} href={`${base}/files/${encodeURIComponent(file.file_id)}/download`} download title={file.sha256}>{file.file_id === "result-bundle" ? tr("下载完整 result bundle", "Download full result bundle") : `${tr("下载", "Download")} ${file.filename}`} · {formatDatasetBytes(file.size_bytes)}</a>)}
     <a className="button-link" href={`${base}/marker/download`} download>{tr("下载 metadata.json", "Download metadata.json")}</a>
   </div>;
+}
+
+const MODEL_ENUM_LABELS: Record<string, [string, string]> = {
+  normalized_window: ["标准化 50×6 IMU 窗口", "Normalized 50×6 IMU window"],
+  engineered_features: ["158 维工程特征", "158 engineered features"],
+  si_window: ["原始 SI 50×6 IMU 窗口", "Raw SI 50×6 IMU window"],
+  participant_class_balanced: ["参与者与类别平衡", "Participant- and class-balanced"],
+};
+
+function humanModelEnum(value: unknown) {
+  const raw = String(value ?? "—");
+  const label = MODEL_ENUM_LABELS[raw];
+  return <span title={label ? raw : undefined}>{label ? tr(label[0], label[1]) : raw}</span>;
+}
+
+function ValidationStatus({ value }: { value: unknown }) {
+  const status = typeof value === "object" && value ? String((value as Record<string, unknown>).status ?? "—") : String(value ?? "—");
+  const className = status === "PASS" ? "pass" : status === "FAIL" ? "fail" : status === "not_tested" ? "not-tested" : "unknown";
+  return <span className={`validation-status ${className}`}>{status}</span>;
 }
 
 function RawModelJson({ marker }: { marker: Record<string, any> }) {
@@ -3051,8 +3091,9 @@ function RawModelJson({ marker }: { marker: Record<string, any> }) {
 function ModelReleaseEvidence({ detail }: { detail: ModelCatalogDetail }) {
   const metadata = detail.marker;
   return <div className="model-package-detail">
-    <div className="model-facts"><span><strong>{tr("模型", "Model")}</strong>{metadata.model_code ?? "—"}</span><span><strong>{tr("输入语义", "Input semantic")}</strong>{metadata.input?.semantic ?? "—"}</span><span><strong>{tr("输出语义", "Output semantic")}</strong>{metadata.output?.semantic ?? "—"}</span><span><strong>{tr("判定阈值", "Decision threshold")}</strong>{metadata.decision?.score_threshold?.value ?? "—"}</span></div>
-    <ModelDownloads detail={detail} />
+    <div className="warning-banner compact-banner">{tr("这是研究候选模型，不是最佳模型、推荐模型或产品安全认证。阈值与报警策略来自 validation OOF；final-refit 模型没有独立留出准确率。", "This is a research candidate, not a best model, recommendation, or product safety certification. Its threshold and alarm policy come from validation OOF evidence; the final-refit model has no independent held-out accuracy estimate.")}</div>
+    <div className="model-facts"><span><strong>{tr("阶段", "Stage")}</strong><span className="validation-status research">{metadata.release_stage ?? "—"}</span></span><span><strong>{tr("模型", "Model")}</strong>{metadata.model_code ?? "—"}</span><span><strong>{tr("输入语义", "Input semantic")}</strong>{humanModelEnum(metadata.input?.semantic)}</span><span><strong>{tr("输出语义", "Output semantic")}</strong>{metadata.output?.semantic ?? "—"}</span><span><strong>{tr("判定阈值", "Decision threshold")}</strong>{metadata.decision?.score_threshold?.value ?? "—"}</span><span><strong>{tr("指标 split", "Metric split")}</strong>{metadata.metrics?.metric_split ?? "—"}</span><span><strong>{tr("外部 runtime", "External runtime")}</strong><ValidationStatus value={metadata.validation?.external_runtime} /></span><span><strong>{tr("设备回放", "Device replay")}</strong><ValidationStatus value={metadata.validation?.device_replay} /></span></div>
+    <ModelDownloads detail={detail} fileIds={["model"]} />
     <RawModelJson marker={detail.marker} />
   </div>;
 }
@@ -3060,36 +3101,45 @@ function ModelReleaseEvidence({ detail }: { detail: ModelCatalogDetail }) {
 function ExperimentEvidence({ detail }: { detail: ModelCatalogDetail }) {
   const methods = (detail.marker.methods ?? []) as ModelMethod[];
   const artifacts = (detail.marker.artifacts ?? []) as ModelArtifact[];
-  const [sortMetric, setSortMetric] = useState("balanced_accuracy");
+  const [sortMetric, setSortMetric] = useState<string | null>(null);
   const [ascending, setAscending] = useState(false);
   const [extraMetrics, setExtraMetrics] = useState<string[]>([]);
   const [selectedMethod, setSelectedMethod] = useState(methods[0]?.method_id ?? "");
   const columns = MODEL_METRICS.filter((item) => item.core || extraMetrics.includes(item.id));
-  const sortDefinition = MODEL_METRICS.find((item) => item.id === sortMetric) ?? MODEL_METRICS[0];
+  const sortDefinition = MODEL_METRICS.find((item) => item.id === sortMetric);
   const sorted = [...methods].sort((left, right) => {
+    if (!sortDefinition) {
+      return left.model_id.localeCompare(right.model_id) || left.training_recipe.localeCompare(right.training_recipe);
+    }
     const a = modelMetric(left, sortDefinition)?.mean ?? Number.NEGATIVE_INFINITY;
     const b = modelMetric(right, sortDefinition)?.mean ?? Number.NEGATIVE_INFINITY;
     return ascending ? a - b : b - a;
   });
   const selected = methods.find((item) => item.method_id === selectedMethod) ?? methods[0];
-  const methodArtifacts = artifacts.filter((item) => selected?.artifact_ids.includes(item.artifact_id));
+  const methodArtifacts = artifacts
+    .filter((item) => selected?.artifact_ids.includes(item.artifact_id))
+    .sort((left, right) => left.fold - right.fold);
 
   const chooseSort = (metric: string) => {
     if (sortMetric === metric) setAscending((value) => !value);
     else { setSortMetric(metric); setAscending(false); }
   };
   return <div className="experiment-evidence">
+    {detail.contract_status === "legacy_pre_v1" && <div className="warning-banner compact-banner"><strong>Legacy pre-v1 experiment catalog</strong><span>Schema: {detail.schema_version}</span><span>Contract: {detail.contract_version}</span><span>Selection eligible: No</span></div>}
+    <div className="warning-banner compact-banner">{tr("下表是 CV test fold 的评估结果（selection_eligible=false）。可以用于浏览实验证据，但不能据此选择模型、阈值或报警策略。", "The table contains CV test-fold evaluation results (selection_eligible=false). It may be browsed as experiment evidence, but must not be used to select a model, threshold, or alarm policy.")}</div>
     <div className="model-facts"><span><strong>{tr("证据级别", "Evidence level")}</strong>{detail.evidence_level === "formal_cv" ? tr("正式交叉验证", "Formal cross-validation") : tr("工程验证", "Engineering validation")}</span><span><strong>{tr("任务", "Jobs")}</strong>{detail.scheduled_jobs ?? "—"}</span><span><strong>{tr("数据快照", "Data snapshot")}</strong>{detail.base_snapshot_id ?? "—"}</span></div>
+    <p className="stage-help">{tr("表中数值为五个 test folds 的平均值 ± folds 间样本标准差。默认按 model_id → training_recipe 排列；只有主动点击指标列后才按 test 指标排序。", "Values are the mean across five test folds ± the sample standard deviation across folds. The default order is model_id → training_recipe; test-metric sorting occurs only after a metric heading is selected.")}</p>
     <details className="model-column-picker"><summary>{tr("选择附加指标列", "Choose additional metric columns")}</summary>{MODEL_METRICS.filter((item) => !item.core).map((item) => <label key={item.id}><input type="checkbox" checked={extraMetrics.includes(item.id)} onChange={(event) => setExtraMetrics((current) => event.target.checked ? [...current, item.id] : current.filter((value) => value !== item.id))} />{tr(item.labelZh, item.labelEn)}</label>)}</details>
-    <div className="model-table-scroll"><table className="model-metrics-table"><thead><tr><th>{tr("方法", "Method")}</th><th>{tr("训练配方", "Training recipe")}</th><th>{tr("输入", "Input")}</th>{columns.map((item) => <th key={item.id}><button onClick={() => chooseSort(item.id)}>{tr(item.labelZh, item.labelEn)} {sortMetric === item.id ? (ascending ? "↑" : "↓") : ""}</button></th>)}</tr></thead><tbody>{sorted.map((method) => <tr key={method.method_id} className={selected?.method_id === method.method_id ? "selected" : ""} onClick={() => setSelectedMethod(method.method_id)}><td>{method.model_id}</td><td>{method.training_recipe}</td><td>{method.input_semantic}</td>{columns.map((item) => <td key={item.id}>{formatMetric(modelMetric(method, item))}</td>)}</tr>)}</tbody></table></div>
-    {selected && <section className="model-method-detail"><h3>{selected.model_id} · {selected.training_recipe}</h3><p>{selected.fold_count} {tr("个 fold；表格展示均值 ± 样本标准差。每个 ONNX 同时绑定验证集选择的阈值和所有已评估触发策略。", "folds; the table reports mean ± sample standard deviation. Each ONNX is bound to its validation-selected threshold and all evaluated trigger policies.")}</p><div className="model-artifact-grid">{methodArtifacts.map((artifact) => <article key={artifact.artifact_id}><strong>{artifact.artifact_id}</strong><span>fold {artifact.fold} · seed {artifact.seed}</span><span>{String(artifact.input.semantic ?? "—")} → fall_score</span><div className="save-row"><a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(`onnx-${artifact.artifact_id}`)}/download`} download>{tr("下载 ONNX", "Download ONNX")}</a></div><details><summary>{tr("输入、判定规则与校验", "Input, decision rules, and parity")}</summary><pre>{JSON.stringify({ input: artifact.input, output: artifact.output, decision: artifact.decision, parity: artifact.parity }, null, 2)}</pre></details></article>)}</div></section>}
-    <ModelDownloads detail={detail} />
+    <div className="model-table-scroll"><table className="model-metrics-table"><thead><tr><th>{tr("方法", "Method")}</th><th>{tr("训练配方", "Training recipe")}</th><th>{tr("输入", "Input")}</th>{columns.map((item) => <th key={item.id}><button onClick={() => chooseSort(item.id)}>{tr(item.labelZh, item.labelEn)} {sortMetric === item.id ? (ascending ? "↑" : "↓") : ""}</button></th>)}</tr></thead><tbody>{sorted.map((method) => <tr key={method.method_id} className={selected?.method_id === method.method_id ? "selected" : ""}><td><button className="model-detail-button" onClick={() => setSelectedMethod(method.method_id)}>{method.model_id}</button></td><td>{humanModelEnum(method.training_recipe)}</td><td>{humanModelEnum(method.input_semantic)}</td>{columns.map((item) => <td key={item.id}>{formatMetric(modelMetric(method, item))}</td>)}</tr>)}</tbody></table></div>
+    {selected && <section className="model-method-detail"><h3>{selected.model_id} · {humanModelEnum(selected.training_recipe)}</h3><p>{selected.fold_count} {tr("个 fold；每个 ONNX 同时绑定 validation 选择的阈值和所有已评估触发策略。", "folds; each ONNX is bound to its validation-selected threshold and all evaluated trigger policies.")}</p><div className="model-artifact-grid">{methodArtifacts.map((artifact) => <article key={artifact.artifact_id}><strong>{tr("Fold", "Fold")} {artifact.fold}</strong><code title={artifact.onnx.sha256}>{artifact.onnx.sha256}</code><span>seed {artifact.seed}</span><span>{humanModelEnum(artifact.input.semantic)} → fall_score</span><div className="save-row"><a className="button-link" href={`/api/v1/model-catalog/experiment/${encodeURIComponent(detail.publication_id)}/files/${encodeURIComponent(`onnx-${artifact.artifact_id}`)}/download`} download>{tr("下载 ONNX", "Download ONNX")}</a></div><details><summary>{tr("输入、判定规则与校验", "Input, decision rules, and parity")}</summary><pre>{JSON.stringify({ input: artifact.input, output: artifact.output, decision: artifact.decision, parity: artifact.parity }, null, 2)}</pre></details></article>)}</div></section>}
+    <ModelDownloads detail={detail} fileIds={["result-bundle"]} />
     <RawModelJson marker={detail.marker} />
   </div>;
 }
 
 function formatDatasetBytes(sizeBytes: number) {
   if (sizeBytes >= 1024 ** 3) return `${(sizeBytes / 1024 ** 3).toFixed(2)} GiB`;
+  if (sizeBytes < 1024 ** 2) return `${(sizeBytes / 1024).toFixed(1)} KiB`;
   return `${(sizeBytes / 1024 ** 2).toFixed(2)} MiB`;
 }
 

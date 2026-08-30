@@ -565,11 +565,124 @@ def _model_release_request() -> tuple[dict, dict[str, bytes]]:
         },
     ]
     marker = {
-        "schema_version": "imu_model_release_v0",
-        "contract_version": "0.1.0",
+        "schema_version": "imu_model_release_v1",
+        "contract_version": "1.0.0",
         "release_id": "threshold-impact-v1",
         "created_at_utc": "2026-08-29T00:00:00+00:00",
         "model_code": "threshold-impact",
+        "name": "Threshold impact fixture",
+        "release_stage": "research_candidate",
+        "source": {
+            "selection_evidence": {
+                "source_run_id": "selection-run",
+                "source_commit": "a" * 40,
+                "model_id": "threshold-impact",
+                "training_recipe": "natural",
+                "data_snapshot_fingerprint": "1" * 64,
+                "split_fingerprint": "2" * 64,
+                "selection_scope": "validation_only_oof",
+                "metric_split": "validation_oof",
+                "selection_eligible": True,
+                "source_stride_seconds": 1.0,
+                "participant_once": {
+                    "status": "PASS",
+                    "participant_count": 5,
+                    "appearances_per_participant": 1,
+                    "validation_fold_participant_counts": [1, 1, 1, 1, 1],
+                    "assignment_sha256": "3" * 64,
+                },
+                "threshold_selection": {
+                    "method": "validation_balanced_accuracy",
+                    "tie_break": "lower_threshold",
+                },
+                "trigger_policy_selection": {
+                    "method": "validation_pareto",
+                    "tie_break": "policy_id",
+                },
+            },
+            "final_training": {
+                "commit": "a" * 40,
+                "dirty": False,
+                "seed": 3888,
+                "fixed_epoch_source": "validation_oof",
+                "training_scope": "development_participants",
+                "actual_epochs": 4,
+            },
+        },
+        "data": {
+            "snapshot_fingerprint": "1" * 64,
+            "split_fingerprint": "2" * 64,
+        },
+        "input": {
+            "semantic": "si_window",
+            "dtype": "float32",
+            "shape": [None, 50, 6],
+            "sampling_rate_hz": 25,
+            "channels": ["ax", "ay", "az", "gx", "gy", "gz"],
+            "axis_frame": "sensor_local",
+            "gravity": "retained",
+        },
+        "output": {
+            "semantic": "fall_score",
+            "dtype": "float32",
+            "shape": [None],
+            "probability_calibrated": False,
+        },
+        "preprocessing": {
+            "location": "onnx_graph",
+            "normalization": {
+                "embedded": True,
+                "mean": [0.0] * 6,
+                "scale": [1.0] * 6,
+            },
+        },
+        "windowing": {
+            "window_seconds": 2.0,
+            "training_stride_seconds": 0.5,
+            "inference_interval_seconds": 1.0,
+            "anchor": "window_end",
+            "reset_on": ["new_sequence", "stream_gap"],
+            "refill_frames_after_reset": 50,
+        },
+        "decision": {
+            "status": "provisional_validation_derived",
+            "score_threshold": {"value": 0.5, "comparison": ">="},
+            "trigger_policy": {
+                "policy_id": "one_of_one",
+                "required_positive_windows": 1,
+                "lookback_windows": 1,
+                "consecutive": True,
+                "cooldown_seconds": 10.0,
+            },
+        },
+        "metrics": {
+            "metric_split": "validation_oof",
+            "selection_eligible": True,
+            "final_model_independently_evaluated": False,
+        },
+        "verification": {
+            "golden_fixtures": [
+                {
+                    "fixture_id": name,
+                    "input_values": [[0.0] * 6 for _ in range(50)],
+                    "expected_fall_score": 0.0,
+                    "atol": 1e-6,
+                    "rtol": 1e-6,
+                }
+                for name in ("stationary", "adl-like", "impact-like")
+            ]
+        },
+        "validation": {
+            "onnx_checker": {"status": "PASS"},
+            "python_onnxruntime_parity": {
+                "status": "PASS",
+                "scope": "all_final_training_windows",
+                "windows": 10,
+            },
+            "external_runtime": {"status": "not_tested"},
+            "device_replay": {"status": "not_tested"},
+        },
+        "known_limitations": ["fixture"],
         "model": {
             "filename": "model.onnx",
             "object_key": descriptors[0]["object_key"],
@@ -598,10 +711,48 @@ def _experiment_catalog_request() -> tuple[dict, dict[str, bytes]]:
         "content_type": "application/octet-stream",
     }
     marker = {
-        "schema_version": "imu_experiment_catalog_v0",
-        "contract_version": "0.1.0",
+        "schema_version": "imu_experiment_catalog_v1",
+        "contract_version": "1.0.0",
         "publication_id": publication_id,
-        "artifacts": [{"artifact_id": "model-fold0", "onnx": descriptor}],
+        "run_id": publication_id,
+        "experiment_id": "engineering",
+        "evidence_level": "engineering",
+        "created_at_utc": "2026-08-29T00:00:00+00:00",
+        "source": {"commit": "abc", "dirty": False},
+        "data": {"snapshot_sha256": "1" * 64},
+        "evaluation_fingerprint": "2" * 64,
+        "scheduled_jobs": 1,
+        "methods": [
+            {
+                "method_id": "model-natural",
+                "fold_count": 1,
+                "artifact_ids": ["model-fold0"],
+                "metric_split": "test",
+                "selection_eligible": False,
+            }
+        ],
+        "artifacts": [
+            {
+                "artifact_id": "model-fold0",
+                "method_id": "model-natural",
+                "fold": 0,
+                "metrics": {"metric_split": "test", "selection_eligible": False},
+                "onnx": descriptor,
+            }
+        ],
+        "result_evidence": {
+            "manifest": {
+                "object_key": f"benchmark-results/engineering/{publication_id}/manifest.json",
+                "size_bytes": 2,
+                "sha256": "3" * 64,
+            },
+            "bundle": {
+                "object_key": f"benchmark-results/engineering/{publication_id}/run.tar.gz",
+                "size_bytes": 4,
+                "sha256": "4" * 64,
+            },
+        },
+        "known_limitations": ["fixture"],
     }
     return {
         "publication_kind": "experiment",

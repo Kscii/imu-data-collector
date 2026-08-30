@@ -2,10 +2,10 @@
   "canonical_path": "docs/contracts/annotation-benchmark-contract.zh-CN.md",
   "module_versions": {
     "dataset_handoff": "0.1.0",
-    "experiment_catalog": "0.1.0",
-    "model_release": "0.1.0"
+    "experiment_catalog": "1.0.0",
+    "model_release": "1.0.0"
   },
-  "sha256": "693f2171580b9218aa3fefd06a2d5a3874d63781a2677963c54b4fb1c07164a4",
-  "upstream_commit": "9b0e24211d185921ef68365f4d9d90bf8280b919",
+  "sha256": "d278091dddba6c6fc54ff3811994002baa03453a718977ab1b59344416530bed",
+  "upstream_commit": "9d8e7bb09e5aa84dbbecf907c97a270566dd21e6",
   "upstream_repository": "Kscii/imu-fall-benchmark"
 }

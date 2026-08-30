@@ -286,6 +286,12 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .model-publication-heading .save-row { margin-top: 0; justify-content: flex-end; }
 .model-state { padding: 5px 9px; border: 1px solid #166534; border-radius: 999px; color: #86efac !important; }
 .model-state.deprecated { border-color: #854d0e; color: #fde68a !important; }
+.model-state.legacy { border-color: #92400e; color: #fcd34d !important; }
+.model-state.research, .validation-status.research { border-color: #1d4ed8; color: #93c5fd !important; }
+.validation-status { display: inline-flex; width: fit-content; padding: 3px 7px; border: 1px solid #475569; border-radius: 999px; font: 10px ui-monospace, monospace; }
+.validation-status.pass { border-color: #166534; color: #86efac; }
+.validation-status.fail { border-color: #991b1b; color: #fca5a5; }
+.validation-status.not-tested { border-color: #475569; color: #94a3b8; }
 .secondary-danger { padding: 7px 10px; font-size: 11px; }
 .model-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
 .model-facts > span { min-width: 0; display: grid; gap: 4px; padding: 9px; border: 1px solid #293b58; border-radius: 8px; background: #0a1526; color: #cbd5e1; font-size: 12px; }
@@ -302,14 +308,15 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .model-metrics-table th:first-child, .model-metrics-table th:nth-child(2), .model-metrics-table th:nth-child(3), .model-metrics-table td:first-child, .model-metrics-table td:nth-child(2), .model-metrics-table td:nth-child(3) { text-align: left; }
 .model-metrics-table th { color: #91a4bd; background: #0a1526; }
 .model-metrics-table th button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
-.model-metrics-table tbody tr { cursor: pointer; }
 .model-metrics-table tbody tr:hover, .model-metrics-table tbody tr.selected { background: #142746; }
+.model-detail-button { padding: 3px 7px; color: #bfdbfe; background: transparent; border-color: #35527b; }
 .model-method-detail { display: grid; gap: 8px; padding: 12px; border: 1px solid #31517c; border-radius: 9px; background: #10213a; }
 .model-method-detail h3, .model-method-detail p { margin: 0; }
 .model-method-detail p { color: #91a4bd; font-size: 11px; }
 .model-artifact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 8px; }
 .model-artifact-grid > article { min-width: 0; display: grid; gap: 6px; padding: 10px; border: 1px solid #2b3e5d; border-radius: 8px; background: #0b1525; }
 .model-artifact-grid span { color: #91a4bd; font: 10px ui-monospace, monospace; }
+.model-artifact-grid code { overflow: hidden; color: #71849f; font: 9px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .model-artifact-grid .save-row { margin-top: 2px; }
 .model-artifact-grid pre, .model-raw-json pre { max-height: 360px; overflow: auto; padding: 10px; border-radius: 7px; background: #060d18; color: #b8c7dc; font: 10px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .model-downloads { display: flex; flex-wrap: wrap; gap: 7px; }
