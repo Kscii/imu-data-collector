@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import h5py
+import numpy as np
 
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
@@ -77,6 +78,35 @@ def _collection_mapping(
     return output
 
 
+def _update_logical_digest(
+    digest: Any,
+    values: Any,
+    dtype: np.dtype[Any],
+) -> None:
+    """Hash logical values, never NumPy object-pointer representations."""
+
+    if dtype.kind != "O":
+        digest.update(np.asarray(values).tobytes(order="C"))
+        return
+    flattened = np.asarray(values, dtype=object).reshape(-1)
+    for value in flattened:
+        if isinstance(value, str):
+            tag = b"s"
+            payload = value.encode("utf-8")
+        elif isinstance(value, (bytes, bytearray, memoryview, np.bytes_)):
+            tag = b"b"
+            payload = bytes(value)
+        else:
+            array = np.asarray(value)
+            if array.dtype.kind == "O":
+                raise ValueError("不支持嵌套对象型 H5 数据集")
+            tag = b"a"
+            payload = array.tobytes(order="C")
+        digest.update(tag)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+
+
 def _dataset_contract(path: Path) -> dict[str, tuple[str, tuple[int, ...], str]]:
     output: dict[str, tuple[str, tuple[int, ...], str]] = {}
     with h5py.File(path, "r") as handle:
@@ -97,10 +127,17 @@ def _dataset_contract(path: Path) -> dict[str, tuple[str, tuple[int, ...], str]]
                     else (tuple(slice(None) for _ in item.shape),)
                 )
                 for block in blocks:
-                    digest.update(item[block].tobytes())
+                    _update_logical_digest(digest, item[block], item.dtype)
             else:
-                digest.update(item[()].tobytes())
-            output[name] = (item.dtype.str, tuple(item.shape), digest.hexdigest())
+                _update_logical_digest(digest, item[()], item.dtype)
+            dtype_contract = item.dtype.str
+            if item.dtype.metadata:
+                dtype_contract += f";metadata={item.dtype.metadata!r}"
+            output[name] = (
+                dtype_contract,
+                tuple(item.shape),
+                digest.hexdigest(),
+            )
 
         handle.visititems(visit)
     return output

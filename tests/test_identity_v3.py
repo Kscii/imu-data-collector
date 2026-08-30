@@ -77,6 +77,13 @@ def _publish_legacy_fixture(
             chunks=(16,),
             dtype=np.int64,
         )
+        handle.create_dataset(
+            "imu/connection_events/event",
+            data=np.asarray(["connected", "disconnected"], dtype=object),
+            dtype=h5py.string_dtype(encoding="utf-8"),
+            chunks=(16,),
+            maxshape=(None,),
+        )
         video = handle.create_group("video")
         video.attrs["path"] = mkv_path.name
     mkv_path.write_bytes(b"mkv")
@@ -260,6 +267,10 @@ def test_cloud_migration_archives_neutralizes_reopens_and_guards_rollback(
             handle["imu/samples/raw_counts"], np.arange(24).reshape(4, 6)
         )
         assert handle["imu/samples/empty_optional"].shape == (0,)
+        assert handle["imu/connection_events/event"].asstr()[:].tolist() == [
+            "connected",
+            "disconnected",
+        ]
     migrated_review, generation = store.read_json(f"reviews/{new_id}/review.json")
     assert migrated_review["workflow"]["state"] == "in_progress"
     assert migrated_review["participant_assignment"]["status"] == "unassigned"
