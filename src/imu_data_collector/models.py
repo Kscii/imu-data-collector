@@ -414,7 +414,7 @@ class ReviewWorkflow(BaseModel):
 
 
 class ParticipantAssignmentStatus(StrEnum):
-    """参与者身份必须先选择，再由任务负责人显式确认。"""
+    """参与者身份状态；SELECTED 仅用于兼容旧 review。"""
 
     UNASSIGNED = "unassigned"
     SELECTED = "selected"
@@ -460,12 +460,11 @@ class ParticipantAssignment(BaseModel):
             value is not None
             for value in (
                 self.participant_id,
-                self.evidence,
                 self.selected_by,
                 self.selected_at_utc,
             )
         ):
-            raise ValueError("selected participant requires identity, evidence and selector")
+            raise ValueError("selected participant requires identity and selector")
         if self.status == ParticipantAssignmentStatus.CONFIRMED and not all(
             value is not None
             for value in (self.confirmed_by, self.confirmed_at_utc)
@@ -512,7 +511,6 @@ class AnnotationReviewWorkflowRequest(BaseModel):
 class ParticipantSelectRequest(BaseModel):
     participant_id: str = Field(pattern=r"^[a-z][a-z0-9]{2,31}$")
     expected_revision: int = Field(ge=0)
-    evidence: ParticipantEvidence
 
 
 class ParticipantConfirmRequest(BaseModel):

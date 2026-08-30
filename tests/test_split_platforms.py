@@ -331,6 +331,8 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
         assert recordings[0]["recording_id"] == recording_id
         assert recordings[0]["state"] == "published"
         assert recordings[0]["upload_state"] == "published"
+        assert recordings[0]["workflow_state"] == "unassigned"
+        assert recordings[0]["annotator_id"] is None
 
         partial = client.get(
             f"/api/v1/recordings/{recording_id}/video",
@@ -347,6 +349,17 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
             "last_editor_id": None,
             "updated_at_utc": None,
         }
+
+        assigned = client.post(
+            f"/api/v1/recordings/{recording_id}/workflow",
+            json={"action": "assign", "expected_revision": 0, "comment": ""},
+        )
+        assert assigned.status_code == 200
+        refreshed_recording = client.get(
+            f"/api/v1/recordings/{recording_id}"
+        ).json()
+        assert refreshed_recording["workflow_state"] == "in_progress"
+        assert refreshed_recording["annotator_id"] == "xfan0282"
 
         review_download = client.get(
             f"/api/v1/recordings/{recording_id}/review/download"

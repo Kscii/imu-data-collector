@@ -5,7 +5,13 @@ from fastapi.testclient import TestClient
 
 from imu_data_collector import model_catalog as model_catalog_module
 from imu_data_collector.annotation_api import create_annotation_app
-from imu_data_collector.config import AnnotationSettings, Settings, StorageSettings
+from imu_data_collector.config import (
+    AnnotationSettings,
+    AuthSettings,
+    IdentitySettings,
+    Settings,
+    StorageSettings,
+)
 from imu_data_collector.model_catalog import ModelCatalog
 from imu_data_collector.storage import LocalFilesystemStore
 
@@ -325,6 +331,7 @@ def test_model_catalog_lists_downloads_and_admin_deprecates(
     app = create_annotation_app(settings, store=store)
 
     with TestClient(app) as client:
+        assert client.get("/api/v1/config").json()["can_view_models"] is True
         catalog = client.get("/api/v1/model-catalog")
         detail = client.get(f"/api/v1/model-catalog/experiment/{run_id}")
         assert detail.status_code == 200, detail.json()
@@ -357,6 +364,33 @@ def test_model_catalog_lists_downloads_and_admin_deprecates(
     assert deprecated.status_code == 200
     assert deprecated.json()["status"] == "deprecated"
     assert deprecated.json()["history"][-1]["actor"] == "xfan0282"
+
+
+def test_model_catalog_is_forbidden_for_nonviewer(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.auth = AuthSettings(mode="local", local_actor_id="jzho8728")
+    settings.identity = IdentitySettings(
+        allowed_unikeys=("xfan0282", "jzho8728"),
+        admins=("xfan0282",),
+    )
+    store = LocalFilesystemStore(settings.storage.root)
+    run_id = _install_experiment(store, tmp_path)
+    app = create_annotation_app(settings, store=store)
+
+    paths = (
+        "/api/v1/model-catalog",
+        f"/api/v1/model-catalog/experiment/{run_id}",
+        f"/api/v1/model-catalog/experiment/{run_id}/marker/download",
+        f"/api/v1/model-catalog/experiment/{run_id}/files/onnx-model-fold0/download",
+    )
+    with TestClient(app) as client:
+        assert client.get("/api/v1/config").json()["can_view_models"] is False
+        for path in paths:
+            assert client.get(path).status_code == 403
+        assert client.post(
+            f"/api/v1/model-catalog/experiment/{run_id}/deprecate",
+            json={"expected_generation": 1},
+        ).status_code == 403
 
 
 def test_model_catalog_quarantines_artifact_without_sha_metadata(tmp_path: Path) -> None:

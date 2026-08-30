@@ -90,7 +90,7 @@ def _install_snapshot(
         ],
     }
     if kind == "team":
-        manifest["handoff_contract_version"] = "0.1.0"
+        manifest["handoff_contract_version"] = "0.3.0"
     manifest_key = f"{prefix}/{snapshot_id}/manifest.json"
     store.write_json(manifest_key, manifest, if_generation_match=0)
     manifest_sha = hashlib.sha256(store.read_bytes(manifest_key)).hexdigest()
@@ -104,7 +104,7 @@ def _install_snapshot(
             "updated_at_utc": created_at_utc,
         }
         if kind == "team":
-            current_payload["handoff_contract_version"] = "0.1.0"
+            current_payload["handoff_contract_version"] = "0.3.0"
         store.write_json(
             f"{prefix}/current.json",
             current_payload,
@@ -147,12 +147,32 @@ def test_catalog_lists_current_then_newest_history_and_optional_team(
 
     base, team = summary["collections"]
     assert base["current"]["snapshot_id"] == "base-current"
+    assert base["current"]["total_duration_seconds"] == 2.0
+    assert base["current"]["files"][0]["duration_seconds"] == 2.0
     assert [item["snapshot_id"] for item in base["history"]] == [
         "base-newer-history",
         "base-old",
     ]
     assert team["available"] is False
     assert team["current"] is None
+
+
+def test_team_snapshot_reports_total_duration(tmp_path: Path) -> None:
+    store = LocalFilesystemStore(tmp_path / "objects")
+    _install_snapshot(
+        store,
+        tmp_path,
+        kind="team",
+        snapshot_id="team-current",
+        created_at_utc="2026-08-30T03:00:00Z",
+        dataset_id="cw12eu",
+        current=True,
+    )
+
+    team = DatasetCatalog(store).collection("team")
+
+    assert team["current"]["total_duration_seconds"] == 2.0
+    assert team["current"]["files"][0]["duration_seconds"] == 2.0
 
 
 def test_invalid_current_and_history_are_reported_but_not_downloadable(

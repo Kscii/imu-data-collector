@@ -16,7 +16,7 @@ document.title = __APP_KIND__ === "annotation"
   : tr("IMU 数采平台", "IMU Data Collector");
 
 type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models";
-type AnnotationTaskTab = "identity" | "sync" | "annotate" | "review" | "data";
+type AnnotationTaskTab = "sync" | "annotate" | "data";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
 const CAPTURE_FORM_KEY = "imu-capture-form-v1";
@@ -84,6 +84,8 @@ type Recording = {
   collection_id: string;
   participant_id: string | null;
   participant_status?: "unassigned" | "selected" | "confirmed";
+  workflow_state?: "unassigned" | "in_progress" | "completed";
+  annotator_id?: string | null;
   data_tier: "test" | "prod";
   state: string;
   started_at_utc: string;
@@ -270,6 +272,7 @@ type AppConfig = {
   allowed_unikeys?: string[];
   operator_unikeys?: string[];
   admin_unikeys?: string[];
+  can_view_models?: boolean;
   data_tiers?: ("test" | "prod")[];
   default_data_tier?: "test" | "prod";
   data_root?: string;
@@ -331,6 +334,7 @@ type DatasetCatalogFile = {
   evaluation_role: "cross_validation" | "training_only";
   sequences: number;
   rows: number;
+  duration_seconds: number;
   annotations: number;
   events?: number;
   segments?: number;
@@ -348,6 +352,7 @@ type DatasetCatalogSnapshot = {
   contract_version: string;
   manifest_sha256: string;
   source?: Record<string, unknown> | null;
+  total_duration_seconds: number;
   files: DatasetCatalogFile[];
 };
 
@@ -899,6 +904,14 @@ export default function App() {
   }, [annotationApplication]);
 
   useEffect(() => {
+    if (!annotationApplication || !config || config.can_view_models || tab !== "models") return;
+    setTab("annotate");
+    const url = new URL(location.href);
+    url.searchParams.set("view", "annotate");
+    history.replaceState({}, "", url);
+  }, [annotationApplication, config, tab]);
+
+  useEffect(() => {
     if (annotationApplication) return;
     sessionStorage.setItem(
       CAPTURE_FORM_KEY,
@@ -1130,7 +1143,7 @@ export default function App() {
         <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button><button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>模型</button></> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>模型</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
           {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
@@ -1181,7 +1194,7 @@ export default function App() {
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
-      {annotationApplication && tab === "models" && session && <ModelCatalogPage session={session} />}
+      {annotationApplication && tab === "models" && config?.can_view_models && session && <ModelCatalogPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary
         recordings={recordings}
         onChanged={refreshRecordings}
@@ -1807,7 +1820,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   const [selected, setSelected] = useState("");
   const [recordingDrawerOpen, setRecordingDrawerOpen] = useState(false);
   const [recordingQuery, setRecordingQuery] = useState("");
-  const [taskTab, setTaskTab] = useState<AnnotationTaskTab>("identity");
+  const [taskTab, setTaskTab] = useState<AnnotationTaskTab>("sync");
   const [participantChoice, setParticipantChoice] = useState("");
   const [locatedIntervalKey, setLocatedIntervalKey] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -1885,13 +1898,10 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       setDeleteArmed(false);
       setDeleteConfirmation("");
       setTaskTab(
-        reviewDocument.participant_assignment.status !== "confirmed"
-          ? "identity"
-          : reviewDocument.workflow.state === "completed"
+        reviewDocument.participant_assignment.status === "confirmed"
+          && syncState.quality === "verified"
           ? "annotate"
-          : syncState.quality === "verified"
-            ? "annotate"
-            : "sync"
+          : "sync"
       );
     }).catch((e) => {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
@@ -2196,6 +2206,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       });
       setReview(saved);
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
+      await onChanged();
       setSaveState("idle");
       setSaveMessage("");
       if (action === "reopen") setTaskTab(sync?.quality === "verified" ? "annotate" : "sync");
@@ -2205,7 +2216,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   };
 
   const selectParticipant = async () => {
-    if (!selected || !review || !canMutate || !participantChoice || !frameTimes) return;
+    if (!selected || !review || !canMutate || !participantChoice) return;
     setError("");
     try {
       const saved = await api<ReviewDocument>(`/api/v1/recordings/${selected}/participant`, {
@@ -2213,37 +2224,11 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         body: JSON.stringify({
           participant_id: participantChoice,
           expected_revision: review.revision,
-          evidence: {
-            video_frame_index: currentFrame,
-            video_time_ns: Math.round(currentTime * 1e9),
-          },
         }),
       });
       setReview(saved);
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
       await onChanged();
-    } catch (value) {
-      registerSaveFailure(value);
-    }
-  };
-
-  const confirmParticipant = async () => {
-    const assignment = review?.participant_assignment;
-    if (!selected || !review || !canMutate || assignment?.status !== "selected" || !assignment.participant_id) return;
-    if (!window.confirm(`请再次核对证据画面。确认参与者是 ${assignment.participant_id}？`)) return;
-    setError("");
-    try {
-      const saved = await api<ReviewDocument>(`/api/v1/recordings/${selected}/participant/confirm`, {
-        method: "POST",
-        body: JSON.stringify({
-          participant_id: assignment.participant_id,
-          expected_revision: review.revision,
-        }),
-      });
-      setReview(saved);
-      setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
-      await onChanged();
-      setTaskTab(sync?.quality === "verified" ? "annotate" : "sync");
     } catch (value) {
       registerSaveFailure(value);
     }
@@ -2275,6 +2260,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       });
       setReview(completed);
       setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
+      await onChanged();
       setSaveState("saved");
       retrySaveRef.current = null;
       setTaskTab("annotate");
@@ -2489,7 +2475,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   const filteredRecordings = recordings.filter((recording) => {
     const needle = recordingQuery.trim().toLowerCase();
     if (!needle) return true;
-    return `${recording.recording_id} ${recording.participant_id ?? ""}`.toLowerCase().includes(needle);
+    return `${recording.recording_id} ${recording.participant_id ?? ""} ${recording.annotator_id ?? ""}`.toLowerCase().includes(needle);
   });
   const orderedAnnotationIntervals: OrderedAnnotationInterval[] = doc ? [
     ...doc.segments.map((segment) => ({
@@ -2585,7 +2571,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
 
   const locateAnnotationInterval = (key: string) => {
     if (key === "annotation-conflict") {
-      setTaskTab("review");
+      setTaskTab("annotate");
       return;
     }
     setTaskTab("annotate");
@@ -2693,14 +2679,24 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         <button className="recording-drawer-backdrop" aria-label="关闭录制列表" onClick={() => setRecordingDrawerOpen(false)} />
         <aside className="recording-drawer">
           <div className="recording-drawer-header"><strong>选择录制</strong><button onClick={() => setRecordingDrawerOpen(false)}>关闭</button></div>
-          <input autoFocus placeholder="搜索录制 ID 或参与者" value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
+          <input autoFocus placeholder="搜索录制 ID、参与者或负责人" value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
           <div className="recording-list-actions">
             {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在刷新…" : "刷新 Bucket"}</button>}
             <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? "已复制" : "复制当前 ID"}</button>
           </div>
           {indexMessage && <span className="index-message">{indexMessage}</span>}
           <div className="recording-drawer-list">
-            {filteredRecordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}><strong>{recording.participant_id ?? "待确认身份"} · {tierLabel(recording.data_tier)}</strong><span>{recording.recording_id}</span></button>)}
+            {filteredRecordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}>
+              <strong>{recording.participant_id ?? "待选择参与者"} · {tierLabel(recording.data_tier)}</strong>
+              <span>{recording.recording_id}</span>
+              <span className={`recording-workflow-status workflow-${recording.workflow_state ?? "unassigned"}`}>
+                {recording.workflow_state === "completed"
+                  ? `标注已完成 · ${recording.annotator_id ?? "负责人未知"}`
+                  : recording.workflow_state === "in_progress"
+                    ? `已分配给 ${recording.annotator_id ?? "未知"} · 标注中`
+                    : "未分配 · 标注未完成"}
+              </span>
+            </button>)}
           </div>
         </aside>
       </>}
@@ -2737,7 +2733,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
 
         <section className="annotation-tools-pane">
           <nav className="annotation-task-tabs" aria-label="标注任务">
-            {(["identity", "sync", "annotate", "review", "data"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "identity" ? "1 身份" : item === "sync" ? "2 同步" : item === "annotate" ? "3 标注" : item === "review" ? "4 检查" : "5 数据"}</button>)}
+            {(["sync", "annotate", "data"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : "3 数据"}</button>)}
           </nav>
 
           <div className={`annotation-task-scroll ${taskTab === "annotate" ? "annotation-task-scroll-annotate" : ""}`}>
@@ -2745,24 +2741,15 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
             {saveMessage && saveState !== "saved" && <p className="stage-help warning-text">{saveMessage}</p>}
             {review && !canEdit && <div className="task-notice"><strong>{editDisabledReason}</strong></div>}
 
-            {taskTab === "identity" && review && <div className="panel compact-panel">
-              <div className="panel-title">参与者身份复核</div>
-              <div className="warning-banner"><strong>只依据当前视频画面判断，不要根据文件名、旧记录或猜测选择。</strong>如果画面不足以确认，请保持未完成并交由能确认的人处理。</div>
-              <p className="stage-help">先逐帧定位到能清楚辨认参与者的画面，再选择 UniKey。保存证据帧后必须再次确认，正式数据才允许完成和导出。</p>
-              <div className="time-readout">当前证据：{tr("帧", "frame")} {currentFrame} · {currentTime.toFixed(3)} s</div>
-              {review.participant_assignment.status === "confirmed"
-                ? <div className="success-banner">已确认参与者：<strong>{review.participant_assignment.participant_id}</strong> · 证据帧 {review.participant_assignment.evidence?.video_frame_index ?? "—"}</div>
-                : <>
-                  <label>参与者 UniKey<select value={participantChoice} disabled={!canMutate} onChange={(event) => setParticipantChoice(event.target.value)}><option value="" disabled>请选择</option>{participants.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
-                  {review.participant_assignment.status === "selected" && <div className="warning-banner">待再次确认：{review.participant_assignment.participant_id} · 证据帧 {review.participant_assignment.evidence?.video_frame_index ?? "—"}</div>}
-                  <div className="save-row">
-                    <button className="primary" disabled={!canMutate || !participantChoice || !frameTimes} onClick={selectParticipant}>{review.participant_assignment.status === "selected" ? "重选并更新证据帧" : "保存选择和证据帧"}</button>
-                    <button className="primary" disabled={!canMutate || review.participant_assignment.status !== "selected"} onClick={confirmParticipant}>再次核对并确认</button>
-                  </div>
-                </>}
-            </div>}
-
             {taskTab === "sync" && <>
+              {review && <div className="panel compact-panel participant-selection-panel">
+                <div className="panel-title">参与者</div>
+                <div className="save-row">
+                  <label>参与者 UniKey<select value={participantChoice} disabled={!canMutate} onChange={(event) => setParticipantChoice(event.target.value)}><option value="" disabled>请选择</option>{participants.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
+                  <button className="primary" disabled={!canMutate || !participantChoice || (review.participant_assignment.status === "confirmed" && review.participant_assignment.participant_id === participantChoice)} onClick={selectParticipant}>{review.participant_assignment.status === "confirmed" ? "更改参与者" : "保存参与者"}</button>
+                </div>
+                {review.participant_assignment.status === "confirmed" && <div className="success-banner compact-banner">当前参与者：<strong>{review.participant_assignment.participant_id}</strong></div>}
+              </div>}
               <div className="panel compact-panel">
                 <div className="panel-title">轻拍同步复核</div>
                 <div className="sync-inputs">
@@ -2801,7 +2788,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
               </div>
             </>}
 
-            {taskTab === "annotate" && <div className="annotation-tab-layout">
+            {taskTab === "annotate" && <><div className="annotation-tab-layout">
               <div className="panel compact-panel annotation-controls">
                 <div className="panel-title">创建区间</div>
                 <div className="time-readout">{currentTime.toFixed(3)} s · {tr("帧", "frame")} {currentFrame}</div>
@@ -2833,10 +2820,10 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                   <div className="interval-list-tail" aria-hidden="true" />
                 </div>
               </section>}
-            </div>}
+            </div>
 
-            {taskTab === "review" && doc && <div className="panel compact-panel review-panel">
-              <div className="panel-title">完整性检查</div>
+            {doc && <div className="panel compact-panel review-panel">
+              <div className="panel-title">标注完成情况</div>
               <div className="coverage-track" aria-label="标注覆盖时间轴">{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}</div>
               <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? `未覆盖 ${(uncoveredNs / 1e9).toFixed(3)} s` : "全时间轴已覆盖"} · {fallWithoutImpactCount > 0 ? `${fallWithoutImpactCount} 个跌倒缺少撞击` : "所有跌倒均有撞击"} · {sync?.quality === "verified" ? "同步已验证" : "同步未验证"}</div>
               {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); jumpToRecordingTime(gap.start); setTaskTab("annotate"); }}>空白 {index + 1} · {seconds(gap.start)}–{seconds(gap.end)}</button>)}</div>}
@@ -2846,6 +2833,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
               {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据允许保存和下载，但不会完成为训练数据。</p>}
               <details><summary>任务技术详情</summary><p className="stage-help">review revision {review?.revision ?? "—"} · 负责人 {review?.workflow.annotator_id ?? "无"} · 最后编辑者 {review?.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>
             </div>}
+            </>}
 
             {taskTab === "data" && review && <div className="panel compact-panel workflow-panel">
               <div className="panel-title">下载与录制管理</div>
@@ -3213,6 +3201,16 @@ function formatDatasetBytes(sizeBytes: number) {
   return `${(sizeBytes / 1024 ** 2).toFixed(2)} MiB`;
 }
 
+function formatDatasetDuration(durationSeconds: number) {
+  const totalSeconds = Math.max(0, Math.round(durationSeconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours} h ${String(minutes).padStart(2, "0")} min ${String(seconds).padStart(2, "0")} s`;
+  if (minutes > 0) return `${minutes} min ${String(seconds).padStart(2, "0")} s`;
+  return `${seconds} s`;
+}
+
 function DatasetCatalogPage() {
   const [catalog, setCatalog] = useState<DatasetCatalogDocument | null>(null);
   const [error, setError] = useState("");
@@ -3273,7 +3271,7 @@ function DatasetSnapshot({ snapshot }: { snapshot: DatasetCatalogSnapshot }) {
     <div className="dataset-snapshot-heading">
       <div>
         <strong>{snapshot.current ? tr("当前版本", "Current version") : tr("历史版本", "Historical version")} · {snapshot.snapshot_id}</strong>
-        <span>{snapshot.files.length} {tr("个 H5", "H5 files")} · schema 3.1.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
+        <span>{snapshot.files.length} {tr("个 H5", "H5 files")} · {tr("总时长", "total duration")} {formatDatasetDuration(snapshot.total_duration_seconds)} · schema 3.1.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
       </div>
       <a className="button-link" href={`${base}/manifest/download`} download>{tr("下载 manifest", "Download manifest")}</a>
     </div>
@@ -3288,6 +3286,7 @@ function DatasetFile({ snapshot, file }: { snapshot: DatasetCatalogSnapshot; fil
   const counts = [
     `${file.sequences.toLocaleString()} ${tr("序列", "sequences")}`,
     `${file.rows.toLocaleString()} ${tr("行", "rows")}`,
+    `${tr("时长", "duration")} ${formatDatasetDuration(file.duration_seconds)}`,
     `${file.annotations.toLocaleString()} ${tr("标注", "annotations")}`,
     `${(file.events ?? 0).toLocaleString()} ${tr("事件", "events")}`,
     `${(file.segments ?? 0).toLocaleString()} ${tr("区间", "intervals")}`,
