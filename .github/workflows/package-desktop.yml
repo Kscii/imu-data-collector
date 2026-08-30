@@ -10,8 +10,43 @@ permissions:
   contents: read
 
 jobs:
+  scope:
+    name: 判断是否影响桌面安装包
+    runs-on: ubuntu-latest
+    outputs:
+      build_desktop: ${{ steps.scope.outputs.build_desktop }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: 区分标注端专属变更与桌面端变更
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
+            echo "build_desktop=true" >> "${GITHUB_OUTPUT}"
+            echo "手动运行或桌面版本标签：构建桌面安装包。"
+            exit 0
+          fi
+
+          changed_files="${RUNNER_TEMP}/desktop-scope-files"
+          git diff --name-only --no-renames -z "${BASE_SHA}" "${HEAD_SHA}" > "${changed_files}"
+          decision="$(python3 scripts/desktop_ci_scope.py --null < "${changed_files}")"
+          echo "build_desktop=${decision}" >> "${GITHUB_OUTPUT}"
+          if [[ "${decision}" == "true" ]]; then
+            echo "包含桌面端或共享代码变更：构建 Windows/macOS 安装包。"
+          else
+            echo "仅包含标注端专属或 CI/文档变更：跳过 Windows/macOS 安装包。"
+          fi
+
   windows:
     name: Windows 10/11 x64 安装器
+    needs: scope
+    if: needs.scope.outputs.build_desktop == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -85,6 +120,8 @@ jobs:
 
   macos:
     name: macOS 13+ ${{ matrix.arch }} DMG
+    needs: scope
+    if: needs.scope.outputs.build_desktop == 'true'
     strategy:
       fail-fast: false
       matrix:
