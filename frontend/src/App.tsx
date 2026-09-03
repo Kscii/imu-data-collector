@@ -3,6 +3,11 @@ import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from 
 import { resolveAnnotationShortcut } from "./annotationShortcuts";
 import { intervalFollowAnchorIndex, intervalsAtTime } from "./annotationTimeline";
 import {
+  groupRecordingQueues,
+  preferredRecordingId,
+  type RecordingQueueKey,
+} from "./recordingQueue";
+import {
   apiErrorMessage,
   isEnglish,
   localizedField,
@@ -15,7 +20,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数采平台", "IMU Data Collector");
 
-type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models";
+type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -56,7 +61,7 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models" }
+    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
     : { capture: "capture", records: "library", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -98,6 +103,7 @@ type Recording = {
   index_state?: "not_requested" | "pending" | "indexed" | "rejected";
   index_message?: string;
   manifest_generation?: number | null;
+  publication_recording_id?: string | null;
   purpose?: "annotation" | "calibration_evidence";
   h5_path?: string | null;
   mkv_path?: string | null;
@@ -320,7 +326,39 @@ type TrainingSnapshot = {
     current_object_key: string;
     is_current: boolean;
   } | null;
+  delivery?: {
+    eligible: boolean;
+    state: "ineligible" | "not_created" | "queued" | "running" | "ready" | "failed";
+    message?: string | null;
+    archive_size_bytes?: number;
+    archive_sha256?: string;
+  };
   created?: boolean;
+};
+
+type SnapshotViewerDocument = {
+  snapshot_id: string;
+  created_at_utc: string | null;
+  recordings: {
+    recording_id: string;
+    participant_id: string;
+    collection_id?: string | null;
+    captured_at_utc?: string | null;
+  }[];
+};
+
+type SnapshotTimeline = {
+  time_s: number[];
+  values: number[][];
+  unit: string;
+  annotations: {
+    kind: "activity" | "exclude" | "onset" | "impact";
+    start_sample: number;
+    stop_sample: number;
+    code: string;
+    start_s: number;
+    stop_s: number;
+  }[];
 };
 
 type DatasetCatalogFile = {
@@ -1193,6 +1231,7 @@ export default function App() {
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
+      {annotationApplication && tab === "delivery" && <SnapshotDeliveryViewer />}
       {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
       {annotationApplication && tab === "models" && config?.can_view_models && session && <ModelCatalogPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary
@@ -1817,10 +1856,19 @@ function TaxonomyManagementRow({ entry, editing, editBlocked, busy, onStartEdit,
 }
 
 function AnnotationPage({ recordings, taxonomy, session, participants, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; session: Session; participants: string[]; onChanged: () => Promise<Recording[]> }) {
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(() => new URLSearchParams(location.search).get("recording") ?? "");
   const [recordingDrawerOpen, setRecordingDrawerOpen] = useState(false);
   const [recordingQuery, setRecordingQuery] = useState("");
-  const [taskTab, setTaskTab] = useState<AnnotationTaskTab>("sync");
+  const [recordingTier, setRecordingTier] = useState<"all" | "test" | "prod">("all");
+  const [recordingParticipant, setRecordingParticipant] = useState("");
+  const [recordingCollection, setRecordingCollection] = useState("");
+  const [taskTab, setTaskTab] = useState<AnnotationTaskTab>(() => {
+    const requested = new URLSearchParams(location.search).get("task");
+    return (["sync", "annotate", "data", "manage"] as string[]).includes(requested ?? "")
+      ? requested as AnnotationTaskTab
+      : "sync";
+  });
+  const [loadedRecording, setLoadedRecording] = useState("");
   const [participantChoice, setParticipantChoice] = useState("");
   const [locatedIntervalKey, setLocatedIntervalKey] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -1854,17 +1902,33 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   const [error, setError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
   const intervalListRef = useRef<HTMLDivElement>(null);
+  const recordingDrawerButtonRef = useRef<HTMLButtonElement>(null);
+  const recordingDrawerRef = useRef<HTMLElement>(null);
+  const recordingSearchRef = useRef<HTMLInputElement>(null);
+  const selectedRecordingButtonRef = useRef<HTMLButtonElement>(null);
   const retrySaveRef = useRef<(() => void) | null>(null);
   const locateTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!selected && recordings.length) setSelected(recordings[0].recording_id);
-  }, [recordings, selected]);
+    if (selected && recordings.some((item) => item.recording_id === selected)) return;
+    setSelected(preferredRecordingId(recordings, session.unikey));
+  }, [recordings, selected, session.unikey]);
+
+  useEffect(() => {
+    if (!selected) return;
+    const url = new URL(location.href);
+    url.searchParams.set("view", "annotate");
+    url.searchParams.set("recording", selected);
+    if (loadedRecording === selected) url.searchParams.set("task", taskTab);
+    else url.searchParams.delete("task");
+    history.replaceState({}, "", url);
+  }, [selected, taskTab, loadedRecording]);
 
   useEffect(() => {
     if (!selected) return;
     const controller = new AbortController();
     setError("");
+    setLoadedRecording("");
     setDoc(null);
     setTimeline(null);
     setSync(null);
@@ -1888,6 +1952,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       setSync(syncState);
       setFrameTimes(frames);
       setReview(reviewDocument);
+      setLoadedRecording(selected);
       setParticipantChoice(reviewDocument.participant_assignment.participant_id ?? participants[0] ?? "");
       setStatus(recordingStatus);
       setMarks({});
@@ -1897,19 +1962,59 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       setRecommendationOffsetSource("none");
       setDeleteArmed(false);
       setDeleteConfirmation("");
+      const requestedTask = new URLSearchParams(location.search).get("task");
       setTaskTab(
-        reviewDocument.workflow.state === "completed"
-          ? "data"
-          : reviewDocument.participant_assignment.status === "confirmed"
-          && syncState.quality === "verified"
-          ? "annotate"
-          : "sync"
+        (["sync", "annotate", "data", "manage"] as string[]).includes(requestedTask ?? "")
+          ? requestedTask as AnnotationTaskTab
+          : reviewDocument.workflow.state === "completed"
+            ? "annotate"
+            : reviewDocument.participant_assignment.status === "confirmed"
+              && syncState.quality === "verified"
+              ? "annotate"
+              : "sync"
       );
     }).catch((e) => {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     });
     return () => controller.abort();
   }, [selected, reloadNonce, participants.join("|")]);
+
+  useEffect(() => {
+    if (!recordingDrawerOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      recordingSearchRef.current?.focus();
+      window.requestAnimationFrame(() => {
+        selectedRecordingButtonRef.current?.scrollIntoView({ block: "nearest" });
+      });
+    });
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setRecordingDrawerOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !recordingDrawerRef.current) return;
+      const focusable = Array.from(recordingDrawerRef.current.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      ));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.requestAnimationFrame(() => recordingDrawerButtonRef.current?.focus());
+    };
+  }, [recordingDrawerOpen]);
 
   useEffect(() => {
     const pending = saveState === "saving" || saveState === "error" || saveState === "conflict";
@@ -2306,7 +2411,10 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       await onChanged();
       const firstIssue = result.issues[0];
       setIndexMessage(
-        `扫描完成：新增或更新 ${result.imported} 条，未变化 ${result.unchanged} 条，跳过异常 ${result.skipped} 条`
+        tr(
+          `目录刷新完成：新增或更新 ${result.imported} 条，未变化 ${result.unchanged} 条，跳过异常 ${result.skipped} 条`,
+          `Catalog refreshed: ${result.imported} added or updated, ${result.unchanged} unchanged, ${result.skipped} invalid`,
+        )
         + (firstIssue ? `；${firstIssue.recording_id} [${firstIssue.code}] ${firstIssue.message}` : "")
       );
     } catch (e) {
@@ -2474,11 +2582,24 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
     if (!entry) return code;
     return `${entry.name}${entry.active ? "" : tr(" · 已停用", " · inactive")}`;
   };
-  const filteredRecordings = recordings.filter((recording) => {
-    const needle = recordingQuery.trim().toLowerCase();
-    if (!needle) return true;
-    return `${recording.recording_id} ${recording.participant_id ?? ""} ${recording.annotator_id ?? ""}`.toLowerCase().includes(needle);
-  });
+  const recordingQueues = useMemo(() => groupRecordingQueues(
+    recordings,
+    session.unikey,
+    {
+      query: recordingQuery,
+      tier: recordingTier,
+      participant: recordingParticipant,
+      collection: recordingCollection,
+    },
+  ), [recordings, session.unikey, recordingQuery, recordingTier, recordingParticipant, recordingCollection]);
+  const queueOrder: { key: RecordingQueueKey; zh: string; en: string }[] = [
+    { key: "mine", zh: "分配给我", en: "Assigned to me" },
+    { key: "unassigned", zh: "未领取", en: "Unassigned" },
+    { key: "others", zh: "其他成员进行中", en: "Others in progress" },
+    { key: "completed", zh: "已完成", en: "Completed" },
+  ];
+  const participantFilters = Array.from(new Set(recordings.map((item) => item.participant_id).filter((item): item is string => Boolean(item)))).sort();
+  const collectionFilters = Array.from(new Set(recordings.map((item) => item.collection_id))).sort();
   const orderedAnnotationIntervals: OrderedAnnotationInterval[] = doc ? [
     ...doc.segments.map((segment) => ({
       kind: "segment" as const,
@@ -2661,7 +2782,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   return (
     <main className="annotation-workbench">
       <section className="annotation-workbench-bar">
-        <button onClick={() => setRecordingDrawerOpen(true)}>录制列表</button>
+        <button ref={recordingDrawerButtonRef} onClick={() => setRecordingDrawerOpen(true)}>{tr("录制列表", "Recordings")}</button>
         <div className="annotation-recording-summary">
           <strong>{selectedRecording ? `${selectedRecording.participant_id ?? "待确认身份"} · ${tierLabel(selectedRecording.data_tier)}` : "未选择录制"}</strong>
           {selected && <code title={selected}>{selected}</code>}
@@ -2677,27 +2798,47 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       </section>
 
       {recordingDrawerOpen && <>
-        <button className="recording-drawer-backdrop" aria-label="关闭录制列表" onClick={() => setRecordingDrawerOpen(false)} />
-        <aside className="recording-drawer">
-          <div className="recording-drawer-header"><strong>选择录制</strong><button onClick={() => setRecordingDrawerOpen(false)}>关闭</button></div>
-          <input autoFocus placeholder="搜索录制 ID、参与者或负责人" value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
-          <div className="recording-list-actions">
-            {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? "正在刷新…" : "刷新 Bucket"}</button>}
-            <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? "已复制" : "复制当前 ID"}</button>
+        <button className="recording-drawer-backdrop" aria-label={tr("关闭录制列表", "Close recording list")} onClick={() => setRecordingDrawerOpen(false)} />
+        <aside ref={recordingDrawerRef} className="recording-drawer" role="dialog" aria-modal="true" aria-labelledby="recording-drawer-title">
+          <div className="recording-drawer-controls">
+            <div className="recording-drawer-header"><strong id="recording-drawer-title">{tr("选择录制", "Select recording")}</strong><button onClick={() => setRecordingDrawerOpen(false)}>{tr("关闭", "Close")}</button></div>
+            <input ref={recordingSearchRef} placeholder={tr("搜索录制 ID、参与者或负责人", "Search recording ID, participant, or owner")} value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
+            <div className="recording-drawer-filters">
+              <select aria-label={tr("数据级别", "Data tier")} value={recordingTier} onChange={(event) => setRecordingTier(event.target.value as typeof recordingTier)}>
+                <option value="all">{tr("全部级别", "All tiers")}</option><option value="prod">{tr("正式数据", "Production")}</option><option value="test">{tr("测试数据", "Test")}</option>
+              </select>
+              <select aria-label={tr("参与者", "Participant")} value={recordingParticipant} onChange={(event) => setRecordingParticipant(event.target.value)}>
+                <option value="">{tr("全部参与者", "All participants")}</option>{participantFilters.map((item) => <option key={item} value={item}>{item}</option>)}
+              </select>
+              <select aria-label={tr("采集批次", "Collection")} value={recordingCollection} onChange={(event) => setRecordingCollection(event.target.value)}>
+                <option value="">{tr("全部批次", "All collections")}</option>{collectionFilters.map((item) => <option key={item} value={item}>{item}</option>)}
+              </select>
+            </div>
+            <div className="recording-list-actions">
+              {session.is_admin && <button onClick={refreshBucket} disabled={indexBusy}>{indexBusy ? tr("正在刷新…", "Refreshing…") : tr("刷新目录", "Refresh catalog")}</button>}
+              <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? tr("已复制", "Copied") : tr("复制当前 ID", "Copy current ID")}</button>
+            </div>
+            {indexMessage && <span className="index-message">{indexMessage}</span>}
           </div>
-          {indexMessage && <span className="index-message">{indexMessage}</span>}
           <div className="recording-drawer-list">
-            {filteredRecordings.map((recording) => <button key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}>
-              <strong>{recording.participant_id ?? "待选择参与者"} · {tierLabel(recording.data_tier)}</strong>
-              <span>{recording.recording_id}</span>
-              <span className={`recording-workflow-status workflow-${recording.workflow_state ?? "unassigned"}`}>
-                {recording.workflow_state === "completed"
-                  ? `标注已完成 · ${recording.annotator_id ?? "负责人未知"}`
-                  : recording.workflow_state === "in_progress"
-                    ? `已分配给 ${recording.annotator_id ?? "未知"} · 标注中`
-                    : "未分配 · 标注未完成"}
-              </span>
-            </button>)}
+            {queueOrder.map((group) => <details className="recording-queue" key={group.key} open={group.key === "mine" || group.key === "unassigned" || recordingQueues[group.key].some((item) => item.recording_id === selected) || undefined}>
+              <summary>{tr(group.zh, group.en)} <span>{recordingQueues[group.key].length}</span></summary>
+              <div>
+                {recordingQueues[group.key].length === 0 && <span className="muted recording-queue-empty">{tr("没有匹配录制", "No matching recordings")}</span>}
+                {recordingQueues[group.key].map((recording) => <button ref={selected === recording.recording_id ? selectedRecordingButtonRef : undefined} key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}>
+                  <strong>{recording.participant_id ?? tr("待选择参与者", "Participant pending")} · {tierLabel(recording.data_tier)}</strong>
+                  <span>{recording.recording_id}</span>
+                  <span>{recording.collection_id} · {recording.duration_ns ? seconds(recording.duration_ns) : "—"}</span>
+                  <span className={`recording-workflow-status workflow-${recording.workflow_state ?? "unassigned"}`}>
+                    {recording.workflow_state === "completed"
+                      ? tr(`标注已完成 · ${recording.annotator_id ?? "负责人未知"}`, `Completed · ${recording.annotator_id ?? "unknown owner"}`)
+                      : recording.workflow_state === "in_progress"
+                        ? tr(`已分配给 ${recording.annotator_id ?? "未知"} · 标注中`, `Assigned to ${recording.annotator_id ?? "unknown"} · in progress`)
+                        : tr("未分配 · 标注未完成", "Unassigned · incomplete")}
+                  </span>
+                </button>)}
+              </div>
+            </details>)}
           </div>
         </aside>
       </>}
@@ -2727,7 +2868,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
           </div>
 
           <div className="panel full-timeline-panel workbench-timeline">
-            <div className="timeline-heading"><div><span>{tr("完整录制 IMU", "Full-recording IMU")}</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} {tr("个显示点", "display points")}</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{currentTime.toFixed(3)} s</strong></div></div>
+            <div className="timeline-heading"><div><span>{tr("完整录制 IMU", "Full-recording IMU")}</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} {tr("个峰值保留显示点", "peak-preserving display points")}</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{currentTime.toFixed(3)} s</strong></div></div>
             {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} markers={timelineMarkers} regions={timelineRegions} selectionLabels={currentAnnotationLabels} controlledCursor showMarkerKey={false} height={190} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} onSelectLabel={locateAnnotationInterval} />}
           </div>
         </section>
@@ -2860,6 +3001,83 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   );
 }
 
+function SnapshotDeliveryViewer() {
+  const snapshotId = new URLSearchParams(location.search).get("snapshot") ?? "";
+  const [catalog, setCatalog] = useState<SnapshotViewerDocument | null>(null);
+  const [selected, setSelected] = useState(() => new URLSearchParams(location.search).get("recording") ?? "");
+  const [timeline, setTimeline] = useState<SnapshotTimeline | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [error, setError] = useState("");
+  const video = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (!snapshotId) {
+      setError(tr("URL 缺少 snapshot 参数", "The URL is missing the snapshot parameter"));
+      return;
+    }
+    api<SnapshotViewerDocument>(`/api/v1/training-snapshots/${snapshotId}/viewer`)
+      .then((value) => {
+        setCatalog(value);
+        if (!value.recordings.some((item) => item.recording_id === selected)) {
+          setSelected(value.recordings[0]?.recording_id ?? "");
+        }
+      })
+      .catch((value) => setError((value as Error).message));
+  }, [snapshotId]);
+
+  useEffect(() => {
+    if (!snapshotId || !selected) return;
+    const controller = new AbortController();
+    setTimeline(null);
+    api<SnapshotTimeline>(`/api/v1/training-snapshots/${snapshotId}/viewer/${selected}/timeline`, { signal: controller.signal })
+      .then((value) => {
+        setTimeline(value);
+        setCurrentTime(value.time_s[0] ?? 0);
+      })
+      .catch((value) => {
+        if ((value as Error).name !== "AbortError") setError((value as Error).message);
+      });
+    const url = new URL(location.href);
+    url.searchParams.set("recording", selected);
+    history.replaceState({}, "", url);
+    return () => controller.abort();
+  }, [snapshotId, selected]);
+
+  const jump = (time: number) => {
+    setCurrentTime(time);
+    if (video.current) video.current.currentTime = time;
+  };
+  const regions: PlotRegion[] = timeline?.annotations
+    .filter((item) => item.kind === "activity" || item.kind === "exclude")
+    .map((item) => {
+      const color = item.kind === "exclude" ? "#94a3b8" : stableActivityColor("non_fall", item.code, []);
+      return { start: item.start_s, end: item.stop_s, color: colorWithAlpha(color, 0.17), borderColor: color, label: item.code };
+    }) ?? [];
+  const markers: PlotMarker[] = timeline?.annotations
+    .filter((item) => item.kind === "impact")
+    .map((item) => ({ time: item.start_s, label: tr("撞击", "Impact"), color: "#facc15", dashed: true })) ?? [];
+  return <main className="snapshot-viewer">
+    <div className="save-row"><a className="button-link" href="?view=training">← {tr("返回训练快照", "Back to training snapshots")}</a><strong>{tr("不可变快照只读查看", "Immutable snapshot viewer")} · {snapshotId}</strong></div>
+    {error && <div className="error-banner">{error}</div>}
+    {catalog && <section className="snapshot-viewer-layout">
+      <aside className="panel snapshot-viewer-recordings">
+        <div className="panel-title">{tr("快照录制", "Snapshot recordings")} · {catalog.recordings.length}</div>
+        {catalog.recordings.map((item) => <button className={selected === item.recording_id ? "selected" : ""} key={item.recording_id} onClick={() => setSelected(item.recording_id)}><strong>{item.participant_id}</strong><span>{item.recording_id}</span><span>{item.collection_id ?? "—"}</span></button>)}
+      </aside>
+      <section className="snapshot-viewer-content">
+        <div className="panel snapshot-viewer-video">
+          {selected && <video ref={video} controls src={`/api/v1/training-snapshots/${snapshotId}/viewer/${selected}/video`} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onSeeked={(event) => setCurrentTime(event.currentTarget.currentTime)} />}
+          <strong>{currentTime.toFixed(3)} s</strong>
+        </div>
+        <div className="panel snapshot-viewer-timeline">
+          <div className="timeline-heading"><div><span>{tr("完整录制 IMU", "Full-recording IMU")}</span><small>{timeline?.time_s.length ?? 0} {tr("个峰值保留显示点", "peak-preserving display points")}</small></div></div>
+          {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} markers={markers} regions={regions} controlledCursor showMarkerKey={false} height={150} onSelectTime={jump} />}
+        </div>
+      </section>
+    </section>}
+  </main>;
+}
+
 function TrainingSnapshotsPage({ session }: { session: Session }) {
   const [snapshots, setSnapshots] = useState<TrainingSnapshot[]>([]);
   const [busy, setBusy] = useState(false);
@@ -2873,6 +3091,12 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
   useEffect(() => {
     refresh().catch((value) => setError((value as Error).message));
   }, []);
+
+  useEffect(() => {
+    if (!snapshots.some((item) => item.delivery?.state === "queued" || item.delivery?.state === "running")) return;
+    const timer = window.setInterval(() => refresh().catch((value) => setError((value as Error).message)), 2_000);
+    return () => window.clearInterval(timer);
+  }, [snapshots]);
 
   const createSnapshot = async () => {
     setBusy(true);
@@ -2936,6 +3160,23 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
     }
   };
 
+  const generateDelivery = async (snapshotId: string) => {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api<NonNullable<TrainingSnapshot["delivery"]>>(`/api/v1/training-snapshots/${snapshotId}/delivery`, { method: "POST" });
+      setMessage(result.state === "ready"
+        ? tr("交付包已经存在，可直接下载", "The delivery package is ready to download")
+        : tr("已加入后台生成队列，可离开本页继续工作", "Queued in the background; you may leave this page"));
+      await refresh();
+    } catch (value) {
+      setError((value as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const currentSnapshot = snapshots.find((item) => item.benchmark?.is_current);
   const otherSnapshots = snapshots.filter((item) => item !== currentSnapshot);
 
@@ -2954,17 +3195,17 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
         )}</span>
       </div>
       {snapshots.length === 0 ? <span className="muted">目前还没有训练快照。</span> : <>
-        {currentSnapshot && <SnapshotRow snapshot={currentSnapshot} current session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} />}
+        {currentSnapshot && <SnapshotRow snapshot={currentSnapshot} current session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} onGenerateDelivery={generateDelivery} />}
         {otherSnapshots.length > 0 && <details className="snapshot-history" open={!currentSnapshot}>
           <summary>{tr("待验证或历史快照", "Staged or historical snapshots")}（{otherSnapshots.length}）</summary>
-          {otherSnapshots.map((snapshot) => <SnapshotRow key={snapshot.snapshot_id} snapshot={snapshot} session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} />)}
+          {otherSnapshots.map((snapshot) => <SnapshotRow key={snapshot.snapshot_id} snapshot={snapshot} session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} onGenerateDelivery={generateDelivery} />)}
         </details>}
       </>}
     </section>
   </main>;
 }
 
-function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onActivate }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void; onActivate: (snapshotId: string) => void }) {
+function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onActivate, onGenerateDelivery }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void; onActivate: (snapshotId: string) => void; onGenerateDelivery: (snapshotId: string) => void }) {
   return <article className={current ? "current-snapshot" : ""}>
     <div>
       <strong>{current ? "当前训练快照" : "历史训练快照"} · {snapshot.snapshot_id}</strong>
@@ -2974,6 +3215,10 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
     <div className="save-row">
       <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>下载 TAR</a>
       {snapshot.benchmark && <a className="button-link" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/benchmark-h5/download`} download>下载 benchmark H5</a>}
+      {snapshot.delivery?.eligible && <a className="button-link" href={`?view=delivery&snapshot=${encodeURIComponent(snapshot.snapshot_id)}`}>{tr("查看交付内容", "View delivery")}</a>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/delivery/download`} download>{tr("下载客户 ZIP", "Download client ZIP")}</a>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || snapshot.delivery.state === "queued" || snapshot.delivery.state === "running"} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{snapshot.delivery.state === "queued" || snapshot.delivery.state === "running" ? tr("后台生成中…", "Generating…") : snapshot.delivery.state === "failed" ? tr("重试生成客户包", "Retry delivery") : tr("生成客户交付包", "Create client delivery")}</button>}
+      {!snapshot.delivery?.eligible && <span className="muted" title={snapshot.delivery?.message ?? ""}>{tr("历史快照不可生成交付包", "Legacy snapshot is not delivery eligible")}</span>}
       {snapshot.benchmark && !snapshot.benchmark.is_current && <button disabled={busy} onClick={() => onActivate(snapshot.snapshot_id)}>{tr("验证后激活 current", "Activate current after validation")}</button>}
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
     </div>
@@ -3440,6 +3685,8 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
   const uploadStateLabel = (recording: Recording) => {
     if (recording.upload_state === "stored_local") return "仅保存在本机";
     if (recording.upload_state === "auth_required") return "等待 Google 登录";
+    if (recording.upload_state === "legacy_published") return "历史校准已归档";
+    if (recording.upload_state === "remote_missing") return "云端未找到";
     if (["uploaded", "published"].includes(recording.upload_state)) {
       return ["broker", "direct_gcs"].includes(recording.publish_target ?? "")
         ? "已上传团队 Bucket"
@@ -3543,14 +3790,15 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
           <span>{uploadStateLabel(recording)}</span>
           {recording.index_state === "indexed" && <span>标注端已接收</span>}
           {recording.index_state === "pending" && <span>等待标注端接收</span>}
-          {recording.index_state === "rejected" && <span className="warning-text">标注端拒绝</span>}
+          {recording.index_state === "rejected" && recording.upload_state !== "legacy_published" && <span className="warning-text">标注端拒绝</span>}
+          {recording.index_state === "rejected" && recording.upload_state === "legacy_published" && <span>校准证据不进入标注</span>}
         </div>
         {recording.finalization_job && <p className={recording.finalization_job.state === "failed" ? "warning-text" : "stage-help"}>后台收尾：{jobStateLabel(recording.finalization_job)} · 尝试 {recording.finalization_job.attempts}/{recording.finalization_job.max_attempts}{recording.finalization_job.last_error ? ` · ${recording.finalization_job.last_error}` : ""}</p>}
         {recording.upload_job && <p className={recording.upload_job.state === "failed" ? "warning-text" : "stage-help"}>后台上传：{jobStateLabel(recording.upload_job)} · 尝试 {recording.upload_job.attempts}/{recording.upload_job.max_attempts}{(recording.upload_job.total_bytes ?? 0) > 0 ? ` · ${Math.min(100, 100 * (recording.upload_job.progress_bytes ?? 0) / (recording.upload_job.total_bytes ?? 1)).toFixed(0)}%` : ""}{recording.upload_job.last_error ? ` · ${recording.upload_job.last_error}` : ""}</p>}
         {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{recording.index_message}</p>}
         <div className="save-row">
           {recording.h5_path?.endsWith(".partial.h5") && recording.mkv_path?.endsWith(".partial.mkv") && !activeJobStates.has(recording.finalization_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => retryFinalization(recording)}>{busy === recording.recording_id ? "正在提交…" : "重新收尾"}</button>}
-          {publishMode !== "disabled" && recording.state === "ready" && !["uploaded", "published"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在提交…" : recording.upload_job?.state === "failed" ? "重新上传" : publishMode === "local" ? "归档到本机" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并上传"}</button>}
+          {publishMode !== "disabled" && recording.state === "ready" && !["uploaded", "published", "legacy_published", "remote_missing"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在提交…" : recording.upload_job?.state === "failed" ? "重新上传" : publishMode === "local" ? "归档到本机" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并上传"}</button>}
           <button onClick={() => copyRecordingId(recording.recording_id)}>复制录制 ID</button>
           <button className="danger" disabled={Boolean(busy) || [recording.finalization_job, recording.upload_job].some((job) => job && activeJobStates.has(job.state))} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>
