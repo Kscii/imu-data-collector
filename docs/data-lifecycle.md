@@ -96,6 +96,8 @@ aligned SHA-256 和逻辑摘要计算内容指纹，并生成 `snapshot-<digest>
 - 内容相同直接复用已有快照；
 - TAR 自包含所有 aligned 和逐文件 SHA-256 manifest；
 - 同时合并生成一个可被 benchmark 直接读取的 `cw12eu.h5`；
+- 新快照冻结每条录制的 MP4 引用、SHA-256 和样本到视频媒体时间的 `view.json`；
+- 可按同一 snapshot ID 在后台生成独立客户 ZIP；训练 TAR/HDF5 本身仍不包含视频；
 - 合并 HDF5 与 manifest 写入不可变 snapshot 前缀，再用 generation 前置条件原子推进
   `current.json`；
 - 快照生成过程中发生的后续标注不会改变本次快照；
@@ -104,11 +106,12 @@ aligned SHA-256 和逻辑摘要计算内容指纹，并生成 `snapshot-<digest>
 - 当前录制删除不影响已经生成的自包含快照。
 
 快照没有“撤销”状态或墓碑。需要弃用某个快照时，应先生成新的当前快照。平台侧管理员清理
-只删除 TAR 与平台 manifest；已经发布到 `benchmark-datasets/` 的不可变 HDF5、manifest 和
-current pointer 不随之删除。训练系统解析受校验的 `current.json` 或显式 snapshot ID，不能把
+删除 TAR、冻结 view 和已生成的客户 ZIP，最后删除平台 manifest；已经发布到
+`benchmark-datasets/` 的不可变 HDF5、manifest 和 current pointer 不随之删除。训练系统解析
+受校验的 `current.json` 或显式 snapshot ID，不能把
 对象列表中的“最新”当作隐式依赖。
 
-快照存在多层显式版本，不能混为一个字段：平台对象存储侧清单使用 `3.0.0`，TAR 内
+快照存在多层显式版本，不能混为一个字段：平台对象存储侧清单使用 `4.0.0`，TAR 内
 `manifest.json` 使用 `2.0.0`，每个 `aligned.h5` 与合并后的 `cw12eu.h5` 使用 IMU HDF5
 `3.1.0`，benchmark manifest 使用 `imu_benchmark_dataset_manifest_v1` 并声明
 `imu_benchmark_contract_v2`。清单记录规范对象键、字节数、物理 SHA-256 和逻辑内容摘要；
@@ -149,8 +152,10 @@ imu-annotation --config /etc/imu-annotation/config.yaml \
 generation 删除原始制品、review、导出和相关诊断引用；对象存储的 7 天 soft delete 是管理员
 恢复窗口，不是 WebUI 回收站。
 
-训练快照是自包含副本，因此不阻止删除源录制。快照清理只允许管理员，并要求
-`DELETE <snapshot_id>`。删除顺序是 TAR 后清单，失败后可用同一确认安全重试。
+训练快照保留自包含训练数据，并把客户查看所需的视频复制到快照自己的不可变前缀，因此不再
+依赖当前录制或 review。快照清理只允许管理员，并要求
+`DELETE <snapshot_id>`。删除顺序是 TAR、客户 ZIP、冻结 view，最后是平台清单；失败后可用
+同一确认安全重试。
 
 每日垃圾回收只处理超过保留期的中断 capture、已失去源 manifest 的索引回执、无当前引用的
 旧导出及缺少有效清单的孤儿训练快照。默认先 dry-run；时间戳、引用或清单不确定时保守跳过。

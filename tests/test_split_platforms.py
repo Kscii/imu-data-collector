@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import os
 import sqlite3
 import time
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -104,7 +106,14 @@ def _publish_fixture(
         "video_mkv": source / "video.mkv",
         "preview_mp4": source / "preview.mp4",
     }
-    files["capture_h5"].write_bytes(b"hdf5-fixture")
+    if data_tier == DataTier.PROD:
+        with h5py.File(files["capture_h5"], "w") as handle:
+            frames = handle.create_group("video/frames")
+            frame_times = np.asarray([0, 500_000_000, 1_000_000_000], dtype=np.int64)
+            frames.create_dataset("recording_time_ns", data=frame_times)
+            frames.create_dataset("media_time_ns", data=frame_times)
+    else:
+        files["capture_h5"].write_bytes(b"hdf5-fixture")
     files["video_mkv"].write_bytes(b"matroska-fixture")
     files["preview_mp4"].write_bytes(b"0123456789")
     descriptors = []
@@ -189,6 +198,7 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
                 "sampling_rate_hz": 25.0,
                 "evaluation_role": "training_only",
                 "logical_content_sha256": logical_digest,
+                "grid_origin_recording_time_ns": 0,
             }
         )
         handle.create_dataset("samples", data=np.zeros((2, 6), dtype=np.float32))
@@ -297,9 +307,7 @@ def test_annotation_catalog_migrates_existing_rows_to_active(tmp_path: Path) -> 
     AnnotationCatalog(path)
 
     with sqlite3.connect(path) as connection:
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(recordings)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(recordings)")}
     assert "deletion_state" in columns
 
 
@@ -355,36 +363,26 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
             json={"action": "assign", "expected_revision": 0, "comment": ""},
         )
         assert assigned.status_code == 200
-        refreshed_recording = client.get(
-            f"/api/v1/recordings/{recording_id}"
-        ).json()
+        refreshed_recording = client.get(f"/api/v1/recordings/{recording_id}").json()
         assert refreshed_recording["workflow_state"] == "in_progress"
         assert refreshed_recording["annotator_id"] == "xfan0282"
 
-        review_download = client.get(
-            f"/api/v1/recordings/{recording_id}/review/download"
-        )
+        review_download = client.get(f"/api/v1/recordings/{recording_id}/review/download")
         assert review_download.status_code == 200
         assert review_download.json()["recording_id"] == recording_id
         assert "attachment" in review_download.headers["content-disposition"]
 
-        capture_download = client.get(
-            f"/api/v1/recordings/{recording_id}/capture-h5/download"
-        )
+        capture_download = client.get(f"/api/v1/recordings/{recording_id}/capture-h5/download")
         assert capture_download.status_code == 200
         assert capture_download.content == b"hdf5-fixture"
         assert capture_download.headers["content-type"] == "application/x-hdf5"
-        assert capture_download.headers["content-length"] == str(
-            len(b"hdf5-fixture")
-        )
+        assert capture_download.headers["content-length"] == str(len(b"hdf5-fixture"))
         assert capture_download.headers["content-disposition"] == (
             f'attachment; filename="{recording_id}.capture.h5"'
         )
         assert capture_download.headers["cache-control"] == "private, no-store"
 
-        missing_export = client.get(
-            f"/api/v1/recordings/{recording_id}/aligned30/download"
-        )
+        missing_export = client.get(f"/api/v1/recordings/{recording_id}/aligned30/download")
         assert missing_export.status_code == 403
 
         aligned = tmp_path / "aligned30.h5"
@@ -394,9 +392,7 @@ def test_annotation_app_indexes_manifest_and_supports_video_range(
             f"exports/{recording_id}/aligned30.h5",
             content_type="application/x-hdf5",
         )
-        aligned_download = client.get(
-            f"/api/v1/recordings/{recording_id}/aligned30/download"
-        )
+        aligned_download = client.get(f"/api/v1/recordings/{recording_id}/aligned30/download")
         assert aligned_download.status_code == 403
         assert "test 数据永久禁止" in aligned_download.json()["detail"]["message"]
 
@@ -421,15 +417,11 @@ def test_annotation_reads_legacy_manifests_and_publishes_v3_capability(
 ) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
-    recording_id = _publish_fixture(
-        store, tmp_path, manifest_schema_version="2.0.0"
-    )
+    recording_id = _publish_fixture(store, tmp_path, manifest_schema_version="2.0.0")
     app = create_annotation_app(settings, store)
 
     with TestClient(app) as client:
-        capabilities, _generation = store.read_json(
-            "contracts/annotation-capabilities.json"
-        )
+        capabilities, _generation = store.read_json("contracts/annotation-capabilities.json")
         assert capabilities["accepted_manifest_schema_versions"] == [
             "2.0.0",
             "2.1.0",
@@ -443,9 +435,7 @@ def test_annotation_reads_legacy_manifests_and_publishes_v3_capability(
     assert result["imported"] == 1
     assert result["skipped"] == 0
     assert result["issues"] == []
-    receipt, _generation = store.read_json(
-        f"index-receipts/{recording_id}.json"
-    )
+    receipt, _generation = store.read_json(f"index-receipts/{recording_id}.json")
     assert receipt["status"] == "indexed"
     assert receipt["manifest_generation"] > 0
 
@@ -468,9 +458,7 @@ def test_annotation_rejection_has_structured_issue_and_receipt(tmp_path: Path) -
     assert result["issues"][0]["recording_id"] == recording_id
     assert result["issues"][0]["stage"] == "manifest"
     assert result["issues"][0]["code"] == "unsupported_h5_schema"
-    receipt, _generation = store.read_json(
-        f"index-receipts/{recording_id}.json"
-    )
+    receipt, _generation = store.read_json(f"index-receipts/{recording_id}.json")
     assert receipt["status"] == "rejected"
     assert receipt["code"] == "unsupported_h5_schema"
 
@@ -553,16 +541,12 @@ def test_calibration_evidence_archive_is_independent_and_can_remove_source(
     service.refresh()
 
     planned = service.archive_calibration_evidence()
-    plan = next(
-        item for item in planned["recordings"] if item["recording_id"] == recording_id
-    )
+    plan = next(item for item in planned["recordings"] if item["recording_id"] == recording_id)
     assert plan["status"] == "ready"
     assert plan["artifact_count"] == 4
 
     result = service.archive_calibration_evidence(apply=True, delete_source=True)
-    archived = next(
-        item for item in result["recordings"] if item["recording_id"] == recording_id
-    )
+    archived = next(item for item in result["recordings"] if item["recording_id"] == recording_id)
     assert archived["status"] == "archived"
     assert archived["artifact_count"] == 4
     assert service.catalog.get(recording_id) is None
@@ -695,7 +679,6 @@ def test_annotation_delete_removes_unreleased_recording_and_shared_references(
     assert "actor_id=rkim6933" not in caplog.text
 
 
-
 def test_annotation_delete_keeps_self_contained_training_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -762,17 +745,13 @@ def test_annotation_delete_can_retry_after_partial_generation_conflict(
 
     with TestClient(app) as client:
         client.post("/api/v1/index/refresh")
-        conflicted = client.request(
-            "DELETE", f"/api/v1/recordings/{recording_id}", json=payload
-        )
+        conflicted = client.request("DELETE", f"/api/v1/recordings/{recording_id}", json=payload)
         assert conflicted.status_code == 409
         assert client.get(f"/api/v1/recordings/{recording_id}").status_code == 404
         client.post("/api/v1/index/refresh")
         assert client.get("/api/v1/recordings").json() == []
 
-        retried = client.request(
-            "DELETE", f"/api/v1/recordings/{recording_id}", json=payload
-        )
+        retried = client.request("DELETE", f"/api/v1/recordings/{recording_id}", json=payload)
 
     assert retried.status_code == 200
     assert store.list(f"captures/{recording_id}/") == []
@@ -804,9 +783,7 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
     assert activated.json()["benchmark"]["is_current"] is True
     current, _generation = store.read_json(current_key)
     assert current["handoff_contract_version"] == DATASET_HANDOFF_VERSION
-    assert [item["snapshot_id"] for item in listed.json()] == [
-        created.json()["snapshot_id"]
-    ]
+    assert [item["snapshot_id"] for item in listed.json()] == [created.json()["snapshot_id"]]
     archive_key = created.json()["archive_object_key"]
     sidecar_key = f"{archive_key.rsplit('/', 1)[0]}/manifest.json"
     sidecar, _generation = store.read_json(sidecar_key)
@@ -866,8 +843,11 @@ def test_training_snapshot_contract_version_avoids_legacy_id_collision(
 
         created = client.post("/api/v1/training-snapshots")
 
-    expected_fingerprint = _training_snapshot_fingerprint(recordings)
     assert created.status_code == 200
+    created_manifest, _generation = store.read_json(
+        f"training-snapshots/{created.json()['snapshot_id']}/manifest.json"
+    )
+    expected_fingerprint = _training_snapshot_fingerprint(created_manifest["recordings"])
     assert created.json()["content_fingerprint"] == expected_fingerprint
     assert created.json()["snapshot_id"] == f"snapshot-{expected_fingerprint[:24]}"
     assert created.json()["snapshot_id"] != legacy_id
@@ -909,9 +889,7 @@ def test_training_snapshot_range_download_and_admin_cleanup(tmp_path: Path) -> N
         )
         assert deleted.json()["deleted"] is True
         assert client.get("/api/v1/training-snapshots").json() == []
-        assert client.get(
-            f"/api/v1/training-snapshots/{snapshot_id}/download"
-        ).status_code == 404
+        assert client.get(f"/api/v1/training-snapshots/{snapshot_id}/download").status_code == 404
 
         deleted = client.request(
             "DELETE",
@@ -919,6 +897,72 @@ def test_training_snapshot_range_download_and_admin_cleanup(tmp_path: Path) -> N
             json={"confirmation": f"DELETE {recording_id}"},
         )
         assert deleted.status_code == 200
+
+
+def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        client.post("/api/v1/index/refresh")
+        _install_completed_review(app, store, tmp_path, recording_id)
+        snapshot = client.post("/api/v1/training-snapshots").json()
+        snapshot_id = snapshot["snapshot_id"]
+        deleted_source = client.request(
+            "DELETE",
+            f"/api/v1/recordings/{recording_id}",
+            json={"confirmation": f"DELETE {recording_id}"},
+        )
+        assert deleted_source.status_code == 200
+        queued = client.post(f"/api/v1/training-snapshots/{snapshot_id}/delivery")
+        assert queued.status_code == 200
+        for _attempt in range(200):
+            status = client.get(f"/api/v1/training-snapshots/{snapshot_id}/delivery").json()
+            if status["state"] in {"ready", "failed"}:
+                break
+            time.sleep(0.01)
+        assert status["state"] == "ready", status
+
+        downloaded = client.get(f"/api/v1/training-snapshots/{snapshot_id}/delivery/download")
+        partial = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/delivery/download",
+            headers={"Range": "bytes=0-9"},
+        )
+        viewer = client.get(f"/api/v1/training-snapshots/{snapshot_id}/viewer")
+        overview = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/viewer/{recording_id}/timeline"
+        )
+        video = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/viewer/{recording_id}/video",
+            headers={"Range": "bytes=2-5"},
+        )
+
+    assert downloaded.status_code == 200
+    assert partial.status_code == 206
+    assert len(partial.content) == 10
+    assert viewer.json()["recordings"][0]["recording_id"] == recording_id
+    assert overview.json()["values"] == [[0.0] * 6, [0.0] * 6]
+    assert video.status_code == 206
+    assert video.content == b"2345"
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        names = set(archive.namelist())
+        assert "dataset/cw12eu.h5" in names
+        assert f"recordings/{recording_id}/video.mp4" in names
+        assert f"recordings/{recording_id}/view.json" in names
+        assert {"manifest.json", "README.md", "SHA256SUMS"} <= names
+        package_manifest = json.loads(archive.read("manifest.json"))
+        assert package_manifest["snapshot_id"] == snapshot_id
+        assert package_manifest["hdf5_schema_version"] == "3.1.0"
+        checksums = {
+            name: digest
+            for digest, name in (
+                line.split("  ", 1) for line in archive.read("SHA256SUMS").decode().splitlines()
+            )
+        }
+        for name, digest in checksums.items():
+            assert hashlib.sha256(archive.read(name)).hexdigest() == digest
 
 
 def test_training_snapshot_cleanup_retries_after_generation_conflict(tmp_path: Path) -> None:
@@ -931,15 +975,11 @@ def test_training_snapshot_cleanup_retries_after_generation_conflict(tmp_path: P
         _install_completed_review(app, store, tmp_path, recording_id)
         snapshot_id = client.post("/api/v1/training-snapshots").json()["snapshot_id"]
         body = {"confirmation": f"DELETE {snapshot_id}"}
-        first = client.request(
-            "DELETE", f"/api/v1/training-snapshots/{snapshot_id}", json=body
-        )
+        first = client.request("DELETE", f"/api/v1/training-snapshots/{snapshot_id}", json=body)
         assert first.status_code == 409
         assert len(client.get("/api/v1/training-snapshots").json()) == 1
 
-        second = client.request(
-            "DELETE", f"/api/v1/training-snapshots/{snapshot_id}", json=body
-        )
+        second = client.request("DELETE", f"/api/v1/training-snapshots/{snapshot_id}", json=body)
         assert second.status_code == 200
         assert second.json()["deleted"] is True
 

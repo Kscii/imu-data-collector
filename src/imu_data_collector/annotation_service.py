@@ -30,6 +30,12 @@ from imu_data_collector.artifacts import (
     merge_training_exports,
 )
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
+from imu_data_collector.client_delivery import (
+    CLIENT_DELIVERY_SCHEMA_VERSION,
+    build_delivery_archive,
+    canonical_json,
+    delivery_readme,
+)
 from imu_data_collector.config import (
     ImuSettings,
     Settings,
@@ -74,19 +80,30 @@ from imu_data_collector.storage import ObjectConflictError, ObjectStore
 from imu_data_collector.sync import assess_conditional_fixed_offset
 from imu_data_collector.sync_experiment import read_frame_times, read_sync_window
 from imu_data_collector.taxonomy_store import ActivityTaxonomyStore
+from imu_data_collector.timeline import timeline_payload
 from imu_data_collector.validation import validate_annotations
 
 logger = logging.getLogger(__name__)
 
 ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.0.0", "2.1.0", "3.0.0")
+TRAINING_SNAPSHOT_SCHEMA_VERSION = "4.0.0"
+SNAPSHOT_VIEW_SCHEMA_VERSION = "cw12eu_snapshot_view_v1"
 
 
 def _training_snapshot_fingerprint(recordings: list[dict[str, Any]]) -> str:
     """Bind immutable snapshot identity to both content and handoff contract."""
 
+    def identity_recording(recording: dict[str, Any]) -> dict[str, Any]:
+        result = {key: value for key, value in recording.items() if not key.startswith("_")}
+        video = result.get("video")
+        if isinstance(video, dict):
+            result["video"] = {key: value for key, value in video.items() if key != "object_key"}
+        return result
+
     identity = {
+        "snapshot_manifest_schema_version": TRAINING_SNAPSHOT_SCHEMA_VERSION,
         "handoff_contract_version": DATASET_HANDOFF_VERSION,
-        "recordings": recordings,
+        "recordings": [identity_recording(item) for item in recordings],
     }
     return hashlib.sha256(
         json.dumps(
@@ -114,18 +131,17 @@ class AnnotationService:
         seed_taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.taxonomies = ActivityTaxonomyStore(store, seed_taxonomy)
         self.taxonomy = self.taxonomies.current()[0].model_dump(mode="json")
-        self.calibration_evidence = load_calibration_evidence(
-            settings.calibration_evidence_path
-        )
+        self.calibration_evidence = load_calibration_evidence(settings.calibration_evidence_path)
         self.calibration_recording_ids = {
-            str(item["recording_id"])
-            for item in self.calibration_evidence.get("evidence", [])
+            str(item["recording_id"]) for item in self.calibration_evidence.get("evidence", [])
         }
         self.catalog = AnnotationCatalog(settings.annotation.catalog_path)
         self.cache_root = settings.storage.cache_root
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.reviews = AnnotationReviewStore(store, self.taxonomy)
         self._release_delete_lock = threading.RLock()
+        self._delivery_job_lock = threading.RLock()
+        self._delivery_jobs: dict[str, dict[str, Any]] = {}
         self._catalog_refresh_lock = threading.Lock()
         self._taxonomy_migration_lock = threading.RLock()
 
@@ -151,16 +167,10 @@ class AnnotationService:
         return definition.model_dump(mode="json")
 
     def _taxonomy_usage(self) -> dict[str, int]:
-        usage = {
-            item["code"]: 0
-            for label in ("fall", "non_fall")
-            for item in self.taxonomy[label]
-        }
+        usage = {item["code"]: 0 for label in ("fall", "non_fall") for item in self.taxonomy[label]}
         for manifest in self.catalog.list():
             try:
-                payload, _generation = self.store.read_json(
-                    self.reviews.key(manifest.recording_id)
-                )
+                payload, _generation = self.store.read_json(self.reviews.key(manifest.recording_id))
                 review = ReviewDocument.model_validate(payload)
             except (FileNotFoundError, ValidationError, ValueError):
                 continue
@@ -174,8 +184,7 @@ class AnnotationService:
         return {
             **definition,
             "fall": [
-                {**item, "usage_count": usage.get(item["code"], 0)}
-                for item in definition["fall"]
+                {**item, "usage_count": usage.get(item["code"], 0)} for item in definition["fall"]
             ],
             "non_fall": [
                 {**item, "usage_count": usage.get(item["code"], 0)}
@@ -187,16 +196,11 @@ class AnnotationService:
         self, request: ActivityTaxonomyCreateRequest, actor_id: str
     ) -> dict[str, Any]:
         def update(current: ActivityTaxonomyDefinition) -> ActivityTaxonomyDefinition:
-            if any(
-                item.code == request.code
-                for item in (*current.fall, *current.non_fall)
-            ):
+            if any(item.code == request.code for item in (*current.fall, *current.non_fall)):
                 raise ValueError(f"活动标签 code 已存在：{request.code}")
             entry = ActivityTaxonomyEntry(code=request.code, name=request.name)
             field = request.binary_label.value
-            return current.model_copy(
-                update={field: [*getattr(current, field), entry]}
-            )
+            return current.model_copy(update={field: [*getattr(current, field), entry]})
 
         return self._publish_taxonomy(
             self.taxonomies.mutate(
@@ -287,13 +291,9 @@ class AnnotationService:
         )
 
     @staticmethod
-    def _taxonomy_entry(
-        definition: dict[str, Any], code: str
-    ) -> tuple[str, dict[str, Any]]:
+    def _taxonomy_entry(definition: dict[str, Any], code: str) -> tuple[str, dict[str, Any]]:
         for label in ("fall", "non_fall"):
-            entry = next(
-                (item for item in definition[label] if item["code"] == code), None
-            )
+            entry = next((item for item in definition[label] if item["code"] == code), None)
             if entry is not None:
                 return label, entry
         raise KeyError(code)
@@ -318,15 +318,12 @@ class AnnotationService:
         recordings: list[dict[str, Any]] = []
         for manifest in self.catalog.list():
             try:
-                payload, _generation = self.store.read_json(
-                    self.reviews.key(manifest.recording_id)
-                )
+                payload, _generation = self.store.read_json(self.reviews.key(manifest.recording_id))
                 review = ReviewDocument.model_validate(payload)
             except (FileNotFoundError, ValidationError, ValueError):
                 continue
             segment_count = sum(
-                item.activity_code == request.source_code
-                for item in review.annotations.segments
+                item.activity_code == request.source_code for item in review.annotations.segments
             )
             if not segment_count:
                 continue
@@ -372,9 +369,7 @@ class AnnotationService:
     ) -> dict[str, Any]:
         """逐条迁移当前 review；单条失败不会改写该条录制。"""
 
-        expected_confirmation = (
-            f"MIGRATE {request.source_code} TO {request.target_code}"
-        )
+        expected_confirmation = f"MIGRATE {request.source_code} TO {request.target_code}"
         if request.confirmation != expected_confirmation:
             raise ValueError(f"二次确认必须完整输入 {expected_confirmation}")
 
@@ -384,9 +379,7 @@ class AnnotationService:
                 raise ObjectConflictError("迁移预览已经过期，请重新预览")
 
             definition = self.taxonomy_definition()
-            _source_label, source = self._taxonomy_entry(
-                definition, request.source_code
-            )
+            _source_label, source = self._taxonomy_entry(definition, request.source_code)
             if source.get("active", True):
                 definition = self.update_taxonomy_activity(
                     request.source_code,
@@ -401,9 +394,7 @@ class AnnotationService:
             migrated: list[dict[str, Any]] = []
             conflicts: list[dict[str, str]] = []
             failed: list[dict[str, str]] = []
-            plan_by_id = {
-                item["recording_id"]: item for item in plan["recordings"]
-            }
+            plan_by_id = {item["recording_id"]: item for item in plan["recordings"]}
             for recording_id in sorted(plan_by_id):
                 expected = plan_by_id[recording_id]
                 manifest = self.catalog.get(recording_id)
@@ -422,18 +413,14 @@ class AnnotationService:
                             "taxonomy_version": definition["version"],
                             "revision": current.annotations.revision + 1,
                             "segments": [
-                                item.model_copy(
-                                    update={"activity_code": request.target_code}
-                                )
+                                item.model_copy(update={"activity_code": request.target_code})
                                 if item.activity_code == request.source_code
                                 else item
                                 for item in current.annotations.segments
                             ],
                         }
                     )
-                    issues = validate_annotations(
-                        annotations, definition, manifest.duration_ns
-                    )
+                    issues = validate_annotations(annotations, definition, manifest.duration_ns)
                     if issues:
                         raise ValueError("；".join(issues))
                     candidate = current.model_copy(
@@ -465,9 +452,7 @@ class AnnotationService:
                             }
                         )
 
-                    updated = self.reviews.mutate(
-                        manifest, current.revision, commit
-                    )
+                    updated = self.reviews.mutate(manifest, current.revision, commit)
                     migrated.append(
                         {
                             "recording_id": recording_id,
@@ -476,15 +461,12 @@ class AnnotationService:
                             "segment_count": expected["segment_count"],
                             "workflow_state": updated.workflow.state.value,
                             "export_rebuilt": (
-                                current.workflow.state
-                                == ReviewWorkflowState.COMPLETED
+                                current.workflow.state == ReviewWorkflowState.COMPLETED
                             ),
                         }
                     )
                 except ReviewConflictError as error:
-                    conflicts.append(
-                        {"recording_id": recording_id, "message": str(error)}
-                    )
+                    conflicts.append({"recording_id": recording_id, "message": str(error)})
                 except Exception as error:
                     logger.exception(
                         "活动标签迁移失败 recording_id=%s source=%s target=%s",
@@ -492,17 +474,11 @@ class AnnotationService:
                         request.source_code,
                         request.target_code,
                     )
-                    failed.append(
-                        {"recording_id": recording_id, "message": str(error)}
-                    )
+                    failed.append({"recording_id": recording_id, "message": str(error)})
 
             remaining_usage = self._taxonomy_usage().get(request.source_code, 0)
             timestamp = datetime.now(UTC)
-            receipt_id = (
-                timestamp.strftime("%Y%m%dT%H%M%S%fZ")
-                + "-"
-                + request.plan_token[:12]
-            )
+            receipt_id = timestamp.strftime("%Y%m%dT%H%M%S%fZ") + "-" + request.plan_token[:12]
             receipt = {
                 "schema_version": "1.0.0",
                 "migration_id": receipt_id,
@@ -539,9 +515,7 @@ class AnnotationService:
 
         capabilities = AnnotationCapabilities(
             accepted_manifest_schema_versions=list(ACCEPTED_MANIFEST_SCHEMA_VERSIONS),
-            accepted_capture_h5_schema_versions=list(
-                ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
-            ),
+            accepted_capture_h5_schema_versions=list(ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS),
             annotation_build_id=ANNOTATION_API_BUILD_ID,
             generated_at_utc=datetime.now(UTC).isoformat(),
         )
@@ -563,16 +537,11 @@ class AnnotationService:
 
     def _receipt_matches(self, recording_id: str, manifest_generation: int) -> bool:
         try:
-            payload, _generation = self.store.read_json(
-                self._receipt_key(recording_id)
-            )
+            payload, _generation = self.store.read_json(self._receipt_key(recording_id))
             receipt = IndexReceipt.model_validate(payload)
         except (FileNotFoundError, ValidationError, ValueError):
             return False
-        return (
-            receipt.manifest_generation == manifest_generation
-            and receipt.status == "indexed"
-        )
+        return receipt.manifest_generation == manifest_generation and receipt.status == "indexed"
 
     def _write_receipt(
         self,
@@ -612,9 +581,7 @@ class AnnotationService:
             for info in self.store.list("captures/"):
                 if not info.key.endswith("/manifest.json"):
                     continue
-                recording_id = info.key.removeprefix("captures/").removesuffix(
-                    "/manifest.json"
-                )
+                recording_id = info.key.removeprefix("captures/").removesuffix("/manifest.json")
                 if not recording_id or "/" in recording_id:
                     result.skipped += 1
                     result.issues.append(
@@ -627,10 +594,9 @@ class AnnotationService:
                         )
                     )
                     continue
-                if (
-                    self.catalog.manifest_generation(recording_id) == info.generation
-                    and self._receipt_matches(recording_id, info.generation)
-                ):
+                if self.catalog.manifest_generation(
+                    recording_id
+                ) == info.generation and self._receipt_matches(recording_id, info.generation):
                     result.unchanged += 1
                     continue
                 try:
@@ -661,8 +627,7 @@ class AnnotationService:
                         raise ManifestIndexError(
                             "unsupported_h5_schema",
                             "manifest",
-                            "不支持 capture H5 schema "
-                            f"{manifest.source_h5_schema_version}",
+                            f"不支持 capture H5 schema {manifest.source_h5_schema_version}",
                         )
                     self._verify_manifest_objects(manifest)
                     self.catalog.upsert(manifest, generation)
@@ -675,16 +640,12 @@ class AnnotationService:
                     )
                     result.imported += 1
                 except FileNotFoundError as error:
-                    failure = ManifestIndexError(
-                        "artifact_missing", "artifact", str(error)
-                    )
+                    failure = ManifestIndexError("artifact_missing", "artifact", str(error))
                     self._record_refresh_failure(result, recording_id, info, failure)
                 except ManifestIndexError as error:
                     self._record_refresh_failure(result, recording_id, info, error)
                 except (ValidationError, ValueError) as error:
-                    failure = ManifestIndexError(
-                        "manifest_invalid", "manifest", str(error)
-                    )
+                    failure = ManifestIndexError("manifest_invalid", "manifest", str(error))
                     self._record_refresh_failure(result, recording_id, info, failure)
             return result.model_dump(mode="json")
 
@@ -781,9 +742,7 @@ class AnnotationService:
                 {
                     **item,
                     "available": self.store.stat(
-                        self._calibration_manifest_key(
-                            profile_id, str(item["recording_id"])
-                        )
+                        self._calibration_manifest_key(profile_id, str(item["recording_id"]))
                     )
                     is not None,
                 }
@@ -818,19 +777,16 @@ class AnnotationService:
         info = self.store.stat(str(artifact["object_key"]))
         if info is None:
             raise ValueError(f"校准证据制品不存在：{role}")
-        if (
-            info.size_bytes != int(artifact["size_bytes"])
-            or info.metadata.get("sha256") != artifact.get("sha256")
-        ):
+        if info.size_bytes != int(artifact["size_bytes"]) or info.metadata.get(
+            "sha256"
+        ) != artifact.get("sha256"):
             raise ValueError(f"校准证据制品校验失败：{role}")
         return artifact, info
 
     def cached_calibration_evidence_h5(self, recording_id: str) -> Path:
         """下载并校验不可变校准证据 H5，按内容摘要复用本地缓存。"""
 
-        artifact, _info = self.calibration_evidence_artifact(
-            recording_id, "capture_h5"
-        )
+        artifact, _info = self.calibration_evidence_artifact(recording_id, "capture_h5")
         digest = str(artifact["sha256"])
         size_bytes = int(artifact["size_bytes"])
         object_key = str(artifact["object_key"])
@@ -866,12 +822,8 @@ class AnnotationService:
 
         path = self.cached_calibration_evidence_h5(recording_id)
         with h5py.File(path, "r") as handle:
-            time_ns = np.asarray(
-                handle["imu/samples/recording_time_ns"], dtype=np.int64
-            )
-            raw_counts = np.asarray(
-                handle["imu/samples/raw_counts"], dtype=np.int16
-            )
+            time_ns = np.asarray(handle["imu/samples/recording_time_ns"], dtype=np.int64)
+            raw_counts = np.asarray(handle["imu/samples/raw_counts"], dtype=np.int16)
             trailer_dataset = handle.get("imu/samples/trailer")
             trailer = (
                 np.asarray(trailer_dataset, dtype=np.uint8)
@@ -907,11 +859,7 @@ class AnnotationService:
 
         frame_hex = [
             " ".join(
-                f"{byte:02X}"
-                for byte in (
-                    row.astype(">i2").tobytes()
-                    + trailer[index].tobytes()
-                )
+                f"{byte:02X}" for byte in (row.astype(">i2").tobytes() + trailer[index].tobytes())
             )
             for index, row in enumerate(raw_counts)
         ]
@@ -935,9 +883,7 @@ class AnnotationService:
                 "available": si_values is not None,
                 "source": "runtime_authoritative_profile",
                 "profile_id": calibration.profile_id if calibration else None,
-                "evidence_sha256": (
-                    calibration.evidence_sha256 if calibration else None
-                ),
+                "evidence_sha256": (calibration.evidence_sha256 if calibration else None),
                 "error": conversion_error,
             },
         }
@@ -955,9 +901,7 @@ class AnnotationService:
         for item in self.calibration_evidence.get("evidence", []):
             recording_id = str(item["recording_id"])
             source_manifest_key = f"captures/{recording_id}/manifest.json"
-            archive_manifest_key = self._calibration_manifest_key(
-                profile_id, recording_id
-            )
+            archive_manifest_key = self._calibration_manifest_key(profile_id, recording_id)
             existing = self.store.stat(archive_manifest_key)
             if existing is not None:
                 for required_role in (
@@ -976,13 +920,9 @@ class AnnotationService:
                 )
                 continue
             try:
-                source_payload, source_generation = self.store.read_json(
-                    source_manifest_key
-                )
+                source_payload, source_generation = self.store.read_json(source_manifest_key)
             except FileNotFoundError:
-                results.append(
-                    {"recording_id": recording_id, "status": "source_missing"}
-                )
+                results.append({"recording_id": recording_id, "status": "source_missing"})
                 continue
             source_artifacts = source_payload.get("artifacts", [])
             if not isinstance(source_artifacts, list) or not source_artifacts:
@@ -1019,9 +959,7 @@ class AnnotationService:
                 self.store.download_file(source_key, local_path)
                 if local_path.stat().st_size != size_bytes or sha256_file(local_path) != sha256:
                     raise ValueError(f"{recording_id} 下载后校验失败：{role}")
-                destination_key = (
-                    f"calibration-evidence/{profile_id}/{recording_id}/{filename}"
-                )
+                destination_key = f"calibration-evidence/{profile_id}/{recording_id}/{filename}"
                 try:
                     destination = self.store.put_file(
                         local_path,
@@ -1045,9 +983,7 @@ class AnnotationService:
                         or destination.size_bytes != size_bytes
                         or destination.metadata.get("sha256") != sha256
                     ):
-                        raise ValueError(
-                            f"{recording_id} 目标制品冲突：{role}"
-                        ) from error
+                        raise ValueError(f"{recording_id} 目标制品冲突：{role}") from error
                 archived.append(
                     {
                         "role": role,
@@ -1064,8 +1000,7 @@ class AnnotationService:
             source_manifest_path = directory / "source-manifest.json"
             source_manifest_path.write_bytes(source_manifest_bytes)
             source_manifest_archive_key = (
-                f"calibration-evidence/{profile_id}/{recording_id}/"
-                "source-manifest.json"
+                f"calibration-evidence/{profile_id}/{recording_id}/source-manifest.json"
             )
             try:
                 source_manifest_info = self.store.put_file(
@@ -1084,12 +1019,9 @@ class AnnotationService:
                 if (
                     source_manifest_info is None
                     or source_manifest_info.size_bytes != len(source_manifest_bytes)
-                    or source_manifest_info.metadata.get("sha256")
-                    != source_manifest_sha256
+                    or source_manifest_info.metadata.get("sha256") != source_manifest_sha256
                 ):
-                    raise ValueError(
-                        f"{recording_id} 目标制品冲突：capture_manifest"
-                    ) from error
+                    raise ValueError(f"{recording_id} 目标制品冲突：capture_manifest") from error
             archived.append(
                 {
                     "role": "capture_manifest",
@@ -1139,9 +1071,7 @@ class AnnotationService:
                 if receipt is not None:
                     objects[receipt.key] = receipt
                 for candidate in objects.values():
-                    if self.store.delete(
-                        candidate.key, if_generation_match=candidate.generation
-                    ):
+                    if self.store.delete(candidate.key, if_generation_match=candidate.generation):
                         deleted_objects += 1
                 self.catalog.delete(recording_id)
             results.append(
@@ -1159,6 +1089,7 @@ class AnnotationService:
             "profile_id": profile_id,
             "recordings": results,
         }
+
     def required_manifest(self, recording_id: str) -> CaptureManifestV2:
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", recording_id):
             raise ValueError("recording_id 格式无效")
@@ -1242,20 +1173,18 @@ class AnnotationService:
         if len(review.sync.anchors) == 2:
             offset_ns = assess_conditional_fixed_offset(review.sync).applied_offset_ns
         with h5py.File(self.cached_h5(manifest), "r") as handle:
-            times_dataset = handle["imu/samples/recording_time_ns"]
-            step = max(1, int(np.ceil(len(times_dataset) / max_points)))
-            times = np.asarray(times_dataset[::step], dtype=np.int64) + offset_ns
+            times = np.asarray(handle["imu/samples/recording_time_ns"], dtype=np.int64) + offset_ns
             calibrated = manifest.calibration.verified
-            values_dataset = handle[
-                "imu/samples/values_si" if calibrated else "imu/samples/raw_counts"
-            ]
-            values = np.asarray(values_dataset[::step], dtype=np.float32)
-        return {
-            "time_s": (times / 1e9).tolist(),
-            "values": values.tolist(),
-            "unit": "SI" if calibrated else "raw_counts",
-            "downsample_step": step,
-        }
+            values = np.asarray(
+                handle["imu/samples/values_si" if calibrated else "imu/samples/raw_counts"],
+                dtype=np.float32,
+            )
+        return timeline_payload(
+            times,
+            values,
+            max_points=max_points,
+            unit="SI" if calibrated else "raw_counts",
+        )
 
     def annotations(self, recording_id: str) -> AnnotationDocument:
         return self.review(recording_id).annotations
@@ -1281,8 +1210,7 @@ class AnnotationService:
             if item.get("active", True)
         }
         previous_codes = {
-            (item.segment_id, item.activity_code)
-            for item in current.annotations.segments
+            (item.segment_id, item.activity_code) for item in current.annotations.segments
         }
         newly_selected_inactive = sorted(
             {
@@ -1293,21 +1221,17 @@ class AnnotationService:
             }
         )
         if newly_selected_inactive:
-            raise ValueError(
-                "停用标签不能用于新标注：" + "、".join(newly_selected_inactive)
-            )
+            raise ValueError("停用标签不能用于新标注：" + "、".join(newly_selected_inactive))
         h5_path = self.cached_h5(manifest)
         document = document.model_copy(
             update={
                 "taxonomy_id": current_taxonomy["taxonomy_id"],
                 "taxonomy_version": current_taxonomy["version"],
                 "segments": [
-                    item.model_copy(update={"annotator_id": actor_id})
-                    for item in document.segments
+                    item.model_copy(update={"annotator_id": actor_id}) for item in document.segments
                 ],
                 "events": [
-                    item.model_copy(update={"annotator_id": actor_id})
-                    for item in document.events
+                    item.model_copy(update={"annotator_id": actor_id}) for item in document.events
                 ],
                 "exclusions": [
                     item.model_copy(update={"annotator_id": actor_id})
@@ -1337,9 +1261,7 @@ class AnnotationService:
             return review.model_copy(
                 update={
                     "annotations": enriched,
-                    "workflow": workflow_with_timestamp(
-                        review.workflow, last_editor_id=actor_id
-                    ),
+                    "workflow": workflow_with_timestamp(review.workflow, last_editor_id=actor_id),
                 }
             )
 
@@ -1350,12 +1272,8 @@ class AnnotationService:
         path: Path, document: AnnotationDocument
     ) -> AnnotationDocument:
         with h5py.File(path, "r") as handle:
-            video = np.asarray(
-                handle["video/frames/recording_time_ns"], dtype=np.int64
-            )
-            imu = np.asarray(
-                handle["imu/samples/recording_time_ns"], dtype=np.int64
-            )
+            video = np.asarray(handle["video/frames/recording_time_ns"], dtype=np.int64)
+            imu = np.asarray(handle["imu/samples/recording_time_ns"], dtype=np.int64)
 
         def nearest(values: np.ndarray, target: int) -> int | None:
             if not len(values):
@@ -1366,9 +1284,7 @@ class AnnotationService:
 
         # onset 是跌倒区间起点的派生事实，前端不再单独标记。丢弃传入的
         # onset 并依据每个 fall segment 重建，避免旧客户端制造矛盾状态。
-        canonical_events = [
-            event for event in document.events if event.kind != EventKind.ONSET
-        ]
+        canonical_events = [event for event in document.events if event.kind != EventKind.ONSET]
         canonical_events.extend(
             AnnotationEvent(
                 segment_id=segment.segment_id,
@@ -1379,9 +1295,7 @@ class AnnotationService:
             for segment in document.segments
             if segment.binary_label == BinaryLabel.FALL
         )
-        canonical_events.sort(
-            key=lambda event: (event.time_ns, event.segment_id, event.kind.value)
-        )
+        canonical_events.sort(key=lambda event: (event.time_ns, event.segment_id, event.kind.value))
         events = [
             AnnotationEvent(
                 **event.model_dump(exclude={"source_video_frame", "source_imu_sample"}),
@@ -1409,8 +1323,7 @@ class AnnotationService:
             update={
                 "reviewer_id": actor_id,
                 "anchors": [
-                    item.model_copy(update={"reviewer_id": actor_id})
-                    for item in document.anchors
+                    item.model_copy(update={"reviewer_id": actor_id}) for item in document.anchors
                 ],
             }
         )
@@ -1425,9 +1338,7 @@ class AnnotationService:
             return review.model_copy(
                 update={
                     "sync": document,
-                    "workflow": workflow_with_timestamp(
-                        review.workflow, last_editor_id=actor_id
-                    ),
+                    "workflow": workflow_with_timestamp(review.workflow, last_editor_id=actor_id),
                 }
             )
 
@@ -1438,9 +1349,7 @@ class AnnotationService:
         manifest = self.required_manifest(recording_id)
         document, _generation = self.reviews.load(manifest)
         result = self._sync_result(document.sync)
-        return self._sync_display(
-            self.cached_h5(manifest), result, document.sync
-        )
+        return self._sync_display(self.cached_h5(manifest), result, document.sync)
 
     @staticmethod
     def _sync_result(document: SyncDocument) -> dict[str, Any]:
@@ -1463,13 +1372,8 @@ class AnnotationService:
     def _validate_sync_sources(path: Path, document: SyncDocument) -> None:
         with h5py.File(path, "r") as handle:
             start_ns = int(handle.attrs["recording_start_monotonic_ns"])
-            video = np.asarray(
-                handle["video/frames/recording_time_ns"], dtype=np.int64
-            )
-            imu = (
-                np.asarray(handle["imu/samples/time_monotonic_ns"], dtype=np.int64)
-                - start_ns
-            )
+            video = np.asarray(handle["video/frames/recording_time_ns"], dtype=np.int64)
+            imu = np.asarray(handle["imu/samples/time_monotonic_ns"], dtype=np.int64) - start_ns
         for anchor in document.anchors:
             if anchor.source_video_frame is not None:
                 index = anchor.source_video_frame
@@ -1485,13 +1389,9 @@ class AnnotationService:
                     raise ValueError("同步锚点的 IMU 离散区间不一致")
 
     @staticmethod
-    def _sync_display(
-        path: Path, result: dict[str, Any], document: SyncDocument
-    ) -> dict[str, Any]:
+    def _sync_display(path: Path, result: dict[str, Any], document: SyncDocument) -> dict[str, Any]:
         with h5py.File(path, "r") as handle:
-            frames = np.asarray(
-                handle["video/frames/recording_time_ns"], dtype=np.int64
-            )
+            frames = np.asarray(handle["video/frames/recording_time_ns"], dtype=np.int64)
             delta = np.diff(frames)
             median = float(np.median(delta[delta > 0])) if np.any(delta > 0) else 0.0
             rate = float(handle["imu"].attrs.get("observed_rate_hz", 0.0))
@@ -1706,8 +1606,10 @@ class AnnotationService:
         for name in ("accel_counts_per_g", "gyro_counts_per_dps"):
             left = getattr(actual, name)
             right = getattr(expected, name)
-            if left is None or right is None or not math.isclose(
-                left, right, rel_tol=0.0, abs_tol=1e-9
+            if (
+                left is None
+                or right is None
+                or not math.isclose(left, right, rel_tol=0.0, abs_tol=1e-9)
             ):
                 return name
         return None
@@ -1751,27 +1653,15 @@ class AnnotationService:
                 profile_id=text(imu.get("calibration_profile_id", "unverified")),
                 verified=bool(handle.attrs.get("calibration_verified", False)),
                 accel_counts_per_g=(
-                    float(imu["accel_counts_per_g"])
-                    if "accel_counts_per_g" in imu
-                    else None
+                    float(imu["accel_counts_per_g"]) if "accel_counts_per_g" in imu else None
                 ),
                 gyro_counts_per_dps=(
-                    float(imu["gyro_counts_per_dps"])
-                    if "gyro_counts_per_dps" in imu
-                    else None
+                    float(imu["gyro_counts_per_dps"]) if "gyro_counts_per_dps" in imu else None
                 ),
-                accel_bias_counts=tuple(
-                    json.loads(text(imu.get("accel_bias_counts_json", "[]")))
-                ),
-                gyro_bias_counts=tuple(
-                    json.loads(text(imu.get("gyro_bias_counts_json", "[]")))
-                ),
-                raw_axis_order=tuple(
-                    json.loads(text(imu.get("raw_axis_order_json", "[]")))
-                ),
-                axis_signs=tuple(
-                    json.loads(text(imu.get("axis_signs_json", "[]")))
-                ),
+                accel_bias_counts=tuple(json.loads(text(imu.get("accel_bias_counts_json", "[]")))),
+                gyro_bias_counts=tuple(json.loads(text(imu.get("gyro_bias_counts_json", "[]")))),
+                raw_axis_order=tuple(json.loads(text(imu.get("raw_axis_order_json", "[]")))),
+                axis_signs=tuple(json.loads(text(imu.get("axis_signs_json", "[]")))),
                 method=text(imu.get("calibration_method", "unverified")),
                 evidence_sha256=text(imu.get("calibration_evidence_sha256", "")) or None,
             )
@@ -1823,9 +1713,7 @@ class AnnotationService:
             / "aligned.h5"
         )
         try:
-            export_taxonomy = self.taxonomy_definition(
-                review.annotations.taxonomy_version
-            )
+            export_taxonomy = self.taxonomy_definition(review.annotations.taxonomy_version)
         except KeyError as error:
             raise ValueError(
                 f"找不到标注使用的 taxonomy 版本：{review.annotations.taxonomy_version}"
@@ -1854,10 +1742,7 @@ class AnnotationService:
         digest = sha256_file(output)
         with h5py.File(output, "r") as handle:
             logical_digest = str(handle.attrs["logical_content_sha256"])
-        key = (
-            f"exports/{recording_id}/review-{expected_revision}/"
-            f"aligned-{logical_digest[:16]}.h5"
-        )
+        key = f"exports/{recording_id}/review-{expected_revision}/aligned-{logical_digest[:16]}.h5"
         metadata = {
             "sha256": digest,
             "logical_content_sha256": logical_digest,
@@ -1882,9 +1767,7 @@ class AnnotationService:
                 or info.size_bytes != output.stat().st_size
                 or any(info.metadata.get(name) != value for name, value in metadata.items())
             ):
-                raise ValueError(
-                    "同版本训练导出对象已存在但内容校验失败"
-                ) from error
+                raise ValueError("同版本训练导出对象已存在但内容校验失败") from error
         return TrainingExportReference(
             export_schema_version="2.0.0",
             hdf5_schema_version=TRAINING_SCHEMA_VERSION,
@@ -1916,15 +1799,15 @@ class AnnotationService:
             raise ValueError("只有进行中的标注可以完成")
         self._require_current_annotator(review, actor_id)
         if manifest.data_tier.value == "prod" and (
-            review.participant_assignment.status
-            != ParticipantAssignmentStatus.CONFIRMED
+            review.participant_assignment.status != ParticipantAssignmentStatus.CONFIRMED
         ):
             raise ValueError("完成正式标注前必须确认参与者身份；无法确认时不得猜测")
         if not review.annotations.finalized:
             raise ValueError("完成前必须定稿标注")
-        if len(review.sync.anchors) != 2 or assess_conditional_fixed_offset(
-            review.sync
-        ).quality != "verified":
+        if (
+            len(review.sync.anchors) != 2
+            or assess_conditional_fixed_offset(review.sync).quality != "verified"
+        ):
             raise ValueError("完成前必须验证同步")
         reference = self._build_training_export(manifest, review, expected_revision)
 
@@ -1945,9 +1828,7 @@ class AnnotationService:
 
         return self.reviews.mutate(manifest, expected_revision, mark_completed)
 
-    def active_export(
-        self, recording_id: str
-    ) -> tuple[TrainingExportReference, Any]:
+    def active_export(self, recording_id: str) -> tuple[TrainingExportReference, Any]:
         manifest = self.required_manifest(recording_id)
         review, _generation = self.reviews.load(manifest)
         reference = review.active_export
@@ -1959,8 +1840,7 @@ class AnnotationService:
         if (
             info.size_bytes != reference.size_bytes
             or info.metadata.get("sha256") != reference.sha256
-            or info.metadata.get("logical_content_sha256")
-            != reference.logical_content_sha256
+            or info.metadata.get("logical_content_sha256") != reference.logical_content_sha256
         ):
             raise ValueError("当前训练导出对象与 review.json 不一致")
         return reference, info
@@ -1992,9 +1872,7 @@ class AnnotationService:
             participants = {text(value) for value in sequences["participant_id"]}
             file_entry = {
                 "dataset_id": "cw12eu",
-                "object_key": (
-                    f"benchmark-datasets/team/cw12eu/{snapshot_id}/datasets/cw12eu.h5"
-                ),
+                "object_key": (f"benchmark-datasets/team/cw12eu/{snapshot_id}/datasets/cw12eu.h5"),
                 "filename": "cw12eu.h5",
                 "size_bytes": merged.stat().st_size,
                 "sha256": physical_sha256,
@@ -2078,9 +1956,7 @@ class AnnotationService:
             "current_object_key": current_key,
         }
 
-    def activate_benchmark_snapshot(
-        self, snapshot_id: str, actor_id: str
-    ) -> dict[str, Any]:
+    def activate_benchmark_snapshot(self, snapshot_id: str, actor_id: str) -> dict[str, Any]:
         """验证已暂存对象的身份后，以 CAS 切换团队 current。"""
 
         self._require_allowed_actor(actor_id)
@@ -2095,9 +1971,7 @@ class AnnotationService:
             raise ValueError("该训练快照没有 benchmark HDF5")
         manifest_key = str(benchmark.get("manifest_object_key") or "")
         manifest_bytes = self.store.read_bytes(manifest_key)
-        if hashlib.sha256(manifest_bytes).hexdigest() != benchmark.get(
-            "manifest_sha256"
-        ):
+        if hashlib.sha256(manifest_bytes).hexdigest() != benchmark.get("manifest_sha256"):
             raise ValueError("benchmark manifest SHA-256 不一致")
         manifest = json.loads(manifest_bytes)
         if (
@@ -2140,15 +2014,111 @@ class AnnotationService:
                 "handoff_contract_version",
             )
         ):
-            self.store.write_json(
-                current_key, current, if_generation_match=generation
-            )
+            self.store.write_json(current_key, current, if_generation_match=generation)
         logger.info(
             "激活 benchmark 团队快照 snapshot_id=%s actor_id=%s",
             snapshot_id,
             actor_id,
         )
         return self._snapshot_summary(payload)
+
+    @staticmethod
+    def _decoded(value: object) -> str:
+        return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+    def _snapshot_recording_draft(
+        self,
+        manifest: CaptureManifestV2,
+        review: ReviewDocument,
+        reference: TrainingExportReference,
+        aligned_path: Path,
+        participant_id: str,
+    ) -> dict[str, Any]:
+        """Freeze the exact sample, annotation and video mapping for one recording."""
+
+        video = self._artifact(manifest, "preview_mp4")
+        video_info = self.store.stat(video.object_key)
+        if (
+            video_info is None
+            or video_info.size_bytes != video.size_bytes
+            or video_info.metadata.get("sha256") != video.sha256
+        ):
+            raise ValueError(f"视频对象缺失或校验失败：{manifest.recording_id}")
+        with h5py.File(aligned_path, "r") as aligned:
+            sequences = np.asarray(aligned["sequences"])
+            annotations = np.asarray(aligned["annotations"])
+            if len(sequences) != 1:
+                raise ValueError(
+                    f"单条 CW12EU-T 导出必须恰好有一个 sequence：{manifest.recording_id}"
+                )
+            sample_count = len(aligned["samples"])
+            grid_origin_ns = int(aligned.attrs["grid_origin_recording_time_ns"])
+            annotation_rows = [
+                {
+                    "kind": self._decoded(row["kind"]),
+                    "start_sample": int(row["start_sample"]),
+                    "stop_sample": int(row["stop_sample"]),
+                    "code": self._decoded(row["code"]),
+                }
+                for row in annotations
+            ]
+        capture_path = self.cached_h5(manifest)
+        with h5py.File(capture_path, "r") as capture:
+            frame_recording_ns = np.asarray(
+                capture["video/frames/recording_time_ns"], dtype=np.int64
+            )
+            media_dataset = capture.get("video/frames/media_time_ns")
+            frame_media_ns = (
+                np.asarray(media_dataset, dtype=np.int64)
+                if media_dataset is not None
+                else frame_recording_ns.copy()
+            )
+        if not len(frame_recording_ns) or len(frame_recording_ns) != len(frame_media_ns):
+            raise ValueError(f"视频帧时间轴缺失或长度不一致：{manifest.recording_id}")
+        sample_zero_media_ns = int(
+            round(np.interp(grid_origin_ns, frame_recording_ns, frame_media_ns))
+        )
+        view = {
+            "schema_version": SNAPSHOT_VIEW_SCHEMA_VERSION,
+            "recording_id": manifest.recording_id,
+            "participant_id": participant_id,
+            "source_review_revision": reference.source_review_revision,
+            "taxonomy_id": review.annotations.taxonomy_id,
+            "taxonomy_version": review.annotations.taxonomy_version,
+            "sampling_rate_hz": reference.sampling_rate_hz,
+            "sample_count": sample_count,
+            "sample_zero_recording_time_ns": grid_origin_ns,
+            "sample_zero_video_media_time_ns": sample_zero_media_ns,
+            "video_frames": {
+                "recording_time_ns": frame_recording_ns.tolist(),
+                "media_time_ns": frame_media_ns.tolist(),
+            },
+            "annotations": annotation_rows,
+        }
+        return {
+            "participant_id": participant_id,
+            "recording_id": manifest.recording_id,
+            "collection_id": manifest.collection_id,
+            "captured_at_utc": manifest.captured_at_utc.isoformat()
+            if isinstance(manifest.captured_at_utc, datetime)
+            else str(manifest.captured_at_utc),
+            "source_review_revision": reference.source_review_revision,
+            "export_schema_version": reference.export_schema_version,
+            "hdf5_schema_version": reference.hdf5_schema_version,
+            "sampling_rate_hz": reference.sampling_rate_hz,
+            "aligned_object_key": reference.object_key,
+            "aligned_sha256": reference.sha256,
+            "logical_content_sha256": reference.logical_content_sha256,
+            "video": {
+                "object_key": video.object_key,
+                "filename": video.filename,
+                "size_bytes": video.size_bytes,
+                "sha256": video.sha256,
+                "content_type": video.content_type,
+            },
+            "_video_generation": video_info.generation,
+            "_view": view,
+        }
 
     def create_training_snapshot(self, actor_id: str) -> dict[str, Any]:
         """冻结点击时的已完成 prod 集合，并按内容幂等生成训练快照。"""
@@ -2174,12 +2144,7 @@ class AnnotationService:
                 ):
                     incompatible_recordings.append(manifest.recording_id)
                     continue
-                path = (
-                    self.cache_root
-                    / "release-inputs"
-                    / reference.sha256
-                    / reference.filename
-                )
+                path = self.cache_root / "release-inputs" / reference.sha256 / reference.filename
                 with self._cache_lock(reference.sha256):
                     if (
                         not path.is_file()
@@ -2195,33 +2160,24 @@ class AnnotationService:
                         raise ValueError("训练导出缓存的大小或 SHA-256 不匹配")
                 participant_id = review.participant_assignment.participant_id
                 if (
-                    review.participant_assignment.status
-                    != ParticipantAssignmentStatus.CONFIRMED
+                    review.participant_assignment.status != ParticipantAssignmentStatus.CONFIRMED
                     or participant_id is None
                 ):
-                    raise ValueError(
-                        f"已完成录制缺少已确认参与者身份：{manifest.recording_id}"
-                    )
+                    raise ValueError(f"已完成录制缺少已确认参与者身份：{manifest.recording_id}")
                 subject_id = self.settings.identity.subject_ids.get(participant_id)
                 if subject_id is None and manifest.schema_version != "3.0.0":
                     subject_id = f"cw12eu:{participant_id}"
                 if subject_id is None:
-                    raise ValueError(
-                        f"参与者缺少匿名 subject_id：{manifest.recording_id}"
-                    )
+                    raise ValueError(f"参与者缺少匿名 subject_id：{manifest.recording_id}")
                 files.append((subject_id, manifest.recording_id, path))
                 recordings.append(
-                    {
-                        "participant_id": subject_id,
-                        "recording_id": manifest.recording_id,
-                        "source_review_revision": reference.source_review_revision,
-                        "export_schema_version": reference.export_schema_version,
-                        "hdf5_schema_version": reference.hdf5_schema_version,
-                        "sampling_rate_hz": reference.sampling_rate_hz,
-                        "aligned_object_key": reference.object_key,
-                        "aligned_sha256": reference.sha256,
-                        "logical_content_sha256": reference.logical_content_sha256,
-                    }
+                    self._snapshot_recording_draft(
+                        manifest,
+                        review,
+                        reference,
+                        path,
+                        subject_id,
+                    )
                 )
             if incompatible_recordings:
                 raise ValueError(
@@ -2231,17 +2187,60 @@ class AnnotationService:
             if not files:
                 raise ValueError("没有已完成的正式录制可生成训练快照")
             recordings.sort(key=lambda item: (item["participant_id"], item["recording_id"]))
+            sample_offset = 0
+            views_by_recording: dict[str, dict[str, Any]] = {}
+            for sequence_index, recording in enumerate(recordings):
+                view = recording.pop("_view")
+                view["sequence_index"] = sequence_index
+                view["merged_sample_start"] = sample_offset
+                view["merged_sample_stop"] = sample_offset + int(view["sample_count"])
+                sample_offset = int(view["merged_sample_stop"])
+                view_bytes = canonical_json(view)
+                recording["view_sha256"] = hashlib.sha256(view_bytes).hexdigest()
+                views_by_recording[str(recording["recording_id"])] = view
             fingerprint = _training_snapshot_fingerprint(recordings)
             timestamp = datetime.now(UTC)
             snapshot_id = f"snapshot-{fingerprint[:24]}"
+            for recording in recordings:
+                view = views_by_recording[str(recording["recording_id"])]
+                source_video_key = str(recording["video"]["object_key"])
+                frozen_video_key = (
+                    f"training-snapshots/{snapshot_id}/media/{recording['recording_id']}.mp4"
+                )
+                try:
+                    frozen_video = self.store.copy(
+                        source_video_key,
+                        frozen_video_key,
+                        if_source_generation_match=int(recording.pop("_video_generation")),
+                    )
+                except ObjectConflictError as error:
+                    frozen_video = self.store.stat(frozen_video_key)
+                    if (
+                        frozen_video is None
+                        or frozen_video.size_bytes != int(recording["video"]["size_bytes"])
+                        or frozen_video.metadata.get("sha256") != recording["video"]["sha256"]
+                    ):
+                        raise ValueError(
+                            f"同一训练快照的冻结视频内容不一致：{recording['recording_id']}"
+                        ) from error
+                recording["video"]["object_key"] = frozen_video_key
+                view_key = (
+                    f"training-snapshots/{snapshot_id}/views/{recording['recording_id']}.view.json"
+                )
+                try:
+                    self.store.write_json(view_key, view, if_generation_match=0)
+                except ObjectConflictError as error:
+                    existing_view, _generation = self.store.read_json(view_key)
+                    if existing_view != view:
+                        raise ValueError(
+                            f"同一训练快照的 view.json 内容不一致：{recording['recording_id']}"
+                        ) from error
             manifest_key = f"training-snapshots/{snapshot_id}/manifest.json"
             try:
                 existing_payload, _existing_generation = self.store.read_json(manifest_key)
             except FileNotFoundError:
                 existing_payload = None
-            benchmark_manifest_key = (
-                f"benchmark-datasets/team/cw12eu/{snapshot_id}/manifest.json"
-            )
+            benchmark_manifest_key = f"benchmark-datasets/team/cw12eu/{snapshot_id}/manifest.json"
             try:
                 existing_benchmark, _benchmark_generation = self.store.read_json(
                     benchmark_manifest_key
@@ -2291,7 +2290,7 @@ class AnnotationService:
                 created_at_utc=created_at_utc,
             )
             payload: dict[str, Any] = {
-                "schema_version": "3.0.0",
+                "schema_version": TRAINING_SNAPSHOT_SCHEMA_VERSION,
                 "snapshot_id": snapshot_id,
                 "created_at_utc": created_at_utc,
                 "created_by": actor_id,
@@ -2317,9 +2316,7 @@ class AnnotationService:
                     or existing.get("recordings") != recordings
                     or existing.get("benchmark") != benchmark
                 ):
-                    raise ValueError(
-                        "同一训练快照 ID 的 manifest 内容不一致"
-                    ) from error
+                    raise ValueError("同一训练快照 ID 的 manifest 内容不一致") from error
                 payload = existing
                 created = False
             logger.info(
@@ -2353,9 +2350,7 @@ class AnnotationService:
         if isinstance(benchmark, dict):
             benchmark = dict(benchmark)
             try:
-                current, _generation = self.store.read_json(
-                    str(benchmark["current_object_key"])
-                )
+                current, _generation = self.store.read_json(str(benchmark["current_object_key"]))
             except FileNotFoundError:
                 current = None
             benchmark["is_current"] = bool(
@@ -2363,6 +2358,7 @@ class AnnotationService:
                 and current.get("snapshot_id") == benchmark.get("snapshot_id")
                 and current.get("manifest_sha256") == benchmark.get("manifest_sha256")
             )
+        delivery = self.client_delivery_status(str(payload["snapshot_id"]), payload=payload)
         return {
             "snapshot_id": str(payload["snapshot_id"]),
             "created_at_utc": payload.get("created_at_utc"),
@@ -2373,7 +2369,353 @@ class AnnotationService:
             "archive_size_bytes": int(payload.get("archive_size_bytes", 0)),
             "recording_count": len(payload.get("recordings", [])),
             "benchmark": benchmark,
+            "delivery": delivery,
         }
+
+    def _training_snapshot_payload(self, snapshot_id: str) -> dict[str, Any]:
+        self._validate_snapshot_id(snapshot_id)
+        try:
+            payload, _generation = self.store.read_json(
+                f"training-snapshots/{snapshot_id}/manifest.json"
+            )
+        except FileNotFoundError as error:
+            raise KeyError(snapshot_id) from error
+        return payload
+
+    def _snapshot_view(self, snapshot_id: str, recording: dict[str, Any]) -> dict[str, Any]:
+        key = f"training-snapshots/{snapshot_id}/views/{recording['recording_id']}.view.json"
+        try:
+            view, _generation = self.store.read_json(key)
+        except FileNotFoundError as error:
+            raise ValueError("该历史快照没有冻结的视频映射，不能生成客户交付包") from error
+        digest = hashlib.sha256(canonical_json(view)).hexdigest()
+        if digest != recording.get("view_sha256"):
+            raise ValueError(f"冻结 view.json 校验失败：{recording['recording_id']}")
+        return view
+
+    def client_delivery_status(
+        self, snapshot_id: str, *, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        payload = payload or self._training_snapshot_payload(snapshot_id)
+        eligible = payload.get("schema_version") == TRAINING_SNAPSHOT_SCHEMA_VERSION
+        if not eligible:
+            return {
+                "eligible": False,
+                "state": "ineligible",
+                "message": "历史快照缺少冻结的视频映射；请从当前已完成录制生成新快照",
+            }
+        sidecar_key = f"client-deliveries/{snapshot_id}/manifest.json"
+        try:
+            sidecar, _generation = self.store.read_json(sidecar_key)
+        except FileNotFoundError:
+            sidecar = None
+        if sidecar is not None:
+            artifact = self.store.stat(str(sidecar.get("archive_object_key") or ""))
+            if (
+                artifact is not None
+                and artifact.size_bytes == int(sidecar.get("archive_size_bytes", -1))
+                and artifact.metadata.get("sha256") == sidecar.get("archive_sha256")
+                and artifact.metadata.get("snapshot_id") == snapshot_id
+            ):
+                return {
+                    "eligible": True,
+                    "state": "ready",
+                    "archive_size_bytes": artifact.size_bytes,
+                    "archive_sha256": sidecar["archive_sha256"],
+                    "created_at_utc": sidecar.get("created_at_utc"),
+                    "created_by": sidecar.get("created_by"),
+                }
+        with self._delivery_job_lock:
+            job = dict(self._delivery_jobs.get(snapshot_id, {}))
+        return {
+            "eligible": True,
+            "state": job.get("state", "not_created"),
+            "message": job.get("message"),
+        }
+
+    def start_client_delivery(self, snapshot_id: str, actor_id: str) -> dict[str, Any]:
+        self._require_allowed_actor(actor_id)
+        payload = self._training_snapshot_payload(snapshot_id)
+        status = self.client_delivery_status(snapshot_id, payload=payload)
+        if not status["eligible"]:
+            raise ValueError(str(status["message"]))
+        if status["state"] == "ready":
+            return status
+        with self._delivery_job_lock:
+            current = self._delivery_jobs.get(snapshot_id)
+            if current and current.get("state") in {"queued", "running"}:
+                return self.client_delivery_status(snapshot_id, payload=payload)
+            self._delivery_jobs[snapshot_id] = {
+                "state": "queued",
+                "message": "等待后台生成",
+            }
+            thread = threading.Thread(
+                target=self._build_client_delivery,
+                args=(snapshot_id, actor_id),
+                name=f"client-delivery-{snapshot_id}",
+                daemon=True,
+            )
+            thread.start()
+        return self.client_delivery_status(snapshot_id, payload=payload)
+
+    def _cached_benchmark_h5(self, payload: dict[str, Any]) -> Path:
+        benchmark = payload.get("benchmark")
+        if not isinstance(benchmark, dict):
+            raise ValueError("训练快照缺少合并后的 cw12eu.h5")
+        digest = str(benchmark["hdf5_sha256"])
+        path = self.cache_root / "delivery-inputs" / digest / "cw12eu.h5"
+        with self._cache_lock(digest):
+            if not path.is_file() or sha256_file(path) != digest:
+                path.unlink(missing_ok=True)
+                self.store.download_file(str(benchmark["hdf5_object_key"]), path)
+            if (
+                path.stat().st_size != int(benchmark["hdf5_size_bytes"])
+                or sha256_file(path) != digest
+            ):
+                path.unlink(missing_ok=True)
+                raise ValueError("客户交付使用的 cw12eu.h5 校验失败")
+        return path
+
+    def _build_client_delivery(self, snapshot_id: str, actor_id: str) -> None:
+        try:
+            with self._delivery_job_lock:
+                self._delivery_jobs[snapshot_id] = {
+                    "state": "running",
+                    "message": "正在生成不可变 ZIP",
+                }
+            payload = self._training_snapshot_payload(snapshot_id)
+            dataset_path = self._cached_benchmark_h5(payload)
+            build_recordings: list[dict[str, Any]] = []
+            public_recordings: list[dict[str, Any]] = []
+            file_entries: list[dict[str, Any]] = [
+                {
+                    "path": "dataset/cw12eu.h5",
+                    "size_bytes": dataset_path.stat().st_size,
+                    "sha256": payload["benchmark"]["hdf5_sha256"],
+                    "role": "training_hdf5",
+                }
+            ]
+            predicted_size = dataset_path.stat().st_size
+            for recording in payload["recordings"]:
+                view = self._snapshot_view(snapshot_id, recording)
+                recording_id = str(recording["recording_id"])
+                video = dict(recording["video"])
+                video_path = f"recordings/{recording_id}/video.mp4"
+                view_path = f"recordings/{recording_id}/view.json"
+                view_bytes = canonical_json(view)
+                file_entries.extend(
+                    [
+                        {
+                            "path": video_path,
+                            "size_bytes": video["size_bytes"],
+                            "sha256": video["sha256"],
+                            "role": "review_video",
+                            "recording_id": recording_id,
+                        },
+                        {
+                            "path": view_path,
+                            "size_bytes": len(view_bytes),
+                            "sha256": hashlib.sha256(view_bytes).hexdigest(),
+                            "role": "video_sample_mapping",
+                            "recording_id": recording_id,
+                        },
+                    ]
+                )
+                predicted_size += int(video["size_bytes"]) + len(view_bytes)
+                build_recordings.append(
+                    {"recording_id": recording_id, "video": video, "view": view}
+                )
+                public_recordings.append(
+                    {
+                        "recording_id": recording_id,
+                        "participant_id": recording["participant_id"],
+                        "collection_id": recording.get("collection_id"),
+                        "sequence_index": view["sequence_index"],
+                        "video_path": video_path,
+                        "view_path": view_path,
+                    }
+                )
+            readme = delivery_readme(snapshot_id)
+            file_entries.append(
+                {
+                    "path": "README.md",
+                    "size_bytes": len(readme),
+                    "sha256": hashlib.sha256(readme).hexdigest(),
+                    "role": "documentation",
+                }
+            )
+            output = (
+                self.cache_root
+                / "client-deliveries"
+                / snapshot_id
+                / f".{snapshot_id}.{os.getpid()}.{threading.get_ident()}.zip"
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(output.parent).free
+            if free < predicted_size + 512 * 1024 * 1024:
+                raise ValueError("生成交付 ZIP 的本地磁盘空间不足")
+            package_manifest = {
+                "schema_version": CLIENT_DELIVERY_SCHEMA_VERSION,
+                "snapshot_id": snapshot_id,
+                "snapshot_content_fingerprint": payload["content_fingerprint"],
+                "created_at_utc": payload["created_at_utc"],
+                "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+                "sampling_rate_hz": 25.0,
+                "video_contains_identifiable_participants": True,
+                "recordings": public_recordings,
+                "files": file_entries,
+            }
+
+            def read_chunk(key: str, cursor: int) -> bytes:
+                return self.store.read_bytes(key, cursor, cursor + 4 * 1024 * 1024 - 1)
+
+            archive_sha256, archive_size = build_delivery_archive(
+                output,
+                package_manifest=package_manifest,
+                dataset_path=dataset_path,
+                recordings=build_recordings,
+                read_object_chunks=read_chunk,
+            )
+            archive_key = (
+                f"client-deliveries/{snapshot_id}/"
+                f"cw12eu-delivery-{snapshot_id}.zip"
+            )
+            metadata = {
+                "sha256": archive_sha256,
+                "snapshot_id": snapshot_id,
+                "content_fingerprint": str(payload["content_fingerprint"]),
+            }
+            try:
+                archive = self.store.put_file(
+                    output,
+                    archive_key,
+                    content_type="application/zip",
+                    metadata=metadata,
+                )
+            except ObjectConflictError as error:
+                archive = self.store.stat(archive_key)
+                if (
+                    archive is None
+                    or archive.size_bytes != archive_size
+                    or any(archive.metadata.get(key) != value for key, value in metadata.items())
+                ):
+                    raise ValueError("同一快照的客户交付 ZIP 内容不一致") from error
+            sidecar = {
+                **package_manifest,
+                "created_at_utc": payload["created_at_utc"],
+                "created_by": payload.get("created_by"),
+                "archive_object_key": archive_key,
+                "archive_size_bytes": archive.size_bytes,
+                "archive_sha256": archive_sha256,
+            }
+            try:
+                self.store.write_json(
+                    f"client-deliveries/{snapshot_id}/manifest.json",
+                    sidecar,
+                    if_generation_match=0,
+                )
+            except ObjectConflictError as error:
+                existing, _generation = self.store.read_json(
+                    f"client-deliveries/{snapshot_id}/manifest.json"
+                )
+                if existing != sidecar:
+                    raise ValueError("同一快照的客户交付清单内容不一致") from error
+            output.unlink(missing_ok=True)
+            with self._delivery_job_lock:
+                self._delivery_jobs[snapshot_id] = {"state": "ready", "message": None}
+        except Exception as error:
+            logger.exception("生成客户交付包失败 snapshot_id=%s", snapshot_id)
+            with self._delivery_job_lock:
+                self._delivery_jobs[snapshot_id] = {
+                    "state": "failed",
+                    "message": str(error),
+                }
+
+    def client_delivery_download(self, snapshot_id: str) -> tuple[dict[str, Any], Any]:
+        status = self.client_delivery_status(snapshot_id)
+        if status["state"] != "ready":
+            raise FileNotFoundError("客户交付包尚未生成")
+        sidecar, _generation = self.store.read_json(
+            f"client-deliveries/{snapshot_id}/manifest.json"
+        )
+        artifact = self.store.stat(str(sidecar["archive_object_key"]))
+        if artifact is None:
+            raise FileNotFoundError("客户交付 ZIP 缺失")
+        return sidecar, artifact
+
+    def snapshot_viewer(self, snapshot_id: str) -> dict[str, Any]:
+        payload = self._training_snapshot_payload(snapshot_id)
+        if payload.get("schema_version") != TRAINING_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError("该历史快照没有只读查看数据")
+        return {
+            "snapshot_id": snapshot_id,
+            "created_at_utc": payload.get("created_at_utc"),
+            "recordings": [
+                {
+                    "recording_id": item["recording_id"],
+                    "participant_id": item["participant_id"],
+                    "collection_id": item.get("collection_id"),
+                    "captured_at_utc": item.get("captured_at_utc"),
+                }
+                for item in payload["recordings"]
+            ],
+        }
+
+    def _viewer_recording(
+        self, snapshot_id: str, recording_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        payload = self._training_snapshot_payload(snapshot_id)
+        recording = next(
+            (
+                item
+                for item in payload.get("recordings", [])
+                if item.get("recording_id") == recording_id
+            ),
+            None,
+        )
+        if recording is None:
+            raise KeyError(recording_id)
+        return payload, recording, self._snapshot_view(snapshot_id, recording)
+
+    def snapshot_viewer_timeline(
+        self,
+        snapshot_id: str,
+        recording_id: str,
+        *,
+        max_points: int,
+    ) -> dict[str, Any]:
+        payload, _recording, view = self._viewer_recording(snapshot_id, recording_id)
+        merged = self._cached_benchmark_h5(payload)
+        start = int(view["merged_sample_start"])
+        stop = int(view["merged_sample_stop"])
+        media_zero_ns = int(view["sample_zero_video_media_time_ns"])
+        rate = float(view["sampling_rate_hz"])
+        with h5py.File(merged, "r") as handle:
+            values = np.asarray(handle["samples"][start:stop], dtype=np.float32)
+        indices = np.arange(stop - start, dtype=np.int64)
+        times = media_zero_ns + np.rint(indices * 1e9 / rate).astype(np.int64)
+        result = timeline_payload(times, values, max_points=max_points, unit="SI")
+        result["annotations"] = [
+            {
+                **item,
+                "start_s": media_zero_ns / 1e9 + int(item["start_sample"]) / rate,
+                "stop_s": media_zero_ns / 1e9 + int(item["stop_sample"]) / rate,
+            }
+            for item in view["annotations"]
+        ]
+        return result
+
+    def snapshot_viewer_video(self, snapshot_id: str, recording_id: str) -> Any:
+        _payload, recording, _view = self._viewer_recording(snapshot_id, recording_id)
+        video = recording["video"]
+        artifact = self.store.stat(str(video["object_key"]))
+        if (
+            artifact is None
+            or artifact.size_bytes != int(video["size_bytes"])
+            or artifact.metadata.get("sha256") != video["sha256"]
+        ):
+            raise ValueError("快照引用的视频对象缺失或校验失败")
+        return artifact
 
     def training_snapshot_download(self, snapshot_id: str) -> tuple[dict[str, Any], Any]:
         """返回训练快照清单和 TAR 对象信息。"""
@@ -2391,8 +2733,7 @@ class AnnotationService:
         if (
             archive.size_bytes != int(payload.get("archive_size_bytes", -1))
             or archive.metadata.get("sha256") != payload.get("archive_sha256")
-            or archive.metadata.get("content_fingerprint")
-            != payload.get("content_fingerprint")
+            or archive.metadata.get("content_fingerprint") != payload.get("content_fingerprint")
         ):
             raise ValueError("训练快照 TAR 与 manifest 不一致")
         return payload, archive
@@ -2448,6 +2789,13 @@ class AnnotationService:
             archive = self.store.stat(archive_key)
             if archive is not None:
                 self.store.delete(archive_key, if_generation_match=archive.generation)
+            for prefix in (
+                f"client-deliveries/{snapshot_id}/",
+                f"training-snapshots/{snapshot_id}/views/",
+                f"training-snapshots/{snapshot_id}/media/",
+            ):
+                for artifact in self.store.list(prefix):
+                    self.store.delete(artifact.key, if_generation_match=artifact.generation)
             # 先删大对象、最后删清单。若对象删除发生 generation 冲突，清单仍在，
             # 管理员可以用同一个确认文本安全重试；反向顺序会制造不可发现的孤儿 TAR。
             self.store.delete(manifest_key, if_generation_match=generation)
@@ -2488,9 +2836,7 @@ class AnnotationService:
                 f"reviews/{recording_id}/",
                 f"exports/{recording_id}/",
             )
-            objects = {
-                info.key: info for prefix in prefixes for info in self.store.list(prefix)
-            }
+            objects = {info.key: info for prefix in prefixes for info in self.store.list(prefix)}
             deleted_objects = 0
             for info in sorted(
                 objects.values(),
@@ -2628,9 +2974,7 @@ class AnnotationService:
             orphan_exports += 1
             candidate_objects += 1
             candidate_bytes += info.size_bytes
-            if not dry_run and self.store.delete(
-                info.key, if_generation_match=info.generation
-            ):
+            if not dry_run and self.store.delete(info.key, if_generation_match=info.generation):
                 deleted_objects += 1
 
         for info in self.store.list("index-receipts/"):
@@ -2646,9 +2990,7 @@ class AnnotationService:
             orphan_receipts += 1
             candidate_objects += 1
             candidate_bytes += info.size_bytes
-            if not dry_run and self.store.delete(
-                info.key, if_generation_match=info.generation
-            ):
+            if not dry_run and self.store.delete(info.key, if_generation_match=info.generation):
                 deleted_objects += 1
 
         for info in self.store.list("_upload_sessions/"):
@@ -2657,9 +2999,7 @@ class AnnotationService:
             orphan_upload_sessions += 1
             candidate_objects += 1
             candidate_bytes += info.size_bytes
-            if not dry_run and self.store.delete(
-                info.key, if_generation_match=info.generation
-            ):
+            if not dry_run and self.store.delete(info.key, if_generation_match=info.generation):
                 deleted_objects += 1
         result = {
             "dry_run": dry_run,
