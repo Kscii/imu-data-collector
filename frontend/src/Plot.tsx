@@ -2,8 +2,8 @@ import { useEffect, useRef } from "react";
 import uPlot from "uplot";
 import { tr } from "./i18n";
 
-const colors = ["#ef4444", "#22c55e", "#3b82f6", "#f59e0b", "#a855f7", "#06b6d4"];
-const labels = ["ax", "ay", "az", "gx", "gy", "gz"];
+const defaultColors = ["#ef4444", "#22c55e", "#3b82f6", "#f59e0b", "#a855f7", "#06b6d4"];
+const defaultLabels = ["ax", "ay", "az", "gx", "gy", "gz"];
 const noMarkers: PlotMarker[] = [];
 const noRegions: PlotRegion[] = [];
 
@@ -17,6 +17,9 @@ type Props = {
   controlledCursor?: boolean;
   showMarkerKey?: boolean;
   height?: number;
+  seriesLabels?: string[];
+  seriesColors?: string[];
+  showReadout?: boolean;
   onSelectTime?: (time: number) => void;
   onSelectLabel?: (key: string) => void;
 };
@@ -57,8 +60,8 @@ function nearestIndex(values: number[], target: number) {
   return target - values[left - 1] <= values[left] - target ? left - 1 : left;
 }
 
-function alignedData(time: number[], values: number[][]): uPlot.AlignedData {
-  const columns = Array.from({ length: 6 }, (_, axis) =>
+function alignedData(time: number[], values: number[][], axisCount: number): uPlot.AlignedData {
+  const columns = Array.from({ length: axisCount }, (_, axis) =>
     values.map((row) => row[axis] ?? 0)
   );
   return [time, ...columns];
@@ -73,8 +76,8 @@ function fitTimeRange(plot: uPlot, time: number[]) {
   plot.setScale("x", { min: first - padding, max: last + padding });
 }
 
-function fitValueRange(plot: uPlot, values: number[][]) {
-  const finite = values.flatMap((row) => row.slice(0, 6)).filter(Number.isFinite);
+function fitValueRange(plot: uPlot, values: number[][], axisCount: number) {
+  const finite = values.flatMap((row) => row.slice(0, axisCount)).filter(Number.isFinite);
   if (!finite.length) return;
   const minimum = Math.min(...finite);
   const maximum = Math.max(...finite);
@@ -89,7 +92,7 @@ function formatPlotValue(value: number | undefined) {
   return value.toFixed(3).replace(/\.000$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
 
-export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, onSelectTime, onSelectLabel }: Props) {
+export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, seriesLabels = defaultLabels, seriesColors = defaultColors, showReadout = true, onSelectTime, onSelectLabel }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const onSelectTimeRef = useRef(onSelectTime);
@@ -98,12 +101,14 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
   const markersRef = useRef(markers);
   const regionsRef = useRef(regions);
   const cursorTimeRef = useRef(cursorTime);
+  const colorsRef = useRef(seriesColors);
 
   timeRef.current = time;
   valuesRef.current = values;
   markersRef.current = markers;
   regionsRef.current = regions;
   cursorTimeRef.current = cursorTime;
+  colorsRef.current = seriesColors;
 
   useEffect(() => {
     onSelectTimeRef.current = onSelectTime;
@@ -116,7 +121,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
       {
         width,
         height,
-        cursor: { show: !controlledCursor, drag: { x: true, y: false } },
+        cursor: { show: !controlledCursor, drag: { x: false, y: false } },
         legend: { show: !controlledCursor },
         scales: { x: { time: false } },
         hooks: {
@@ -159,7 +164,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
                   row.slice(0, 6).forEach((value, axis) => {
                     const y = u.valToPos(value, "y", true);
                     ctx.beginPath();
-                    ctx.fillStyle = colors[axis];
+                    ctx.fillStyle = colorsRef.current[axis] ?? defaultColors[axis % defaultColors.length];
                     ctx.strokeStyle = "#f8fafc";
                     ctx.lineWidth = 1.25 * pixelRatio;
                     ctx.arc(x, y, 4 * pixelRatio, 0, Math.PI * 2);
@@ -204,19 +209,19 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
         ],
         series: [
           { label: "time" },
-          ...labels.map((label, index) => ({
+          ...seriesLabels.map((label, index) => ({
             label,
-            stroke: colors[index],
+            stroke: seriesColors[index] ?? defaultColors[index % defaultColors.length],
             width: 1.4,
             points: { show: false }
           }))
         ]
       },
-      alignedData(timeRef.current, valuesRef.current),
+      alignedData(timeRef.current, valuesRef.current, seriesLabels.length),
       host.current
     );
     fitTimeRange(plot.current, timeRef.current);
-    fitValueRange(plot.current, valuesRef.current);
+    fitValueRange(plot.current, valuesRef.current, seriesLabels.length);
     const observer = new ResizeObserver(() => {
       if (host.current && plot.current) {
         plot.current.setSize({ width: host.current.clientWidth, height });
@@ -250,18 +255,18 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
       plot.current?.destroy();
       plot.current = null;
     };
-  }, [controlledCursor, height]);
+  }, [controlledCursor, height, seriesLabels.join("|"), seriesColors.join("|")]);
 
   useEffect(() => {
     if (!plot.current) return;
     plot.current.batch(() => {
-      plot.current?.setData(alignedData(time, values), true);
+      plot.current?.setData(alignedData(time, values, seriesLabels.length), true);
       if (plot.current) {
         fitTimeRange(plot.current, time);
-        fitValueRange(plot.current, values);
+        fitValueRange(plot.current, values, seriesLabels.length);
       }
     });
-  }, [time, values]);
+  }, [time, values, seriesLabels.length]);
 
   useEffect(() => {
     if (!plot.current || cursorTime === undefined || !time.length) return;
@@ -280,7 +285,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
   return (
     <div className="plot-with-markers">
       <div className="plot" ref={host} />
-      {controlledCursor && selectedTime !== undefined && <div className="plot-controlled-readout"><span><strong>time</strong>{selectedTime.toFixed(3)}</span>{labels.map((label, index) => <span key={label}><strong style={{ color: colors[index] }}>{label}</strong>{formatPlotValue(selectedValues[index])}</span>)}</div>}
+      {controlledCursor && showReadout && selectedTime !== undefined && <div className="plot-controlled-readout"><span><strong>time</strong>{selectedTime.toFixed(3)}</span>{seriesLabels.map((label, index) => <span key={label}><strong style={{ color: seriesColors[index] ?? defaultColors[index % defaultColors.length] }}>{label}</strong>{formatPlotValue(selectedValues[index])}</span>)}</div>}
       {selectionLabels.length > 0 && <div className="plot-selection-context"><strong>{tr("标注", "Annotation")}</strong>{selectionLabels.map((item) => <button type="button" key={item.key} style={item.color ? { borderColor: item.color } : undefined} onClick={() => onSelectLabel?.(item.key)}>{item.label}</button>)}</div>}
       {showMarkerKey && markers.length > 0 && <div className="plot-marker-key">{markers.map((marker) => <span key={`${marker.label}-${marker.time}`}><i style={{ background: marker.color }} />{marker.label} · {marker.time.toFixed(3)} s</span>)}</div>}
     </div>

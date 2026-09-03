@@ -38,8 +38,9 @@ sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
 - `test`：流程联调，可查看视频、曲线并下载原始 H5/review；不能生成训练数据；
 - `prod`：通过全部门禁后才能完成并进入训练快照；
 - 校准证据：只读展示设备坐标和物理尺度，不进入动作标注队列；
-- 视频：标注与质量证据，不进入训练快照，不提交 Git/Git LFS；
-- 训练快照：只包含对齐后的 25 Hz IMU H5，不包含视频；另发布合并 HDF5 给 benchmark。
+- 视频：标注与质量证据，不进入训练 HDF5，也不提交 Git/Git LFS；
+- 训练快照：训练 TAR 和 benchmark HDF5 只包含 25 Hz IMU；快照另外冻结视频引用和时间映射，
+  仅在已授权的客户交付 ZIP 与团队只读查看器中使用原始可识别视频。
 
 benchmark 组员只需读取同一 bucket 中已启用的 `benchmark-datasets/` managed folder。不要为了
 简化权限而授予整个 bucket 的对象查看权，否则会同时暴露原始视频、review 和身份相关元数据。

@@ -189,9 +189,7 @@ def create_annotation_app(
     def dataset_catalog_summary() -> dict[str, Any]:
         return dataset_catalog.summary()
 
-    @app.get(
-        "/api/v1/dataset-catalog/{kind}/{snapshot_id}/manifest/download"
-    )
+    @app.get("/api/v1/dataset-catalog/{kind}/{snapshot_id}/manifest/download")
     def dataset_catalog_manifest_download(
         kind: Literal["base", "team"], snapshot_id: str
     ) -> Response:
@@ -210,9 +208,7 @@ def create_annotation_app(
             },
         )
 
-    @app.get(
-        "/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download"
-    )
+    @app.get("/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download")
     def dataset_catalog_h5_download(
         kind: Literal["base", "team"],
         snapshot_id: str,
@@ -220,9 +216,7 @@ def create_annotation_app(
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> StreamingResponse:
         try:
-            entry, info = dataset_catalog.dataset_download(
-                kind, snapshot_id, dataset_id
-            )
+            entry, info = dataset_catalog.dataset_download(kind, snapshot_id, dataset_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该数据文件") from error
         except ValueError as error:
@@ -420,9 +414,7 @@ def create_annotation_app(
     ) -> dict[str, Any]:
         actor = current_actor(request)
         try:
-            return service.delete_taxonomy_activity(
-                code, expected_version, actor.unikey
-            )
+            return service.delete_taxonomy_activity(code, expected_version, actor.unikey)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该活动标签") from error
         except ObjectConflictError as error:
@@ -479,9 +471,7 @@ def create_annotation_app(
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> StreamingResponse:
         try:
-            artifact, info = service.calibration_evidence_artifact(
-                recording_id, "preview_mp4"
-            )
+            artifact, info = service.calibration_evidence_artifact(recording_id, "preview_mp4")
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该校准证据") from error
         except ValueError as error:
@@ -501,9 +491,7 @@ def create_annotation_app(
             cursor = start
             while cursor <= end:
                 chunk_end = min(end, cursor + 1024 * 1024 - 1)
-                yield object_store.read_bytes(
-                    str(artifact["object_key"]), cursor, chunk_end
-                )
+                yield object_store.read_bytes(str(artifact["object_key"]), cursor, chunk_end)
                 cursor = chunk_end + 1
 
         headers = {
@@ -529,9 +517,7 @@ def create_annotation_app(
     @app.get("/api/v1/calibration-evidence/{recording_id}/capture-h5/download")
     def calibration_evidence_h5(recording_id: str) -> StreamingResponse:
         try:
-            artifact, info = service.calibration_evidence_artifact(
-                recording_id, "capture_h5"
-            )
+            artifact, info = service.calibration_evidence_artifact(recording_id, "capture_h5")
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该校准证据") from error
         except ValueError as error:
@@ -541,18 +527,14 @@ def create_annotation_app(
             cursor = 0
             while cursor < info.size_bytes:
                 chunk_end = min(info.size_bytes - 1, cursor + 1024 * 1024 - 1)
-                yield object_store.read_bytes(
-                    str(artifact["object_key"]), cursor, chunk_end
-                )
+                yield object_store.read_bytes(str(artifact["object_key"]), cursor, chunk_end)
                 cursor = chunk_end + 1
 
         return StreamingResponse(
             stream(),
             media_type="application/x-hdf5",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{recording_id}.capture.h5"'
-                ),
+                "Content-Disposition": (f'attachment; filename="{recording_id}.capture.h5"'),
                 "Content-Length": str(info.size_bytes),
                 "Cache-Control": "private, no-store",
             },
@@ -561,7 +543,6 @@ def create_annotation_app(
     @app.get("/api/v1/recordings/{recording_id}")
     def recording(recording_id: str) -> dict[str, Any]:
         return service.recording_summary(required(recording_id))
-
 
     @app.get("/api/v1/recordings/{recording_id}/status")
     def status(recording_id: str) -> dict[str, Any]:
@@ -581,9 +562,7 @@ def create_annotation_app(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             media_type="application/json; charset=utf-8",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{recording_id}.review.json"'
-                ),
+                "Content-Disposition": (f'attachment; filename="{recording_id}.review.json"'),
                 "Cache-Control": "private, no-store",
             },
         )
@@ -604,9 +583,7 @@ def create_annotation_app(
             stream(),
             media_type="application/x-hdf5",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{recording_id}.capture.h5"'
-                ),
+                "Content-Disposition": (f'attachment; filename="{recording_id}.capture.h5"'),
                 "Content-Length": str(artifact.size_bytes),
                 "Cache-Control": "private, no-store",
             },
@@ -660,9 +637,7 @@ def create_annotation_app(
                 body.document,
                 current_actor(request).unikey,
                 body.expected_revision,
-            ).model_dump(
-                mode="json"
-            )
+            ).model_dump(mode="json")
         except ReviewConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
@@ -736,9 +711,7 @@ def create_annotation_app(
                 recording_id,
                 body,
                 current_actor(request).unikey,
-            ).model_dump(
-                mode="json"
-            )
+            ).model_dump(mode="json")
         except ReviewConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
@@ -868,9 +841,7 @@ def create_annotation_app(
             "Accept-Ranges": "bytes",
             "Content-Length": str(end - start + 1),
             "Cache-Control": "private, no-store",
-            "Content-Disposition": (
-                f'attachment; filename="cw12eu_{payload["snapshot_id"]}.tar"'
-            ),
+            "Content-Disposition": (f'attachment; filename="cw12eu_{payload["snapshot_id"]}.tar"'),
         }
         if status_code == 206:
             headers["Content-Range"] = f"bytes {start}-{end}/{archive.size_bytes}"
@@ -882,13 +853,9 @@ def create_annotation_app(
         )
 
     @app.post("/api/v1/training-snapshots/{snapshot_id}/activate-benchmark")
-    def activate_benchmark_snapshot(
-        snapshot_id: str, request: Request
-    ) -> dict[str, Any]:
+    def activate_benchmark_snapshot(snapshot_id: str, request: Request) -> dict[str, Any]:
         try:
-            return service.activate_benchmark_snapshot(
-                snapshot_id, current_actor(request).unikey
-            )
+            return service.activate_benchmark_snapshot(snapshot_id, current_actor(request).unikey)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except ObjectConflictError as error:
@@ -921,12 +888,141 @@ def create_annotation_app(
             stream(),
             media_type="application/x-hdf5",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="cw12eu_{snapshot_id}.h5"'
-                ),
+                "Content-Disposition": (f'attachment; filename="cw12eu_{snapshot_id}.h5"'),
                 "Content-Length": str(artifact.size_bytes),
                 "Cache-Control": "private, no-store",
             },
+        )
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/delivery")
+    def client_delivery_status(snapshot_id: str) -> dict[str, Any]:
+        try:
+            return service.client_delivery_status(snapshot_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+
+    @app.post("/api/v1/training-snapshots/{snapshot_id}/delivery")
+    def create_client_delivery(snapshot_id: str, request: Request) -> dict[str, Any]:
+        try:
+            return service.start_client_delivery(snapshot_id, current_actor(request).unikey)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/delivery/download")
+    def client_delivery_download(
+        snapshot_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> StreamingResponse:
+        try:
+            payload, artifact = service.client_delivery_download(snapshot_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        start = 0
+        end = artifact.size_bytes - 1
+        status_code = 200
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
+            if not match:
+                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else end
+            if start > end or end >= artifact.size_bytes:
+                raise HTTPException(status_code=416, detail="客户交付 ZIP Range 越界")
+            status_code = 206
+
+        def stream():
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(artifact.key, cursor, chunk_end)
+                cursor = chunk_end + 1
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": (
+                f'attachment; filename="cw12eu-delivery-{payload["snapshot_id"]}.zip"'
+            ),
+        }
+        if status_code == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{artifact.size_bytes}"
+        return StreamingResponse(
+            stream(),
+            status_code=status_code,
+            media_type="application/zip",
+            headers=headers,
+        )
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/viewer")
+    def snapshot_viewer(snapshot_id: str) -> dict[str, Any]:
+        try:
+            return service.snapshot_viewer(snapshot_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该训练快照") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/viewer/{recording_id}/timeline")
+    def snapshot_viewer_timeline(
+        snapshot_id: str,
+        recording_id: str,
+        max_points: Annotated[int, Query(ge=100, le=20_000)] = 5_000,
+    ) -> dict[str, Any]:
+        try:
+            return service.snapshot_viewer_timeline(
+                snapshot_id, recording_id, max_points=max_points
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该快照录制") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/viewer/{recording_id}/video")
+    def snapshot_viewer_video(
+        snapshot_id: str,
+        recording_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> StreamingResponse:
+        try:
+            artifact = service.snapshot_viewer_video(snapshot_id, recording_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该快照录制") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        start = 0
+        end = artifact.size_bytes - 1
+        status_code = 200
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
+            if not match:
+                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else end
+            if start > end or end >= artifact.size_bytes:
+                raise HTTPException(status_code=416, detail="视频 Range 越界")
+            status_code = 206
+
+        def stream():
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + 1024 * 1024 - 1)
+                yield object_store.read_bytes(artifact.key, cursor, chunk_end)
+                cursor = chunk_end + 1
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+            "Cache-Control": "private, no-store",
+        }
+        if status_code == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{artifact.size_bytes}"
+        return StreamingResponse(
+            stream(), status_code=status_code, media_type="video/mp4", headers=headers
         )
 
     @app.delete("/api/v1/training-snapshots/{snapshot_id}")

@@ -215,13 +215,40 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .download-grid { display: grid; gap: 7px; margin-top: 12px; }
 .download-grid .button-link { text-align: center; }
 .recording-drawer-backdrop { position: fixed; z-index: 40; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 0; background: rgba(2, 6, 23, .64); }
-.recording-drawer { position: fixed; z-index: 41; inset: 0 auto 0 0; width: 380px; padding: 16px; display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); gap: 10px; background: #0c1728; border-right: 1px solid #334155; box-shadow: 22px 0 60px rgba(0,0,0,.45); }
+.recording-drawer { position: fixed; z-index: 41; inset: 0 auto 0 0; width: clamp(360px, 32vw, 460px); max-width: 100dvw; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: #0c1728; border-right: 1px solid #334155; box-shadow: 22px 0 60px rgba(0,0,0,.45); }
+.recording-drawer-controls { display: grid; gap: 10px; padding: 16px; border-bottom: 1px solid #263753; background: #0c1728; }
 .recording-drawer-header { display: flex; align-items: center; justify-content: space-between; }
-.recording-drawer input { width: 100%; min-width: 0; }
-.recording-drawer-list { min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 7px; }
-.recording-drawer-list button { min-width: 0; display: grid; gap: 4px; text-align: left; }
+.recording-drawer input, .recording-drawer select { width: 100%; min-width: 0; }
+.recording-drawer-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.recording-drawer-filters select:last-child { grid-column: 1 / -1; }
+.recording-drawer-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; display: grid; align-content: start; gap: 8px; padding: 10px 12px 16px; }
+.recording-drawer-list button { width: 100%; min-width: 0; display: grid; gap: 4px; text-align: left; }
 .recording-drawer-list button span { color: #8193ac; font-size: 10px; overflow-wrap: anywhere; user-select: text; }
 .recording-drawer-list button.selected { border-color: #3b82f6; background: #17305b; }
+.recording-queue { border: 1px solid #263753; border-radius: 8px; overflow: hidden; }
+.recording-queue > summary { padding: 9px 10px; display: flex; justify-content: space-between; cursor: pointer; color: #dbeafe; font-size: 12px; font-weight: 750; }
+.recording-queue > summary span { color: #7dd3fc; }
+.recording-queue > div { padding: 0 6px 6px; display: grid; gap: 6px; }
+.recording-queue-empty { padding: 7px; font-size: 11px; }
+.snapshot-viewer { display: grid; gap: 12px; }
+.snapshot-viewer > .save-row { margin: 0; }
+.snapshot-viewer-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; min-height: 0; }
+.snapshot-viewer-recordings { display: grid; align-content: start; gap: 7px; max-height: calc(100vh - 190px); overflow-y: auto; }
+.snapshot-viewer-recordings button { display: grid; gap: 3px; text-align: left; }
+.snapshot-viewer-recordings button span { color: #8193ac; font-size: 10px; overflow-wrap: anywhere; }
+.snapshot-viewer-recordings button.selected { border-color: #3b82f6; background: #17305b; }
+.snapshot-viewer-content { min-width: 0; display: grid; gap: 12px; }
+.snapshot-viewer-video { display: grid; gap: 7px; }
+.snapshot-viewer-video video { width: 100%; max-height: 43vh; background: #000; }
+.snapshot-viewer-video > strong { text-align: right; font-variant-numeric: tabular-nums; }
+.snapshot-viewer-timeline { min-width: 0; overflow: hidden; }
+@media (max-width: 900px) {
+  .snapshot-viewer-layout { grid-template-columns: 1fr; }
+  .snapshot-viewer-recordings { max-height: 230px; }
+}
+@media (max-width: 520px) {
+  .recording-drawer { width: 100dvw; }
+}
 .task-gate { display: flex; justify-content: space-between; gap: 20px; align-items: center; border-color: #3b82f6; }
 .task-gate-ready { border-color: #15803d; background: #10291d; }
 .task-gate .save-row { margin-top: 0; }
