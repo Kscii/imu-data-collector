@@ -2503,6 +2503,7 @@ class AnnotationService:
         return path
 
     def _build_client_delivery(self, snapshot_id: str, actor_id: str) -> None:
+        output: Path | None = None
         try:
             with self._delivery_job_lock:
                 self._delivery_jobs[snapshot_id] = {
@@ -2645,8 +2646,13 @@ class AnnotationService:
             )
             output.parent.mkdir(parents=True, exist_ok=True)
             free = shutil.disk_usage(output.parent).free
-            if free < predicted_size + 512 * 1024 * 1024:
-                raise ValueError("生成交付 ZIP 的本地磁盘空间不足")
+            required = predicted_size + 512 * 1024 * 1024
+            if free < required:
+                raise ValueError(
+                    "生成交付 ZIP 的本地磁盘空间不足："
+                    f"需要至少 {required / 1024**3:.2f} GiB，"
+                    f"当前可用 {free / 1024**3:.2f} GiB"
+                )
             package_manifest = {
                 "schema_version": CLIENT_DELIVERY_SCHEMA_VERSION,
                 "contract_version": CLIENT_DELIVERY_CONTRACT_VERSION,
@@ -2744,7 +2750,6 @@ class AnnotationService:
                     )
                 ):
                     raise ValueError("同一快照的客户交付清单内容不一致") from error
-            output.unlink(missing_ok=True)
             with self._delivery_job_lock:
                 self._delivery_jobs[snapshot_id] = {"state": "ready", "message": None}
         except Exception as error:
@@ -2754,6 +2759,9 @@ class AnnotationService:
                     "state": "failed",
                     "message": str(error),
                 }
+        finally:
+            if output is not None:
+                output.unlink(missing_ok=True)
 
     def client_delivery_download(self, snapshot_id: str) -> tuple[dict[str, Any], Any]:
         status = self.client_delivery_status(snapshot_id)

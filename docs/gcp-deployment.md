@@ -91,10 +91,20 @@ GCP_WIF_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPool
 GCP_DEPLOY_SERVICE_ACCOUNT=imu-github-deployer@project-51b589c7-8d5e-4e78-a10.iam.gserviceaccount.com
 GCP_ZONE=australia-southeast1-a
 GCP_VM=soft3888-label
+GCP_ANNOTATION_BACKEND=imu-annotation-backend
 ```
 
 WIF provider 同时限制不可变 repository ID `1347062318` 和 `refs/heads/main`。部署身份具有
 IAP tunnel、OS Admin Login，并仅能 impersonate VM 运行时服务账号；不保存 GCP JSON key。
+部署身份只有 Compute Viewer，因此 Action 会验证、但不会自行修改负载均衡。首次配置大文件
+下载或基础设施被重建后，由项目管理员运行：
+
+```bash
+./scripts/deploy/configure-large-downloads "CONFIGURE LARGE DOWNLOADS"
+```
+
+该命令把 `imu-annotation-backend` 的 `timeoutSec` 固定为 3600 秒。生产部署会检查该值，避免
+大文件下载重新退化为 Google HTTPS Load Balancer 的 30 秒默认超时。
 
 ## VM 原子部署
 

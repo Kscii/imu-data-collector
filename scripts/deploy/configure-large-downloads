@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 || $1 != "CONFIGURE LARGE DOWNLOADS" ]]; then
+  echo '用法：configure-large-downloads "CONFIGURE LARGE DOWNLOADS"' >&2
+  exit 2
+fi
+
+project=${GCP_PROJECT_ID:-project-51b589c7-8d5e-4e78-a10}
+backend=${ANNOTATION_BACKEND_SERVICE:-imu-annotation-backend}
+target_timeout=3600
+current=$(gcloud compute backend-services describe "${backend}" \
+  --project "${project}" --global --format='value(timeoutSec)')
+
+if [[ ${current} == "${target_timeout}" ]]; then
+  echo "大文件下载超时已经是 ${target_timeout} 秒：${backend}"
+  exit 0
+fi
+
+gcloud compute backend-services update "${backend}" \
+  --project "${project}" --global --timeout "${target_timeout}"
+
+actual=$(gcloud compute backend-services describe "${backend}" \
+  --project "${project}" --global --format='value(timeoutSec)')
+[[ ${actual} == "${target_timeout}" ]] || {
+  echo "负载均衡超时更新后校验失败：${actual}" >&2
+  exit 1
+}
+echo "大文件下载超时已从 ${current} 秒更新为 ${actual} 秒：${backend}"
