@@ -75,6 +75,17 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v3
         with:
           version: ">= 416.0.0"
+      - name: 验证大文件下载基础设施
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          BACKEND_SERVICE: ${{ vars.GCP_ANNOTATION_BACKEND || 'imu-annotation-backend' }}
+        run: |
+          timeout="$(gcloud compute backend-services describe "${BACKEND_SERVICE}" \
+            --project "${PROJECT_ID}" --global --format='value(timeoutSec)')"
+          if [[ "${timeout}" != 3600 ]]; then
+            echo "${BACKEND_SERVICE} timeoutSec=${timeout}; run scripts/deploy/configure-large-downloads first" >&2
+            exit 1
+          fi
       - name: 通过 IAP 上传并原子部署
         env:
           BUNDLE: ${{ steps.bundle.outputs.path }}

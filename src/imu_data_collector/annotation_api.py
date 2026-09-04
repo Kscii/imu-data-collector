@@ -27,6 +27,7 @@ from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.dataset_catalog import DatasetCatalog
 from imu_data_collector.host import resource_path
+from imu_data_collector.http_download import object_download_response
 from imu_data_collector.model_catalog import ModelCatalog
 from imu_data_collector.models import (
     ActivityTaxonomyCreateRequest,
@@ -208,13 +209,17 @@ def create_annotation_app(
             },
         )
 
-    @app.get("/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download")
+    @app.api_route(
+        "/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download",
+        methods=["GET", "HEAD"],
+    )
     def dataset_catalog_h5_download(
         kind: Literal["base", "team"],
         snapshot_id: str,
         dataset_id: str,
+        request: Request,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
-    ) -> StreamingResponse:
+    ) -> Response:
         try:
             entry, info = dataset_catalog.dataset_download(kind, snapshot_id, dataset_id)
         except KeyError as error:
@@ -222,38 +227,16 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-        start, end, status_code = 0, info.size_bytes - 1, 200
-        if range_header:
-            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
-            if not match:
-                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
-            start = int(match.group(1))
-            end = int(match.group(2)) if match.group(2) else end
-            if start > end or end >= info.size_bytes:
-                raise HTTPException(status_code=416, detail="H5 Range 越界")
-            status_code = 206
-
-        def stream():
-            cursor = start
-            while cursor <= end:
-                chunk_end = min(end, cursor + 1024 * 1024 - 1)
-                yield object_store.read_bytes(info.key, cursor, chunk_end)
-                cursor = chunk_end + 1
-
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(end - start + 1),
-            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
-            "Cache-Control": "private, max-age=300",
-            "X-Content-SHA256": str(entry["sha256"]),
-        }
-        if status_code == 206:
-            headers["Content-Range"] = f"bytes {start}-{end}/{info.size_bytes}"
-        return StreamingResponse(
-            stream(),
-            status_code=status_code,
+        return object_download_response(
+            store=object_store,
+            info=info,
+            filename=str(entry["filename"]),
             media_type="application/x-hdf5",
-            headers=headers,
+            range_header=range_header,
+            sha256=str(entry["sha256"]),
+            cache_control="private, max-age=300",
+            head=request.method == "HEAD",
+            label="H5",
         )
 
     @app.get("/api/v1/model-catalog")
@@ -806,50 +789,30 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/training-snapshots/{snapshot_id}/download")
+    @app.api_route(
+        "/api/v1/training-snapshots/{snapshot_id}/download",
+        methods=["GET", "HEAD"],
+    )
     def training_snapshot_download(
         snapshot_id: str,
+        request: Request,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
-    ) -> StreamingResponse:
+    ) -> Response:
         try:
             payload, archive = service.training_snapshot_download(snapshot_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        start = 0
-        end = archive.size_bytes - 1
-        status_code = 200
-        if range_header:
-            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
-            if not match:
-                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
-            start = int(match.group(1))
-            end = int(match.group(2)) if match.group(2) else end
-            if start > end or end >= archive.size_bytes:
-                raise HTTPException(status_code=416, detail="训练快照 Range 越界")
-            status_code = 206
-
-        def stream():
-            cursor = start
-            while cursor <= end:
-                chunk_end = min(end, cursor + 1024 * 1024 - 1)
-                yield object_store.read_bytes(archive.key, cursor, chunk_end)
-                cursor = chunk_end + 1
-
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(end - start + 1),
-            "Cache-Control": "private, no-store",
-            "Content-Disposition": (f'attachment; filename="cw12eu_{payload["snapshot_id"]}.tar"'),
-        }
-        if status_code == 206:
-            headers["Content-Range"] = f"bytes {start}-{end}/{archive.size_bytes}"
-        return StreamingResponse(
-            stream(),
-            status_code=status_code,
+        return object_download_response(
+            store=object_store,
+            info=archive,
+            filename=f'cw12eu_{payload["snapshot_id"]}.tar',
             media_type="application/x-tar",
-            headers=headers,
+            range_header=range_header,
+            sha256=str(payload["archive_sha256"]),
+            head=request.method == "HEAD",
+            label="训练快照",
         )
 
     @app.post("/api/v1/training-snapshots/{snapshot_id}/activate-benchmark")
@@ -866,10 +829,17 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download")
-    def benchmark_snapshot_download(snapshot_id: str) -> StreamingResponse:
+    @app.api_route(
+        "/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download",
+        methods=["GET", "HEAD"],
+    )
+    def benchmark_snapshot_download(
+        snapshot_id: str,
+        request: Request,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> Response:
         try:
-            _payload, artifact = service.benchmark_snapshot_download(snapshot_id)
+            payload, artifact = service.benchmark_snapshot_download(snapshot_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except FileNotFoundError as error:
@@ -877,21 +847,15 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-        def stream():
-            cursor = 0
-            while cursor < artifact.size_bytes:
-                end = min(artifact.size_bytes - 1, cursor + 1024 * 1024 - 1)
-                yield object_store.read_bytes(artifact.key, cursor, end)
-                cursor = end + 1
-
-        return StreamingResponse(
-            stream(),
+        return object_download_response(
+            store=object_store,
+            info=artifact,
+            filename=f"cw12eu_{snapshot_id}.h5",
             media_type="application/x-hdf5",
-            headers={
-                "Content-Disposition": (f'attachment; filename="cw12eu_{snapshot_id}.h5"'),
-                "Content-Length": str(artifact.size_bytes),
-                "Cache-Control": "private, no-store",
-            },
+            range_header=range_header,
+            sha256=str(payload["benchmark"]["hdf5_sha256"]),
+            head=request.method == "HEAD",
+            label="H5",
         )
 
     @app.get("/api/v1/training-snapshots/{snapshot_id}/delivery")
@@ -910,52 +874,30 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/training-snapshots/{snapshot_id}/delivery/download")
+    @app.api_route(
+        "/api/v1/training-snapshots/{snapshot_id}/delivery/download",
+        methods=["GET", "HEAD"],
+    )
     def client_delivery_download(
         snapshot_id: str,
+        request: Request,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
-    ) -> StreamingResponse:
+    ) -> Response:
         try:
             payload, artifact = service.client_delivery_download(snapshot_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
-        start = 0
-        end = artifact.size_bytes - 1
-        status_code = 200
-        if range_header:
-            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
-            if not match:
-                raise HTTPException(status_code=416, detail="只支持单个 bytes Range")
-            start = int(match.group(1))
-            end = int(match.group(2)) if match.group(2) else end
-            if start > end or end >= artifact.size_bytes:
-                raise HTTPException(status_code=416, detail="客户交付 ZIP Range 越界")
-            status_code = 206
-
-        def stream():
-            cursor = start
-            while cursor <= end:
-                chunk_end = min(end, cursor + 1024 * 1024 - 1)
-                yield object_store.read_bytes(artifact.key, cursor, chunk_end)
-                cursor = chunk_end + 1
-
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(end - start + 1),
-            "Cache-Control": "private, no-store",
-            "Content-Disposition": (
-                f'attachment; filename="cw12eu-delivery-{payload["snapshot_id"]}.zip"'
-            ),
-        }
-        if status_code == 206:
-            headers["Content-Range"] = f"bytes {start}-{end}/{artifact.size_bytes}"
-        return StreamingResponse(
-            stream(),
-            status_code=status_code,
+        return object_download_response(
+            store=object_store,
+            info=artifact,
+            filename=f'cw12eu-delivery-{payload["snapshot_id"]}.zip',
             media_type="application/zip",
-            headers=headers,
+            range_header=range_header,
+            sha256=str(payload["archive_sha256"]),
+            head=request.method == "HEAD",
+            label="客户交付 ZIP",
         )
 
     @app.get("/api/v1/training-snapshots/{snapshot_id}/viewer")

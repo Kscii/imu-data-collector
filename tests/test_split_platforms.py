@@ -876,6 +876,17 @@ def test_training_snapshot_range_download_and_admin_cleanup(tmp_path: Path) -> N
         assert partial.status_code == 206
         assert len(partial.content) == 10
         assert partial.headers["content-range"].startswith("bytes 0-9/")
+        suffix = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/download",
+            headers={"Range": "bytes=-10"},
+        )
+        assert suffix.status_code == 206
+        assert len(suffix.content) == 10
+        head = client.head(f"/api/v1/training-snapshots/{snapshot_id}/download")
+        assert head.status_code == 200
+        assert head.content == b""
+        assert head.headers["accept-ranges"] == "bytes"
+        assert head.headers["x-content-sha256"] == snapshot["archive_sha256"]
 
         wrong = client.request(
             "DELETE",
@@ -948,6 +959,13 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
             f"/api/v1/training-snapshots/{snapshot_id}/delivery/download",
             headers={"Range": "bytes=0-9"},
         )
+        suffix = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/delivery/download",
+            headers={"Range": "bytes=-10"},
+        )
+        head = client.head(
+            f"/api/v1/training-snapshots/{snapshot_id}/delivery/download"
+        )
         viewer = client.get(f"/api/v1/training-snapshots/{snapshot_id}/viewer")
         overview = client.get(
             f"/api/v1/training-snapshots/{snapshot_id}/viewer/{recording_id}/timeline"
@@ -960,6 +978,12 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
     assert downloaded.status_code == 200
     assert partial.status_code == 206
     assert len(partial.content) == 10
+    assert suffix.status_code == 206
+    assert len(suffix.content) == 10
+    assert head.status_code == 200
+    assert head.content == b""
+    assert head.headers["accept-ranges"] == "bytes"
+    assert head.headers["x-content-sha256"] == status["archive_sha256"]
     assert viewer.json()["recordings"][0]["recording_id"] == recording_id
     assert overview.json()["values"] == [[0.0] * 6, [0.0] * 6]
     assert video.status_code == 206
