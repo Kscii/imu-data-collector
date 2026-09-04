@@ -157,7 +157,7 @@ jobs:
       - name: 生成 SHA-256
         shell: pwsh
         run: Get-FileHash dist-installer\*.exe -Algorithm SHA256 | Format-List | Out-File dist-installer\SHA256SUMS-Windows.txt
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: imu-data-collector-windows-x64
           path: dist-installer/*
@@ -257,7 +257,7 @@ jobs:
           test -d "$mountpoint/IMU Data Collector.app"
           hdiutil detach "$mountpoint"
           shasum -a 256 "$dmg" > "dist-installer/SHA256SUMS-macOS-${{ matrix.arch }}.txt"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: imu-data-collector-macos-${{ matrix.arch }}
           path: dist-installer/*
