@@ -3215,8 +3215,9 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
     <div className="save-row">
       <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>下载 TAR</a>
       {snapshot.benchmark && <a className="button-link" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/benchmark-h5/download`} download>下载 benchmark H5</a>}
-      {snapshot.delivery?.eligible && <a className="button-link" href={`?view=delivery&snapshot=${encodeURIComponent(snapshot.snapshot_id)}`}>{tr("查看交付内容", "View delivery")}</a>}
+      {snapshot.delivery?.eligible && <a className="button-link" href={`?view=delivery&snapshot=${encodeURIComponent(snapshot.snapshot_id)}`}>{tr("团队在线复核", "Team online review")}</a>}
       {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/delivery/download`} download>{tr("下载客户 ZIP", "Download client ZIP")}</a>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link" href="https://viewer.imu.kscii.tech" target="_blank" rel="noreferrer">{tr("打开本地文件查看器", "Open local-file viewer")}</a>}
       {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || snapshot.delivery.state === "queued" || snapshot.delivery.state === "running"} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{snapshot.delivery.state === "queued" || snapshot.delivery.state === "running" ? tr("后台生成中…", "Generating…") : snapshot.delivery.state === "failed" ? tr("重试生成客户包", "Retry delivery") : tr("生成客户交付包", "Create client delivery")}</button>}
       {!snapshot.delivery?.eligible && <span className="muted" title={snapshot.delivery?.message ?? ""}>{tr("历史快照不可生成交付包", "Legacy snapshot is not delivery eligible")}</span>}
       {snapshot.benchmark && !snapshot.benchmark.is_current && <button disabled={busy} onClick={() => onActivate(snapshot.snapshot_id)}>{tr("验证后激活 current", "Activate current after validation")}</button>}
