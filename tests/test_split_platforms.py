@@ -78,6 +78,7 @@ def _settings(tmp_path: Path) -> Settings:
         data_root=data_root,
         catalog_path=tmp_path / "capture.sqlite3",
         activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+        identity=IdentitySettings(subject_ids={"xfan0282": "cw12eu:subject-001"}),
         storage=StorageSettings(
             backend="local",
             root=tmp_path / "objects",
@@ -902,7 +903,12 @@ def test_training_snapshot_range_download_and_admin_cleanup(tmp_path: Path) -> N
 def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)
-    recording_id = _publish_fixture(store, tmp_path, data_tier=DataTier.PROD)
+    recording_id = _publish_fixture(
+        store,
+        tmp_path,
+        recording_id="20260826T000000.000000Z",
+        data_tier=DataTier.PROD,
+    )
     app = create_annotation_app(settings, store)
 
     with TestClient(app) as client:
@@ -910,6 +916,18 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
         _install_completed_review(app, store, tmp_path, recording_id)
         snapshot = client.post("/api/v1/training-snapshots").json()
         snapshot_id = snapshot["snapshot_id"]
+        store.write_json(
+            f"client-deliveries/{snapshot_id}/manifest.json",
+            {
+                "schema_version": "cw12eu_client_delivery_v1",
+                "snapshot_id": snapshot_id,
+                "archive_object_key": "client-deliveries/legacy.zip",
+            },
+            if_generation_match=0,
+        )
+        assert client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/delivery"
+        ).json()["state"] == "not_created"
         deleted_source = client.request(
             "DELETE",
             f"/api/v1/recordings/{recording_id}",
@@ -949,12 +967,37 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
     with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
         names = set(archive.namelist())
         assert "dataset/cw12eu.h5" in names
-        assert f"recordings/{recording_id}/video.mp4" in names
-        assert f"recordings/{recording_id}/view.json" in names
-        assert {"manifest.json", "README.md", "SHA256SUMS"} <= names
+        assert "recordings/0000/video.mp4" in names
+        assert "recordings/0000/view.json" in names
+        assert {
+            "manifest.json",
+            "README.md",
+            "DATASET_CARD.md",
+            "SHA256SUMS",
+        } <= names
+        assert all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
+        assert not any("capture.h5" in name or "raw" in name for name in names)
         package_manifest = json.loads(archive.read("manifest.json"))
+        assert package_manifest["schema_version"] == "cw12eu_client_delivery_v2"
+        assert package_manifest["contract_version"] == "2.0.0"
         assert package_manifest["snapshot_id"] == snapshot_id
         assert package_manifest["hdf5_schema_version"] == "3.1.0"
+        assert package_manifest["recordings"][0]["recording_id"] == recording_id
+        assert package_manifest["recordings"][0]["video_path"] == (
+            "recordings/0000/video.mp4"
+        )
+        assert len(package_manifest["taxonomies"]) == 1
+        taxonomy_path = package_manifest["taxonomies"][0]["path"]
+        taxonomy = json.loads(archive.read(taxonomy_path))
+        assert set(taxonomy) == {
+            "schema_version",
+            "taxonomy_id",
+            "version",
+            "fall",
+            "non_fall",
+        }
+        assert all(set(item) == {"code", "name", "active"} for item in taxonomy["fall"])
+        assert "xfan0282" not in archive.read(taxonomy_path).decode()
         checksums = {
             name: digest
             for digest, name in (

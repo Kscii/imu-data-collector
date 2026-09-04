@@ -31,10 +31,14 @@ from imu_data_collector.artifacts import (
 )
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.client_delivery import (
+    CLIENT_DELIVERY_CONTRACT_VERSION,
     CLIENT_DELIVERY_SCHEMA_VERSION,
     build_delivery_archive,
     canonical_json,
+    delivery_dataset_card,
     delivery_readme,
+    public_taxonomy,
+    safe_archive_component,
 )
 from imu_data_collector.config import (
     ImuSettings,
@@ -2393,6 +2397,20 @@ class AnnotationService:
             raise ValueError(f"冻结 view.json 校验失败：{recording['recording_id']}")
         return view
 
+    @staticmethod
+    def _client_delivery_identity_issue(payload: dict[str, Any]) -> str | None:
+        for recording in payload.get("recordings", []):
+            participant_id = str(recording.get("participant_id") or "")
+            recording_id = str(recording.get("recording_id") or "")
+            if not re.fullmatch(r"cw12eu:subject-[0-9]{3,}", participant_id):
+                return "客户交付要求匿名 subject_id；请先完成参与者身份 v3 迁移并重新生成快照"
+            if not re.fullmatch(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z", recording_id):
+                return (
+                    "客户交付要求身份中立 recording_id；"
+                    "请先完成参与者身份 v3 迁移并重新生成快照"
+                )
+        return None
+
     def client_delivery_status(
         self, snapshot_id: str, *, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -2404,7 +2422,13 @@ class AnnotationService:
                 "state": "ineligible",
                 "message": "历史快照缺少冻结的视频映射；请从当前已完成录制生成新快照",
             }
-        sidecar_key = f"client-deliveries/{snapshot_id}/manifest.json"
+        if identity_issue := self._client_delivery_identity_issue(payload):
+            return {
+                "eligible": False,
+                "state": "ineligible",
+                "message": identity_issue,
+            }
+        sidecar_key = f"client-deliveries/{snapshot_id}/v2/manifest.json"
         try:
             sidecar, _generation = self.store.read_json(sidecar_key)
         except FileNotFoundError:
@@ -2412,7 +2436,8 @@ class AnnotationService:
         if sidecar is not None:
             artifact = self.store.stat(str(sidecar.get("archive_object_key") or ""))
             if (
-                artifact is not None
+                sidecar.get("schema_version") == CLIENT_DELIVERY_SCHEMA_VERSION
+                and artifact is not None
                 and artifact.size_bytes == int(sidecar.get("archive_size_bytes", -1))
                 and artifact.metadata.get("sha256") == sidecar.get("archive_sha256")
                 and artifact.metadata.get("snapshot_id") == snapshot_id
@@ -2422,8 +2447,9 @@ class AnnotationService:
                     "state": "ready",
                     "archive_size_bytes": artifact.size_bytes,
                     "archive_sha256": sidecar["archive_sha256"],
-                    "created_at_utc": sidecar.get("created_at_utc"),
-                    "created_by": sidecar.get("created_by"),
+                    "generated_at_utc": sidecar.get("generated_at_utc"),
+                    "generated_by": sidecar.get("generated_by"),
+                    "contract_version": sidecar.get("contract_version"),
                 }
         with self._delivery_job_lock:
             job = dict(self._delivery_jobs.get(snapshot_id, {}))
@@ -2484,9 +2510,12 @@ class AnnotationService:
                     "message": "正在生成不可变 ZIP",
                 }
             payload = self._training_snapshot_payload(snapshot_id)
+            if identity_issue := self._client_delivery_identity_issue(payload):
+                raise ValueError(identity_issue)
             dataset_path = self._cached_benchmark_h5(payload)
             build_recordings: list[dict[str, Any]] = []
             public_recordings: list[dict[str, Any]] = []
+            taxonomies_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
             file_entries: list[dict[str, Any]] = [
                 {
                     "path": "dataset/cw12eu.h5",
@@ -2499,9 +2528,34 @@ class AnnotationService:
             for recording in payload["recordings"]:
                 view = self._snapshot_view(snapshot_id, recording)
                 recording_id = str(recording["recording_id"])
+                participant_id = str(recording["participant_id"])
                 video = dict(recording["video"])
-                video_path = f"recordings/{recording_id}/video.mp4"
-                view_path = f"recordings/{recording_id}/view.json"
+                archive_prefix = f"recordings/{int(view['sequence_index']):04d}"
+                video_path = f"{archive_prefix}/video.mp4"
+                view_path = f"{archive_prefix}/view.json"
+                taxonomy_id = safe_archive_component(
+                    str(view["taxonomy_id"]), name="taxonomy_id"
+                )
+                taxonomy_version = safe_archive_component(
+                    str(view["taxonomy_version"]), name="taxonomy version"
+                )
+                taxonomy_identity = (taxonomy_id, taxonomy_version)
+                taxonomy_path = f"taxonomies/{taxonomy_id}/{taxonomy_version}.json"
+                if taxonomy_identity not in taxonomies_by_identity:
+                    definition = self.taxonomies.version(taxonomy_version).model_dump(
+                        mode="json"
+                    )
+                    if str(definition["taxonomy_id"]) != taxonomy_id:
+                        raise ValueError(
+                            f"冻结 taxonomy 身份不一致：{taxonomy_id} {taxonomy_version}"
+                        )
+                    taxonomy_payload = public_taxonomy(definition)
+                    taxonomies_by_identity[taxonomy_identity] = {
+                        "taxonomy_id": taxonomy_id,
+                        "version": taxonomy_version,
+                        "path": taxonomy_path,
+                        "payload": taxonomy_payload,
+                    }
                 view_bytes = canonical_json(view)
                 file_entries.extend(
                     [
@@ -2523,24 +2577,63 @@ class AnnotationService:
                 )
                 predicted_size += int(video["size_bytes"]) + len(view_bytes)
                 build_recordings.append(
-                    {"recording_id": recording_id, "video": video, "view": view}
+                    {
+                        "recording_id": recording_id,
+                        "archive_prefix": archive_prefix,
+                        "video": video,
+                        "view": view,
+                    }
                 )
                 public_recordings.append(
                     {
                         "recording_id": recording_id,
-                        "participant_id": recording["participant_id"],
-                        "collection_id": recording.get("collection_id"),
+                        "participant_id": participant_id,
                         "sequence_index": view["sequence_index"],
+                        "merged_sample_start": view["merged_sample_start"],
+                        "merged_sample_stop": view["merged_sample_stop"],
                         "video_path": video_path,
                         "view_path": view_path,
+                        "taxonomy_path": taxonomy_path,
                     }
                 )
+            taxonomies = [
+                taxonomies_by_identity[identity]
+                for identity in sorted(taxonomies_by_identity)
+            ]
+            for taxonomy in taxonomies:
+                taxonomy_bytes = canonical_json(taxonomy["payload"])
+                file_entries.append(
+                    {
+                        "path": taxonomy["path"],
+                        "size_bytes": len(taxonomy_bytes),
+                        "sha256": hashlib.sha256(taxonomy_bytes).hexdigest(),
+                        "role": "activity_taxonomy",
+                        "taxonomy_id": taxonomy["taxonomy_id"],
+                        "taxonomy_version": taxonomy["version"],
+                    }
+                )
+                predicted_size += len(taxonomy_bytes)
             readme = delivery_readme(snapshot_id)
             file_entries.append(
                 {
                     "path": "README.md",
                     "size_bytes": len(readme),
                     "sha256": hashlib.sha256(readme).hexdigest(),
+                    "role": "documentation",
+                }
+            )
+            dataset_card_manifest = {
+                "snapshot_id": snapshot_id,
+                "recordings": public_recordings,
+                "sampling_rate_hz": 25.0,
+                "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+            }
+            dataset_card = delivery_dataset_card(dataset_card_manifest)
+            file_entries.append(
+                {
+                    "path": "DATASET_CARD.md",
+                    "size_bytes": len(dataset_card),
+                    "sha256": hashlib.sha256(dataset_card).hexdigest(),
                     "role": "documentation",
                 }
             )
@@ -2556,12 +2649,31 @@ class AnnotationService:
                 raise ValueError("生成交付 ZIP 的本地磁盘空间不足")
             package_manifest = {
                 "schema_version": CLIENT_DELIVERY_SCHEMA_VERSION,
+                "contract_version": CLIENT_DELIVERY_CONTRACT_VERSION,
                 "snapshot_id": snapshot_id,
                 "snapshot_content_fingerprint": payload["content_fingerprint"],
-                "created_at_utc": payload["created_at_utc"],
+                "snapshot_created_at_utc": payload["created_at_utc"],
                 "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
                 "sampling_rate_hz": 25.0,
+                "coordinate_frame": "sensor_local",
+                "gravity_retained": True,
+                "channels": [
+                    "acceleration_x_mps2",
+                    "acceleration_y_mps2",
+                    "acceleration_z_mps2",
+                    "angular_velocity_x_radps",
+                    "angular_velocity_y_radps",
+                    "angular_velocity_z_radps",
+                ],
                 "video_contains_identifiable_participants": True,
+                "content_hash_verification": "available_not_required_by_viewer",
+                "taxonomies": [
+                    {
+                        key: taxonomy[key]
+                        for key in ("taxonomy_id", "version", "path")
+                    }
+                    for taxonomy in taxonomies
+                ],
                 "recordings": public_recordings,
                 "files": file_entries,
             }
@@ -2574,10 +2686,11 @@ class AnnotationService:
                 package_manifest=package_manifest,
                 dataset_path=dataset_path,
                 recordings=build_recordings,
+                taxonomies=taxonomies,
                 read_object_chunks=read_chunk,
             )
             archive_key = (
-                f"client-deliveries/{snapshot_id}/"
+                f"client-deliveries/{snapshot_id}/v2/"
                 f"cw12eu-delivery-{snapshot_id}.zip"
             )
             metadata = {
@@ -2602,23 +2715,34 @@ class AnnotationService:
                     raise ValueError("同一快照的客户交付 ZIP 内容不一致") from error
             sidecar = {
                 **package_manifest,
-                "created_at_utc": payload["created_at_utc"],
-                "created_by": payload.get("created_by"),
+                "generated_at_utc": datetime.now(UTC).isoformat(),
+                "generated_by": actor_id,
                 "archive_object_key": archive_key,
                 "archive_size_bytes": archive.size_bytes,
                 "archive_sha256": archive_sha256,
             }
             try:
                 self.store.write_json(
-                    f"client-deliveries/{snapshot_id}/manifest.json",
+                    f"client-deliveries/{snapshot_id}/v2/manifest.json",
                     sidecar,
                     if_generation_match=0,
                 )
             except ObjectConflictError as error:
                 existing, _generation = self.store.read_json(
-                    f"client-deliveries/{snapshot_id}/manifest.json"
+                    f"client-deliveries/{snapshot_id}/v2/manifest.json"
                 )
-                if existing != sidecar:
+                if any(
+                    existing.get(key) != sidecar.get(key)
+                    for key in (
+                        "schema_version",
+                        "contract_version",
+                        "snapshot_id",
+                        "snapshot_content_fingerprint",
+                        "archive_object_key",
+                        "archive_size_bytes",
+                        "archive_sha256",
+                    )
+                ):
                     raise ValueError("同一快照的客户交付清单内容不一致") from error
             output.unlink(missing_ok=True)
             with self._delivery_job_lock:
@@ -2636,7 +2760,7 @@ class AnnotationService:
         if status["state"] != "ready":
             raise FileNotFoundError("客户交付包尚未生成")
         sidecar, _generation = self.store.read_json(
-            f"client-deliveries/{snapshot_id}/manifest.json"
+            f"client-deliveries/{snapshot_id}/v2/manifest.json"
         )
         artifact = self.store.stat(str(sidecar["archive_object_key"]))
         if artifact is None:
