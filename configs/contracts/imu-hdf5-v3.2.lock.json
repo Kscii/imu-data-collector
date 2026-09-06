@@ -5,7 +5,7 @@
     "training_dataset",
     "client_delivery"
   ],
-  "sha256": "698f5379b9abfc09f9cb435700edeed4625a220a87d3c812e13ac22b8bc8e442",
-  "upstream_commit": "4324306e184469a50b40bb1a02efe82e0e039a41",
+  "sha256": "fb69725f489bd79adc91e4158df56506c79eb50c4e93c7b116833fe2fb8ff0c2",
+  "upstream_commit": "573d42cc7acba38dd662e2959d124eec4a9cc948",
   "upstream_repository": "Kscii/imu-fall-benchmark"
 }
