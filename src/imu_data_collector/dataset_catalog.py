@@ -23,6 +23,17 @@ Kind = Literal["base", "team"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_LEGACY_MANIFEST_SCHEMAS = {"imu_benchmark_dataset_manifest_v1"}
+_LEGACY_HDF5_SCHEMAS = {"3.0.0", "3.1.0"}
+
+
+class CatalogValidationError(ValueError):
+    """带稳定错误码的数据目录校验异常。"""
+
+    def __init__(self, code: str, message: str, *, legacy: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.legacy = legacy
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,12 +108,23 @@ class DatasetCatalog:
         manifest_bytes: bytes,
     ) -> ValidatedSnapshot:
         manifest = self._json(manifest_bytes, source=manifest_key)
-        if manifest.get("schema_version") != MANIFEST_SCHEMA:
-            raise ValueError("数据集 manifest schema 不受支持")
+        manifest_schema = manifest.get("schema_version")
+        if manifest_schema != MANIFEST_SCHEMA:
+            raise CatalogValidationError(
+                "unsupported_manifest_schema",
+                "数据集 manifest schema 不受支持",
+                legacy=manifest_schema in _LEGACY_MANIFEST_SCHEMAS,
+            )
         if manifest.get("contract_version") != CONTRACT_VERSION:
-            raise ValueError("数据集合同版本不受支持")
+            raise CatalogValidationError(
+                "unsupported_contract_version",
+                "数据集合同版本不受支持",
+            )
         if kind == "team" and manifest.get("handoff_contract_version") != DATASET_HANDOFF_VERSION:
-            raise ValueError("团队数据 handoff 合同版本不受支持")
+            raise CatalogValidationError(
+                "unsupported_handoff_contract",
+                "团队数据 handoff 合同版本不受支持",
+            )
         if manifest.get("kind") != kind:
             raise ValueError("数据集 manifest kind 不一致")
         snapshot_id = self._safe_identifier(manifest.get("snapshot_id"), name="snapshot_id")
@@ -120,6 +142,17 @@ class DatasetCatalog:
         raw_files = manifest.get("files")
         if not isinstance(raw_files, list) or not raw_files:
             raise ValueError("manifest 没有数据文件")
+        hdf5_versions = {
+            item.get("hdf5_schema_version")
+            for item in raw_files
+            if isinstance(item, dict)
+        }
+        if hdf5_versions and hdf5_versions.issubset(_LEGACY_HDF5_SCHEMAS):
+            raise CatalogValidationError(
+                "unsupported_hdf5_schema",
+                "历史快照使用旧版 HDF5 schema",
+                legacy=True,
+            )
         required = {
             "dataset_id",
             "object_key",
@@ -194,10 +227,16 @@ class DatasetCatalog:
             if info is None or info.size_bytes != size:
                 raise ValueError(f"数据文件缺失或大小不一致：{filename}")
             if info.content_type != "application/x-hdf5":
-                raise ValueError(f"数据文件 content type 不一致：{filename}")
+                raise CatalogValidationError(
+                    "artifact_content_type_mismatch",
+                    f"数据文件 content type 不一致：{filename}",
+                )
             metadata_sha = info.metadata.get("sha256")
             if metadata_sha != digest:
-                raise ValueError(f"数据文件 SHA-256 metadata 不一致：{filename}")
+                raise CatalogValidationError(
+                    "artifact_sha256_metadata_mismatch",
+                    f"数据文件 SHA-256 metadata 不一致：{filename}",
+                )
             files[dataset_id] = (entry, info)
         return ValidatedSnapshot(
             kind=kind,
@@ -251,12 +290,32 @@ class DatasetCatalog:
         return snapshot
 
     def collection(self, kind: Kind) -> dict[str, Any]:
-        warnings: list[str] = []
+        issues: list[dict[str, Any]] = []
+        legacy_history_count = 0
         current: ValidatedSnapshot | None = None
         try:
             current = self._load_current(kind)
         except (KeyError, ValueError) as error:
-            warnings.append(str(error.args[0] if isinstance(error, KeyError) else error))
+            missing = isinstance(error, KeyError)
+            legacy = isinstance(error, CatalogValidationError) and error.legacy
+            issues.append(
+                {
+                    "code": (
+                        "current_missing"
+                        if missing
+                        else "current_legacy_version"
+                        if legacy
+                        else "current_invalid"
+                    ),
+                    "scope": "current",
+                    "severity": "info" if missing else "blocking",
+                    "reason_code": (
+                        error.code if isinstance(error, CatalogValidationError) else None
+                    ),
+                    "object_key": f"{self._prefix(kind)}/current.json",
+                    "detail": str(error.args[0] if missing else error),
+                }
+            )
 
         history: list[ValidatedSnapshot] = []
         prefix = f"{self._prefix(kind)}/"
@@ -266,7 +325,23 @@ class DatasetCatalog:
             try:
                 snapshot = self._load_manifest(kind, info.key)
             except (KeyError, ValueError) as error:
-                warnings.append(f"忽略异常历史快照 {info.key}：{error}")
+                if isinstance(error, CatalogValidationError) and error.legacy:
+                    legacy_history_count += 1
+                    continue
+                issues.append(
+                    {
+                        "code": "staged_snapshot_invalid",
+                        "scope": "history",
+                        "severity": "warning",
+                        "reason_code": (
+                            error.code
+                            if isinstance(error, CatalogValidationError)
+                            else None
+                        ),
+                        "object_key": info.key,
+                        "detail": str(error),
+                    }
+                )
                 continue
             if current is None or snapshot.snapshot_id != current.snapshot_id:
                 history.append(snapshot)
@@ -279,12 +354,13 @@ class DatasetCatalog:
             "available": current is not None,
             "current": None if current is None else current.public_dict(current=True),
             "history": [item.public_dict(current=False) for item in history],
-            "warnings": warnings,
+            "issues": issues,
+            "legacy_history_count": legacy_history_count,
         }
 
     def summary(self) -> dict[str, Any]:
         return {
-            "schema_version": "imu_dataset_catalog_v1",
+            "schema_version": "imu_dataset_catalog_v2",
             "collections": [self.collection("base"), self.collection("team")],
         }
 

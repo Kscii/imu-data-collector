@@ -2465,8 +2465,50 @@ class AnnotationService:
 
     def _snapshot_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
         benchmark = payload.get("benchmark")
+        benchmark_manifest: dict[str, Any] | None = None
         if isinstance(benchmark, dict):
             benchmark = dict(benchmark)
+            manifest_key = str(benchmark.get("manifest_object_key") or "")
+            if manifest_key:
+                try:
+                    benchmark_manifest, _manifest_generation = self.store.read_json(
+                        manifest_key
+                    )
+                except FileNotFoundError:
+                    benchmark_manifest = None
+            files = (
+                benchmark_manifest.get("files")
+                if isinstance(benchmark_manifest, dict)
+                else None
+            )
+            descriptor = (
+                files[0]
+                if isinstance(files, list)
+                and len(files) == 1
+                and isinstance(files[0], dict)
+                else {}
+            )
+            benchmark.update(
+                {
+                    "manifest_schema_version": (
+                        benchmark_manifest.get("schema_version")
+                        if isinstance(benchmark_manifest, dict)
+                        else None
+                    ),
+                    "contract_version": (
+                        benchmark_manifest.get("contract_version")
+                        if isinstance(benchmark_manifest, dict)
+                        else None
+                    ),
+                    "handoff_contract_version": (
+                        benchmark_manifest.get("handoff_contract_version")
+                        if isinstance(benchmark_manifest, dict)
+                        else None
+                    ),
+                    "hdf5_schema_version": descriptor.get("hdf5_schema_version"),
+                    "artifact_profile": descriptor.get("artifact_profile"),
+                }
+            )
             try:
                 current, _generation = self.store.read_json(str(benchmark["current_object_key"]))
             except FileNotFoundError:
@@ -2479,6 +2521,7 @@ class AnnotationService:
         delivery = self.client_delivery_status(str(payload["snapshot_id"]), payload=payload)
         return {
             "snapshot_id": str(payload["snapshot_id"]),
+            "snapshot_schema_version": payload.get("schema_version"),
             "created_at_utc": payload.get("created_at_utc"),
             "created_by": payload.get("created_by"),
             "content_fingerprint": payload.get("content_fingerprint"),

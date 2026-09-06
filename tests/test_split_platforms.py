@@ -805,6 +805,18 @@ def test_training_snapshot_writes_queryable_sidecar_manifest(tmp_path: Path) -> 
     assert repeated.json()["snapshot_id"] == created.json()["snapshot_id"]
     assert activated.status_code == 200
     assert activated.json()["benchmark"]["is_current"] is True
+    assert activated.json()["snapshot_schema_version"] == "4.0.0"
+    assert activated.json()["benchmark"]["manifest_schema_version"] == (
+        "imu_benchmark_dataset_manifest_v2"
+    )
+    assert activated.json()["benchmark"]["contract_version"] == (
+        "imu_benchmark_contract_v2"
+    )
+    assert activated.json()["benchmark"]["handoff_contract_version"] == (
+        DATASET_HANDOFF_VERSION
+    )
+    assert activated.json()["benchmark"]["hdf5_schema_version"] == "3.2.0"
+    assert activated.json()["benchmark"]["artifact_profile"] == "training_dataset"
     current, _generation = store.read_json(current_key)
     assert current["handoff_contract_version"] == DATASET_HANDOFF_VERSION
     assert [item["snapshot_id"] for item in listed.json()] == [created.json()["snapshot_id"]]
