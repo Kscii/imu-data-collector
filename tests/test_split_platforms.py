@@ -14,7 +14,10 @@ from fastapi.testclient import TestClient
 
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.annotation_catalog import AnnotationCatalog
-from imu_data_collector.annotation_service import _training_snapshot_fingerprint
+from imu_data_collector.annotation_service import (
+    CLIENT_DELIVERY_JOB_SCHEMA_VERSION,
+    _training_snapshot_fingerprint,
+)
 from imu_data_collector.capture_api import create_capture_app
 from imu_data_collector.config import (
     AnnotationSettings,
@@ -91,6 +94,23 @@ class FailOnceDeliveryManifestStore(LocalFilesystemStore):
             payload,
             if_generation_match=if_generation_match,
         )
+
+
+class OptionalSignedDownloadStore(LocalFilesystemStore):
+    direct_download = False
+
+    def signed_download_url(
+        self,
+        key: str,
+        *,
+        expires: timedelta,
+        filename: str,
+        content_type: str,
+    ) -> str | None:
+        del key, expires, content_type
+        if not self.direct_download:
+            return None
+        return f"https://storage.example.invalid/{filename}?signature=test"
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -954,7 +974,7 @@ def test_training_snapshot_range_download_and_admin_cleanup(tmp_path: Path) -> N
 
 def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    store = LocalFilesystemStore(settings.storage.root)
+    store = OptionalSignedDownloadStore(settings.storage.root)
     recording_id = _publish_fixture(
         store,
         tmp_path,
@@ -1019,6 +1039,11 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
             f"/api/v1/training-snapshots/{snapshot_id}/viewer/{recording_id}/video",
             headers={"Range": "bytes=2-5"},
         )
+        store.direct_download = True
+        redirected = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/delivery/download",
+            follow_redirects=False,
+        )
 
     assert downloaded.status_code == 200
     assert partial.status_code == 206
@@ -1037,6 +1062,11 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
     assert overview.json()["values"] == [[0.0] * 6, [0.0] * 6]
     assert video.status_code == 206
     assert video.content == b"2345"
+    assert redirected.status_code == 307
+    assert redirected.headers["location"].startswith(
+        "https://storage.example.invalid/cw12eu-client-"
+    )
+    assert redirected.headers["x-content-sha256"] == status["artifact_sha256"]
     assert hashlib.sha256(downloaded.content).hexdigest() == status["artifact_sha256"]
     client_h5 = tmp_path / "downloaded-client.h5"
     client_h5.write_bytes(downloaded.content)
@@ -1143,8 +1173,45 @@ def test_client_delivery_fails_cleanly_when_local_disk_is_insufficient(
 
     assert status["state"] == "failed"
     assert "磁盘空间不足" in status["message"]
-    assert store.list(f"client-deliveries/{snapshot_id}/hdf5-v1/") == []
+    delivery_objects = store.list(f"client-deliveries/{snapshot_id}/hdf5-v1/")
+    assert [item.key for item in delivery_objects] == [
+        f"client-deliveries/{snapshot_id}/hdf5-v1/job.json"
+    ]
     assert list((settings.storage.cache_root / "client-deliveries").rglob(".*.h5")) == []
+
+
+def test_interrupted_client_delivery_job_is_persisted_and_retryable(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    snapshot_id = "snapshot-0123456789abcdef01234567"
+    store.write_json(
+        f"client-deliveries/{snapshot_id}/hdf5-v1/job.json",
+        {
+            "schema_version": CLIENT_DELIVERY_JOB_SCHEMA_VERSION,
+            "snapshot_id": snapshot_id,
+            "state": "running",
+            "stage": "copying_videos",
+            "message": None,
+            "bytes_complete": 32,
+            "bytes_total": 64,
+            "progress_percent": 50.0,
+            "started_at_utc": "2026-09-06T00:00:00+00:00",
+            "updated_at_utc": "2026-09-06T00:01:00+00:00",
+            "actor_id": "xfan0282",
+        },
+        if_generation_match=0,
+    )
+
+    service = create_annotation_app(settings, store).state.annotation_service
+    job = service._delivery_job_status(snapshot_id)
+
+    assert job["state"] == "failed"
+    assert job["stage"] == "interrupted"
+    assert job["bytes_complete"] == 32
+    persisted, _generation = store.read_json(
+        f"client-deliveries/{snapshot_id}/hdf5-v1/job.json"
+    )
+    assert persisted == job
 
 
 def test_training_snapshot_cleanup_retries_after_generation_conflict(tmp_path: Path) -> None:

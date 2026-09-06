@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -36,6 +37,7 @@ from imu_data_collector.client_hdf5 import (
     CLIENT_ARTIFACT_PROFILE,
     CLIENT_DELIVERY_MANIFEST_SCHEMA,
     CLIENT_HDF5_CONTRACT_VERSION,
+    COPY_BYTES,
     build_client_hdf5,
     canonical_json,
     public_taxonomy,
@@ -91,6 +93,8 @@ logger = logging.getLogger(__name__)
 
 ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.0.0", "2.1.0", "3.0.0")
 TRAINING_SNAPSHOT_SCHEMA_VERSION = "4.0.0"
+CLIENT_DELIVERY_JOB_SCHEMA_VERSION = "cw12eu_client_hdf5_job_v1"
+CLIENT_DELIVERY_SIGNED_URL_TTL = timedelta(minutes=15)
 SNAPSHOT_VIEW_SCHEMA_VERSION = "cw12eu_snapshot_view_v1"
 
 
@@ -2596,6 +2600,93 @@ class AnnotationService:
                 )
         return None
 
+    @staticmethod
+    def _delivery_job_key(snapshot_id: str) -> str:
+        return f"client-deliveries/{snapshot_id}/hdf5-v1/job.json"
+
+    def _read_delivery_job(self, snapshot_id: str) -> dict[str, Any]:
+        try:
+            payload, _generation = self.store.read_json(
+                self._delivery_job_key(snapshot_id)
+            )
+        except FileNotFoundError:
+            return {}
+        if (
+            payload.get("schema_version") != CLIENT_DELIVERY_JOB_SCHEMA_VERSION
+            or payload.get("snapshot_id") != snapshot_id
+        ):
+            return {}
+        return payload
+
+    def _set_delivery_job(
+        self,
+        snapshot_id: str,
+        *,
+        state: str,
+        stage: str,
+        actor_id: str,
+        message: str | None = None,
+        bytes_complete: int = 0,
+        bytes_total: int = 0,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat()
+        with self._delivery_job_lock:
+            existing = self._delivery_jobs.get(snapshot_id) or self._read_delivery_job(
+                snapshot_id
+            )
+            total = max(0, int(bytes_total))
+            complete = min(max(0, int(bytes_complete)), total) if total else 0
+            job = {
+                "schema_version": CLIENT_DELIVERY_JOB_SCHEMA_VERSION,
+                "snapshot_id": snapshot_id,
+                "state": state,
+                "stage": stage,
+                "message": message,
+                "bytes_complete": complete,
+                "bytes_total": total,
+                "progress_percent": round(100 * complete / total, 1) if total else 0.0,
+                "started_at_utc": existing.get("started_at_utc") or now,
+                "updated_at_utc": now,
+                "actor_id": actor_id,
+            }
+            key = self._delivery_job_key(snapshot_id)
+            for _attempt in range(3):
+                try:
+                    _previous, generation = self.store.read_json(key)
+                except FileNotFoundError:
+                    generation = 0
+                try:
+                    self.store.write_json(
+                        key,
+                        job,
+                        if_generation_match=generation,
+                    )
+                    break
+                except ObjectConflictError:
+                    continue
+            else:
+                raise ObjectConflictError("客户 H5 任务状态被并发更新")
+            self._delivery_jobs[snapshot_id] = job
+            return dict(job)
+
+    def _delivery_job_status(self, snapshot_id: str) -> dict[str, Any]:
+        with self._delivery_job_lock:
+            local = self._delivery_jobs.get(snapshot_id)
+            if local is not None:
+                return dict(local)
+            persisted = self._read_delivery_job(snapshot_id)
+            if persisted.get("state") in {"queued", "running"}:
+                return self._set_delivery_job(
+                    snapshot_id,
+                    state="failed",
+                    stage="interrupted",
+                    actor_id=str(persisted.get("actor_id") or "system"),
+                    message="上一次生成任务因服务重启或进程退出而中断，可以安全重试",
+                    bytes_complete=int(persisted.get("bytes_complete") or 0),
+                    bytes_total=int(persisted.get("bytes_total") or 0),
+                )
+            return persisted
+
     def client_delivery_status(
         self, snapshot_id: str, *, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -2667,12 +2758,17 @@ class AnnotationService:
                     "artifact_profile": sidecar.get("artifact_profile"),
                     "content_type": "application/x-hdf5",
                 }
-        with self._delivery_job_lock:
-            job = dict(self._delivery_jobs.get(snapshot_id, {}))
+        job = self._delivery_job_status(snapshot_id)
         return {
             "eligible": True,
             "state": job.get("state", "not_created"),
             "message": job.get("message"),
+            "stage": job.get("stage"),
+            "bytes_complete": int(job.get("bytes_complete") or 0),
+            "bytes_total": int(job.get("bytes_total") or 0),
+            "progress_percent": float(job.get("progress_percent") or 0.0),
+            "started_at_utc": job.get("started_at_utc"),
+            "updated_at_utc": job.get("updated_at_utc"),
         }
 
     def start_client_delivery(self, snapshot_id: str, actor_id: str) -> dict[str, Any]:
@@ -2687,10 +2783,12 @@ class AnnotationService:
             current = self._delivery_jobs.get(snapshot_id)
             if current and current.get("state") in {"queued", "running"}:
                 return self.client_delivery_status(snapshot_id, payload=payload)
-            self._delivery_jobs[snapshot_id] = {
-                "state": "queued",
-                "message": "等待后台生成",
-            }
+            self._set_delivery_job(
+                snapshot_id,
+                state="queued",
+                stage="queued",
+                actor_id=actor_id,
+            )
             thread = threading.Thread(
                 target=self._build_client_delivery,
                 args=(snapshot_id, actor_id),
@@ -2721,11 +2819,12 @@ class AnnotationService:
     def _build_client_delivery(self, snapshot_id: str, actor_id: str) -> None:
         output: Path | None = None
         try:
-            with self._delivery_job_lock:
-                self._delivery_jobs[snapshot_id] = {
-                    "state": "running",
-                    "message": "正在生成并校验不可变客户 H5",
-                }
+            self._set_delivery_job(
+                snapshot_id,
+                state="running",
+                stage="preparing",
+                actor_id=actor_id,
+            )
             payload = self._training_snapshot_payload(snapshot_id)
             if identity_issue := self._client_delivery_identity_issue(payload):
                 raise ValueError(identity_issue)
@@ -2782,8 +2881,37 @@ class AnnotationService:
 
             def read_chunk(key: str, cursor: int) -> bytes:
                 return self.store.read_bytes(
-                    key, cursor, cursor + 4 * 1024 * 1024 - 1
+                    key, cursor, cursor + COPY_BYTES - 1
                 )
+
+            last_progress = {
+                "stage": "",
+                "percent": -1,
+                "updated": 0.0,
+            }
+
+            def persist_progress(stage: str, current: int, total: int) -> None:
+                now = time.monotonic()
+                percent = int(100 * current / total) if total else 0
+                if (
+                    stage != last_progress["stage"]
+                    or percent > last_progress["percent"]
+                    or current >= total
+                    or now - float(last_progress["updated"]) >= 2.0
+                ):
+                    self._set_delivery_job(
+                        snapshot_id,
+                        state="running",
+                        stage=stage,
+                        actor_id=actor_id,
+                        bytes_complete=current,
+                        bytes_total=total,
+                    )
+                    last_progress.update(
+                        stage=stage,
+                        percent=percent,
+                        updated=now,
+                    )
 
             report = build_client_hdf5(
                 output,
@@ -2794,6 +2922,7 @@ class AnnotationService:
                 recordings=build_recordings,
                 taxonomies=taxonomies,
                 read_object_chunks=read_chunk,
+                progress=persist_progress,
             )
             artifact_key = (
                 f"client-deliveries/{snapshot_id}/hdf5-v1/"
@@ -2807,6 +2936,14 @@ class AnnotationService:
                 "artifact_profile": CLIENT_ARTIFACT_PROFILE,
                 "contract_version": CLIENT_HDF5_CONTRACT_VERSION,
             }
+            self._set_delivery_job(
+                snapshot_id,
+                state="running",
+                stage="uploading",
+                actor_id=actor_id,
+                bytes_complete=0,
+                bytes_total=report.size_bytes,
+            )
             try:
                 artifact = self.store.put_file(
                     output,
@@ -2846,6 +2983,14 @@ class AnnotationService:
             sidecar_key = (
                 f"client-deliveries/{snapshot_id}/hdf5-v1/manifest.json"
             )
+            self._set_delivery_job(
+                snapshot_id,
+                state="running",
+                stage="finalizing",
+                actor_id=actor_id,
+                bytes_complete=report.size_bytes,
+                bytes_total=report.size_bytes,
+            )
             try:
                 self.store.write_json(
                     sidecar_key,
@@ -2869,15 +3014,27 @@ class AnnotationService:
                     )
                 ):
                     raise ValueError("同一快照的客户交付清单内容不一致") from error
-            with self._delivery_job_lock:
-                self._delivery_jobs[snapshot_id] = {"state": "ready", "message": None}
+            self._set_delivery_job(
+                snapshot_id,
+                state="ready",
+                stage="ready",
+                actor_id=actor_id,
+                bytes_complete=report.size_bytes,
+                bytes_total=report.size_bytes,
+            )
         except Exception as error:
             logger.exception("生成客户 H5 失败 snapshot_id=%s", snapshot_id)
             with self._delivery_job_lock:
-                self._delivery_jobs[snapshot_id] = {
-                    "state": "failed",
-                    "message": str(error),
-                }
+                previous = dict(self._delivery_jobs.get(snapshot_id, {}))
+            self._set_delivery_job(
+                snapshot_id,
+                state="failed",
+                stage="failed",
+                actor_id=actor_id,
+                message=str(error),
+                bytes_complete=int(previous.get("bytes_complete") or 0),
+                bytes_total=int(previous.get("bytes_total") or 0),
+            )
         finally:
             if output is not None:
                 output.unlink(missing_ok=True)
@@ -2893,6 +3050,23 @@ class AnnotationService:
         if artifact is None:
             raise FileNotFoundError("客户 H5 缺失")
         return sidecar, artifact
+
+    def client_delivery_signed_url(self, snapshot_id: str) -> str | None:
+        sidecar, artifact = self.client_delivery_download(snapshot_id)
+        try:
+            return self.store.signed_download_url(
+                artifact.key,
+                expires=CLIENT_DELIVERY_SIGNED_URL_TTL,
+                filename=f'cw12eu-client-{sidecar["snapshot_id"]}.h5',
+                content_type="application/x-hdf5",
+            )
+        except Exception as error:
+            logger.warning(
+                "无法签发客户 H5 直连，继续使用应用代理 snapshot_id=%s error=%s",
+                snapshot_id,
+                error,
+            )
+            return None
 
     def snapshot_viewer(self, snapshot_id: str) -> dict[str, Any]:
         payload = self._training_snapshot_payload(snapshot_id)
