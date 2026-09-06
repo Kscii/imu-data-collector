@@ -30,6 +30,7 @@ from imu_data_collector.constants import (
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.dataset_catalog import DATASET_HANDOFF_VERSION
 from imu_data_collector.hdf5_store import sha256_file
+from imu_data_collector.logical_content import logical_content_sha256
 from imu_data_collector.models import (
     ArtifactDescriptor,
     CalibrationProfile,
@@ -187,7 +188,6 @@ def _publish_fixture(
 
 
 def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> None:
-    logical_digest = "b" * 64
     aligned = tmp_path / f"{recording_id}.aligned.h5"
     text = h5py.string_dtype(encoding="utf-8")
     sequence_dtype = np.dtype(
@@ -213,6 +213,34 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
             ("code", text),
         ]
     )
+    values = np.zeros((2, 6), dtype=np.float32)
+    sequences = np.asarray(
+        [
+            (
+                0,
+                2,
+                "capture.h5",
+                "cw12eu:xfan0282",
+                f"cw12eu:{recording_id}",
+                "chest",
+                "walking",
+                False,
+                "temporal",
+                25.0,
+            )
+        ],
+        dtype=sequence_dtype,
+    )
+    annotations = np.asarray(
+        [(0, "activity", 0, 2, "walking")], dtype=annotation_dtype
+    )
+    logical_digest = logical_content_sha256(
+        values,
+        sequences,
+        annotations,
+        dataset_id="cw12eu",
+        sampling_rate_hz=25.0,
+    )
     with h5py.File(aligned, "w") as handle:
         handle.attrs.update(
             {
@@ -224,31 +252,9 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
                 "grid_origin_recording_time_ns": 0,
             }
         )
-        handle.create_dataset("samples", data=np.zeros((2, 6), dtype=np.float32))
-        handle.create_dataset(
-            "sequences",
-            data=np.asarray(
-                [
-                    (
-                        0,
-                        2,
-                        "capture.h5",
-                        "cw12eu:xfan0282",
-                        f"cw12eu:{recording_id}",
-                        "chest",
-                        "walking",
-                        False,
-                        "temporal",
-                        25.0,
-                    )
-                ],
-                dtype=sequence_dtype,
-            ),
-        )
-        handle.create_dataset(
-            "annotations",
-            data=np.asarray([(0, "activity", 0, 2, "walking")], dtype=annotation_dtype),
-        )
+        handle.create_dataset("samples", data=values)
+        handle.create_dataset("sequences", data=sequences)
+        handle.create_dataset("annotations", data=annotations)
     digest = sha256_file(aligned)
     key = f"exports/{recording_id}/review-0/aligned-{logical_digest[:16]}.h5"
     info = store.put_file(

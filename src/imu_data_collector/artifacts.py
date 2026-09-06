@@ -269,6 +269,29 @@ def _logical_digest(
     )
 
 
+def validate_training_export_logical_content(path: Path) -> str:
+    """Recompute and return the canonical logical digest of one training H5."""
+
+    with h5py.File(path, "r") as handle:
+        if (
+            str(handle.attrs.get("imu_schema_version", "")) != TRAINING_SCHEMA_VERSION
+            or str(handle.attrs.get("artifact_profile", ""))
+            != TRAINING_ARTIFACT_PROFILE
+            or float(handle.attrs.get("sampling_rate_hz", 0.0)) != TARGET_RATE_HZ
+            or str(handle.attrs.get("evaluation_role", "")) != "training_only"
+        ):
+            raise ValueError(f"训练导出合同不匹配：{path}")
+        expected = str(handle.attrs.get("logical_content_sha256", ""))
+        actual = _logical_digest(
+            np.asarray(handle["samples"], dtype=np.float32),
+            np.asarray(handle["sequences"]),
+            np.asarray(handle["annotations"]),
+        )
+    if expected != actual:
+        raise ValueError(f"训练导出 logical_content_sha256 不匹配：{path}")
+    return actual
+
+
 def merge_training_exports(
     files: list[tuple[str, str, Path]], output_path: Path
 ) -> Path:
