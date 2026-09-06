@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import math
@@ -17,6 +16,7 @@ import numpy as np
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.cw12eu import calibrate_counts
 from imu_data_collector.hdf5_store import sha256_file
+from imu_data_collector.logical_content import logical_content_sha256
 from imu_data_collector.models import (
     BinaryLabel,
     ReviewDocument,
@@ -260,46 +260,13 @@ def _logical_digest(
     sequences: np.ndarray,
     annotations: np.ndarray,
 ) -> str:
-    def text(value: object) -> str:
-        return value.decode("utf-8") if isinstance(value, bytes) else str(value)
-
-    metadata = {
-        "dataset_id": "cw12eu",
-        "sampling_rate_hz": float(TARGET_RATE_HZ),
-        "sequences": [
-            {
-                "sample_start": int(row["sample_start"]),
-                "sample_stop": int(row["sample_stop"]),
-                "source_file": text(row["source_file"]),
-                "participant_id": text(row["participant_id"]),
-                "recording_id": text(row["recording_id"]),
-                "body_location": text(row["body_location"]),
-                "activity": text(row["activity_code"]),
-                "is_fall": bool(row["is_fall"]),
-                "original_sampling_rate_hz": float(row["source_sampling_rate_hz"]),
-                "supervision_kind": text(row["supervision_kind"]),
-            }
-            for row in sequences
-        ],
-        "annotations": [
-            {
-                "sequence_index": int(item["sequence_index"]),
-                "kind": text(item["kind"]),
-                "start_sample": int(item["start_sample"]),
-                "stop_sample": int(item["stop_sample"]),
-                "code": text(item["code"]),
-            }
-            for item in annotations
-        ],
-    }
-    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
-    little_endian_values = np.asarray(values, dtype="<f4", order="C")
-    digest = hashlib.sha256()
-    digest.update(len(encoded).to_bytes(8, "little"))
-    digest.update(encoded)
-    digest.update(np.asarray(little_endian_values.shape, dtype="<i8").tobytes())
-    digest.update(little_endian_values.tobytes())
-    return digest.hexdigest()
+    return logical_content_sha256(
+        values,
+        sequences,
+        annotations,
+        dataset_id="cw12eu",
+        sampling_rate_hz=TARGET_RATE_HZ,
+    )
 
 
 def merge_training_exports(

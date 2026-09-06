@@ -14,6 +14,8 @@ from typing import Any, BinaryIO
 import h5py
 import numpy as np
 
+from imu_data_collector.logical_content import logical_content_sha256
+
 CORE_DATASET_SCHEMA_VERSION = "3.2.0"
 TRAINING_ARTIFACT_PROFILE = "training_dataset"
 CLIENT_ARTIFACT_PROFILE = "client_delivery"
@@ -166,43 +168,13 @@ def _check_compound_dtype(
 def _logical_digest(
     values: np.ndarray, sequences: np.ndarray, annotations: np.ndarray
 ) -> str:
-    metadata = {
-        "dataset_id": "cw12eu",
-        "sampling_rate_hz": 25.0,
-        "sequences": [
-            {
-                "sample_start": int(row["sample_start"]),
-                "sample_stop": int(row["sample_stop"]),
-                "source_file": _text(row["source_file"]),
-                "participant_id": _text(row["participant_id"]),
-                "recording_id": _text(row["recording_id"]),
-                "body_location": _text(row["body_location"]),
-                "activity": _text(row["activity_code"]),
-                "is_fall": bool(row["is_fall"]),
-                "original_sampling_rate_hz": float(row["source_sampling_rate_hz"]),
-                "supervision_kind": _text(row["supervision_kind"]),
-            }
-            for row in sequences
-        ],
-        "annotations": [
-            {
-                "sequence_index": int(row["sequence_index"]),
-                "kind": _text(row["kind"]),
-                "start_sample": int(row["start_sample"]),
-                "stop_sample": int(row["stop_sample"]),
-                "code": _text(row["code"]),
-            }
-            for row in annotations
-        ],
-    }
-    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
-    little_endian_values = np.asarray(values, dtype="<f4", order="C")
-    digest = hashlib.sha256()
-    digest.update(len(encoded).to_bytes(8, "little"))
-    digest.update(encoded)
-    digest.update(np.asarray(little_endian_values.shape, dtype="<i8").tobytes())
-    digest.update(little_endian_values.tobytes())
-    return digest.hexdigest()
+    return logical_content_sha256(
+        values,
+        sequences,
+        annotations,
+        dataset_id="cw12eu",
+        sampling_rate_hz=25.0,
+    )
 
 
 def _validate_core(
