@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 import h5py
 import numpy as np
@@ -21,7 +21,7 @@ TRAINING_ARTIFACT_PROFILE = "training_dataset"
 CLIENT_ARTIFACT_PROFILE = "client_delivery"
 CLIENT_HDF5_CONTRACT_VERSION = "1.0.0"
 CLIENT_DELIVERY_MANIFEST_SCHEMA = "cw12eu_client_hdf5_delivery_v1"
-COPY_BYTES = 8 * 1024 * 1024
+COPY_BYTES = 32 * 1024 * 1024
 FEATURE_COLUMNS = (
     "acceleration_x_mps2",
     "acceleration_y_mps2",
@@ -79,24 +79,6 @@ def public_taxonomy(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _text(value: object) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
-
-
-def _sha256_stream(handle: BinaryIO, *, limit: int | None = None) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    while limit is None or size < limit:
-        read_size = COPY_BYTES if limit is None else min(COPY_BYTES, limit - size)
-        chunk = handle.read(read_size)
-        if not chunk:
-            break
-        digest.update(chunk)
-        size += len(chunk)
-    return digest.hexdigest(), size
-
-
-def sha256_path(path: Path) -> str:
-    with path.open("rb") as handle:
-        return _sha256_stream(handle)[0]
 
 
 def _string_dtype() -> np.dtype:
@@ -402,6 +384,7 @@ def build_client_hdf5(
     recordings: list[dict[str, Any]],
     taxonomies: list[dict[str, Any]],
     read_object_chunks: Callable[[str, int], bytes],
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> ClientHdf5Report:
     """Build a client delivery directly from immutable snapshot inputs."""
 
@@ -418,6 +401,10 @@ def build_client_hdf5(
     temporary_handle.close()
     partial.unlink(missing_ok=True)
     video_bytes = 0
+    total_video_bytes = sum(int(recording["video"]["size_bytes"]) for recording in recordings)
+    copied_video_bytes = 0
+    if progress is not None:
+        progress("preparing", 0, total_video_bytes)
     try:
         taxonomy_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
         label_rows: list[tuple[Any, ...]] = []
@@ -538,6 +525,13 @@ def build_client_hdf5(
                         )
                         digest.update(chunk)
                         cursor += len(chunk)
+                        copied_video_bytes += len(chunk)
+                        if progress is not None:
+                            progress(
+                                "copying_videos",
+                                copied_video_bytes,
+                                total_video_bytes,
+                            )
                     if digest.hexdigest() != expected_sha256:
                         raise ValueError("冻结视频对象 SHA-256 不一致")
                     output.flush()
@@ -585,7 +579,7 @@ def build_client_hdf5(
                     track_times=False,
                 )
                 output.flush()
-        validate_client_hdf5(partial)
+        validation = validate_client_hdf5(partial, progress=progress)
         os.replace(partial, destination)
     finally:
         partial.unlink(missing_ok=True)
@@ -593,14 +587,18 @@ def build_client_hdf5(
     return ClientHdf5Report(
         output_path=str(destination),
         size_bytes=destination.stat().st_size,
-        sha256=sha256_path(destination),
+        sha256=str(validation["sha256"]),
         recording_count=len(recordings),
         video_bytes=video_bytes,
         dataset_bytes=dataset_path.stat().st_size,
     )
 
 
-def validate_client_hdf5(path: Path) -> dict[str, Any]:
+def validate_client_hdf5(
+    path: Path,
+    *,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> dict[str, Any]:
     """Validate all logical tables and each embedded MP4 physical byte range."""
 
     file_size = path.stat().st_size
@@ -760,12 +758,56 @@ def validate_client_hdf5(path: Path) -> dict[str, Any]:
             if _text(row["code"]) not in catalog_codes.get(identity, set()):
                 raise ValueError("annotation code 无法在该 sequence 的 taxonomy 中解析")
 
+    whole_file_digest = hashlib.sha256()
+    range_states = [
+        {
+            "start": offset,
+            "stop": offset + size,
+            "expected": expected_digest,
+            "digest": hashlib.sha256(),
+            "size": 0,
+        }
+        for offset, size, expected_digest in sorted(physical_ranges)
+    ]
+    cursor = 0
+    active_range = 0
     with path.open("rb") as source:
-        for offset, size, expected_digest in physical_ranges:
-            source.seek(offset)
-            observed_digest, observed_size = _sha256_stream(source, limit=size)
-            if observed_size != size or observed_digest != expected_digest:
-                raise ValueError("客户 H5 中的视频物理范围 SHA-256 不匹配")
+        while chunk := source.read(COPY_BYTES):
+            chunk_start = cursor
+            chunk_stop = cursor + len(chunk)
+            whole_file_digest.update(chunk)
+            while (
+                active_range < len(range_states)
+                and int(range_states[active_range]["stop"]) <= chunk_start
+            ):
+                active_range += 1
+            index = active_range
+            while (
+                index < len(range_states)
+                and int(range_states[index]["start"]) < chunk_stop
+            ):
+                state = range_states[index]
+                overlap_start = max(chunk_start, int(state["start"]))
+                overlap_stop = min(chunk_stop, int(state["stop"]))
+                if overlap_start < overlap_stop:
+                    payload = chunk[
+                        overlap_start - chunk_start : overlap_stop - chunk_start
+                    ]
+                    state["digest"].update(payload)
+                    state["size"] = int(state["size"]) + len(payload)
+                index += 1
+            cursor = chunk_stop
+            if progress is not None:
+                progress("validating", cursor, file_size)
+    if cursor != file_size:
+        raise ValueError("客户 H5 文件长度在校验期间发生变化")
+    for state in range_states:
+        expected_size = int(state["stop"]) - int(state["start"])
+        if (
+            int(state["size"]) != expected_size
+            or state["digest"].hexdigest() != state["expected"]
+        ):
+            raise ValueError("客户 H5 中的视频物理范围 SHA-256 不匹配")
     return {
         "hdf5_schema_version": CORE_DATASET_SCHEMA_VERSION,
         "artifact_profile": CLIENT_ARTIFACT_PROFILE,
@@ -773,4 +815,5 @@ def validate_client_hdf5(path: Path) -> dict[str, Any]:
         "recording_count": len(sequences),
         "annotation_count": len(annotations),
         "size_bytes": file_size,
+        "sha256": whole_file_digest.hexdigest(),
     }

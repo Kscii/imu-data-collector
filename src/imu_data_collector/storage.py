@@ -9,12 +9,16 @@ import shutil
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from google.api_core.exceptions import NotFound, PreconditionFailed
+from google.auth import iam
+from google.auth.transport.requests import Request
 from google.cloud import storage
+from google.oauth2 import service_account as service_account_credentials
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,15 @@ class ObjectStore(Protocol):
         *,
         if_source_generation_match: int,
     ) -> ObjectInfo: ...
+
+    def signed_download_url(
+        self,
+        key: str,
+        *,
+        expires: timedelta,
+        filename: str,
+        content_type: str,
+    ) -> str | None: ...
 
 
 def _safe_key(key: str) -> Path:
@@ -270,6 +283,17 @@ class LocalFilesystemStore:
             shutil.copy2(source_metadata, destination_metadata)
         return self._info(destination_key, destination)
 
+    def signed_download_url(
+        self,
+        key: str,
+        *,
+        expires: timedelta,
+        filename: str,
+        content_type: str,
+    ) -> str | None:
+        _safe_key(key)
+        return None
+
     def _info(self, key: str, path: Path) -> ObjectInfo:
         stat = path.stat()
         metadata_path = self._metadata_path(key)
@@ -315,6 +339,8 @@ class GcsObjectStore:
     ) -> ObjectInfo:
         _safe_key(key)
         blob = self.bucket.blob(key)
+        if source.stat().st_size > 32 * 1024 * 1024:
+            blob.chunk_size = 32 * 1024 * 1024
         blob.metadata = metadata or {}
         try:
             blob.upload_from_filename(
@@ -432,6 +458,44 @@ class GcsObjectStore:
             raise ObjectConflictError(f"对象已存在或源已更新：{destination_key}") from error
         copied.reload()
         return self._info(copied)
+
+    def signed_download_url(
+        self,
+        key: str,
+        *,
+        expires: timedelta,
+        filename: str,
+        content_type: str,
+    ) -> str | None:
+        _safe_key(key)
+        safe_filename = quote(filename, safe="._-")
+        credentials = self.client._credentials
+        if isinstance(credentials, service_account_credentials.Credentials):
+            signing_credentials = credentials
+        else:
+            request = Request()
+            credentials.refresh(request)
+            service_account_email = str(
+                getattr(credentials, "service_account_email", "")
+            )
+            if not service_account_email or service_account_email == "default":
+                raise ValueError("当前 GCS 凭据无法确定签名服务账号")
+            signing_credentials = service_account_credentials.Credentials(
+                signer=iam.Signer(request, credentials, service_account_email),
+                service_account_email=service_account_email,
+                token_uri="https://oauth2.googleapis.com/token",
+            )
+        return self.bucket.blob(key).generate_signed_url(
+            version="v4",
+            expiration=expires,
+            method="GET",
+            credentials=signing_credentials,
+            response_disposition=(
+                f"attachment; filename=\"{safe_filename}\"; "
+                f"filename*=UTF-8''{safe_filename}"
+            ),
+            response_type=content_type,
+        )
 
 
 def create_object_store(

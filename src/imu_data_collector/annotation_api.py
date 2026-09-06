@@ -10,7 +10,13 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from imu_data_collector.annotation_service import AnnotationService
@@ -889,6 +895,17 @@ def create_annotation_app(
             raise HTTPException(status_code=404, detail="找不到该训练快照") from error
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+        if request.method == "GET" and range_header is None:
+            signed_url = service.client_delivery_signed_url(snapshot_id)
+            if signed_url is not None:
+                return RedirectResponse(
+                    signed_url,
+                    status_code=307,
+                    headers={
+                        "Cache-Control": "private, no-store",
+                        "X-Content-SHA256": str(payload["artifact_sha256"]),
+                    },
+                )
         return object_download_response(
             store=object_store,
             info=artifact,

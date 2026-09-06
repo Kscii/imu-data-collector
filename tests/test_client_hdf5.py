@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import h5py
@@ -148,7 +149,12 @@ def _inputs(
     return dataset, video, recordings, taxonomies
 
 
-def _build(tmp_path: Path, *, annotation_code: str = "walking") -> tuple[Path, bytes]:
+def _build(
+    tmp_path: Path,
+    *,
+    annotation_code: str = "walking",
+    progress: Callable[[str, int, int], None] | None = None,
+) -> tuple[Path, bytes]:
     dataset, video, recordings, taxonomies = _inputs(
         tmp_path, annotation_code=annotation_code
     )
@@ -167,9 +173,22 @@ def _build(tmp_path: Path, *, annotation_code: str = "walking") -> tuple[Path, b
         recordings=recordings,
         taxonomies=taxonomies,
         read_object_chunks=read_chunk,
+        progress=progress,
     )
     assert report.sha256 == _sha256(destination.read_bytes())
     return destination, video
+
+
+def test_build_reports_copy_and_single_pass_validation_progress(tmp_path: Path) -> None:
+    updates: list[tuple[str, int, int]] = []
+    destination, video = _build(tmp_path, progress=lambda *item: updates.append(item))
+
+    assert any(stage == "copying_videos" for stage, _current, _total in updates)
+    assert updates[-1] == ("validating", destination.stat().st_size, destination.stat().st_size)
+    assert validate_client_hdf5(destination)["sha256"] == _sha256(destination.read_bytes())
+    assert sum(current for stage, current, _total in updates if stage == "copying_videos") >= len(
+        video
+    )
 
 
 def test_build_client_hdf5_keeps_strict_core_and_embeds_native_video(

@@ -342,6 +342,12 @@ type TrainingSnapshot = {
     hdf5_schema_version?: string;
     artifact_profile?: string;
     content_type?: string;
+    stage?: string | null;
+    bytes_complete?: number;
+    bytes_total?: number;
+    progress_percent?: number;
+    started_at_utc?: string | null;
+    updated_at_utc?: string | null;
   };
   created?: boolean;
 };
@@ -3232,6 +3238,17 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
     snapshot.benchmark?.hdf5_schema_version && `HDF5 ${snapshot.benchmark.hdf5_schema_version}`,
     snapshot.benchmark?.handoff_contract_version && `${tr("交接契约", "Handoff contract")} ${snapshot.benchmark.handoff_contract_version}`,
   ].filter((value): value is string => Boolean(value));
+  const generating = snapshot.delivery?.state === "queued" || snapshot.delivery?.state === "running";
+  const progress = snapshot.delivery?.progress_percent ?? 0;
+  const stageLabels: Record<string, string> = {
+    queued: tr("等待后台任务", "Waiting for background worker"),
+    preparing: tr("准备冻结数据", "Preparing frozen data"),
+    copying_videos: tr("写入视频", "Embedding videos"),
+    validating: tr("校验 H5 与视频哈希", "Validating HDF5 and video hashes"),
+    uploading: tr("上传交付文件", "Uploading delivery file"),
+    finalizing: tr("写入不可变清单", "Finalising immutable manifest"),
+    interrupted: tr("上次任务已中断", "Previous job was interrupted"),
+  };
   return <article className={current ? "current-snapshot" : ""}>
     <div>
       <strong>{current ? tr("当前训练快照", "Current training snapshot") : tr("历史训练快照", "Historical training snapshot")} · {snapshot.snapshot_id}</strong>
@@ -3246,8 +3263,9 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
       {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <span className="muted">HDF5 {snapshot.delivery.hdf5_schema_version} · {snapshot.delivery.contract_version} · {((snapshot.delivery.artifact_size_bytes ?? 0) / 1024 ** 3).toFixed(2)} GiB</span>}
       {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && snapshot.delivery.artifact_sha256 && <button onClick={() => navigator.clipboard.writeText(snapshot.delivery?.artifact_sha256 ?? "")}>{tr("复制客户 H5 SHA-256", "Copy client HDF5 SHA-256")}</button>}
       {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link" href="https://viewer.imu.kscii.tech" target="_blank" rel="noreferrer">{tr("打开本地文件查看器", "Open local-file viewer")}</a>}
-      {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || snapshot.delivery.state === "queued" || snapshot.delivery.state === "running"} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{snapshot.delivery.state === "queued" || snapshot.delivery.state === "running" ? tr("后台生成中…", "Generating…") : snapshot.delivery.state === "failed" ? tr("重试生成客户 H5", "Retry client HDF5") : tr("生成客户 H5", "Create client HDF5")}</button>}
-      {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && snapshot.delivery.message && <span className={snapshot.delivery.state === "failed" ? "warning-text" : "muted"}>{snapshot.delivery.state === "failed" ? tr("生成失败：", "Generation failed: ") : ""}{snapshot.delivery.message}</span>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || generating} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{generating ? tr(`后台生成中 ${progress.toFixed(0)}%`, `Generating ${progress.toFixed(0)}%`) : snapshot.delivery.state === "failed" ? tr("重试生成客户 H5", "Retry client HDF5") : tr("生成客户 H5", "Create client HDF5")}</button>}
+      {snapshot.delivery?.eligible && generating && <span className="muted">{stageLabels[snapshot.delivery.stage ?? "queued"] ?? snapshot.delivery.stage} · {snapshot.delivery.bytes_total ? `${formatDatasetBytes(snapshot.delivery.bytes_complete ?? 0)} / ${formatDatasetBytes(snapshot.delivery.bytes_total)}` : tr("正在排队", "Queued")}</span>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "failed" && snapshot.delivery.message && <span className="warning-text">{tr("生成失败：", "Generation failed: ")}{snapshot.delivery.message}</span>}
       {!snapshot.delivery?.eligible && <span className="muted" title={snapshot.delivery?.message ?? ""}>{tr("该快照不可生成客户 H5", "This snapshot is not eligible for client HDF5 delivery")}</span>}
       {snapshot.benchmark && !snapshot.benchmark.is_current && <button disabled={busy} onClick={() => onActivate(snapshot.snapshot_id)}>{tr("验证后激活 current", "Activate current after validation")}</button>}
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>{tr("清理快照", "Delete snapshot")}</button>}
