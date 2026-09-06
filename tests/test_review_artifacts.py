@@ -15,6 +15,7 @@ from imu_data_collector.artifacts import (
     create_training_snapshot_archive,
     export_aligned,
     merge_training_exports,
+    validate_training_export_logical_content,
 )
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.hdf5_store import sha256_file
@@ -221,6 +222,24 @@ def test_aligned_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) 
         annotation = handle["annotations"][0]
         assert annotation["kind"].decode() == "activity"
         assert (annotation["start_sample"], annotation["stop_sample"]) == (0, 50)
+    assert len(validate_training_export_logical_content(output)) == 64
+
+
+def test_training_export_rejects_legacy_flat_table_digest(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    output = export_aligned(
+        completed_review(h5_path, mkv_path),
+        h5_path,
+        mkv_path,
+        tmp_path / "aligned.h5",
+        ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4),
+        taxonomy(),
+    )
+    with h5py.File(output, "r+") as handle:
+        handle.attrs["logical_content_sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="logical_content_sha256"):
+        validate_training_export_logical_content(output)
 
 
 def test_fall_onset_is_derived_from_segment_start_and_impact_is_preserved(

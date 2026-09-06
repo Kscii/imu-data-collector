@@ -29,6 +29,7 @@ from imu_data_collector.artifacts import (
     create_training_snapshot_archive,
     export_aligned,
     merge_training_exports,
+    validate_training_export_logical_content,
 )
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.client_hdf5 import (
@@ -1871,11 +1872,33 @@ class AnnotationService:
                 if review.workflow.state != ReviewWorkflowState.COMPLETED:
                     continue
                 previous = review.active_export
-                if (
-                    previous is not None
-                    and previous.sampling_rate_hz == 25.0
-                    and previous.hdf5_schema_version == TRAINING_SCHEMA_VERSION
-                ):
+                previous_is_current = False
+                if previous is not None:
+                    try:
+                        _reference, info = self.active_export(manifest.recording_id)
+                        path = (
+                            self.cache_root
+                            / "release-inputs"
+                            / previous.sha256
+                            / previous.filename
+                        )
+                        with self._cache_lock(previous.sha256):
+                            if (
+                                not path.is_file()
+                                or path.stat().st_size != previous.size_bytes
+                                or sha256_file(path) != previous.sha256
+                            ):
+                                self.store.download_file(previous.object_key, path)
+                            if path.stat().st_size != info.size_bytes:
+                                raise ValueError("当前训练导出缓存大小不一致")
+                        validate_training_export_logical_content(path)
+                        previous_is_current = (
+                            previous.sampling_rate_hz == 25.0
+                            and previous.hdf5_schema_version == TRAINING_SCHEMA_VERSION
+                        )
+                    except (FileNotFoundError, ValueError):
+                        previous_is_current = False
+                if previous_is_current:
                     results.append(
                         {
                             "recording_id": manifest.recording_id,
@@ -2276,6 +2299,11 @@ class AnnotationService:
                     ):
                         path.unlink(missing_ok=True)
                         raise ValueError("训练导出缓存的大小或 SHA-256 不匹配")
+                try:
+                    validate_training_export_logical_content(path)
+                except ValueError:
+                    incompatible_recordings.append(manifest.recording_id)
+                    continue
                 participant_id = review.participant_assignment.participant_id
                 if (
                     review.participant_assignment.status != ParticipantAssignmentStatus.CONFIRMED
