@@ -1847,6 +1847,100 @@ class AnnotationService:
             raise ValueError("当前训练导出对象与 review.json 不一致")
         return reference, info
 
+    def reexport_completed_training(
+        self,
+        *,
+        actor_id: str,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """将已完成正式录制的派生训练制品重导为当前合同。
+
+        这是显式的一次性维护操作：不修改同步、标注或工作流状态，也不覆盖
+        历史对象；应用时仅创建新的不可变导出并以乐观锁更新 active_export。
+        """
+
+        self._require_allowed_actor(actor_id)
+        if actor_id not in self.settings.identity.admins:
+            raise ValueError("只有管理员可以批量重导训练制品")
+        results: list[dict[str, Any]] = []
+        with self._release_delete_lock:
+            for manifest in self.catalog.list():
+                if manifest.data_tier.value != "prod":
+                    continue
+                review, _generation = self.reviews.load(manifest)
+                if review.workflow.state != ReviewWorkflowState.COMPLETED:
+                    continue
+                previous = review.active_export
+                if (
+                    previous is not None
+                    and previous.sampling_rate_hz == 25.0
+                    and previous.hdf5_schema_version == TRAINING_SCHEMA_VERSION
+                ):
+                    results.append(
+                        {
+                            "recording_id": manifest.recording_id,
+                            "status": "current",
+                            "review_revision": review.revision,
+                            "object_key": previous.object_key,
+                            "hdf5_schema_version": previous.hdf5_schema_version,
+                        }
+                    )
+                    continue
+                item: dict[str, Any] = {
+                    "recording_id": manifest.recording_id,
+                    "status": "ready",
+                    "review_revision": review.revision,
+                    "previous_object_key": previous.object_key if previous else None,
+                    "previous_hdf5_schema_version": (
+                        previous.hdf5_schema_version if previous else None
+                    ),
+                }
+                if apply:
+                    reference = self._build_training_export(
+                        manifest,
+                        review,
+                        review.revision,
+                    )
+
+                    def replace_export(
+                        current: ReviewDocument,
+                        expected_previous: TrainingExportReference | None = previous,
+                        next_reference: TrainingExportReference = reference,
+                    ) -> ReviewDocument:
+                        if current.workflow.state != ReviewWorkflowState.COMPLETED:
+                            raise ValueError("维护期间录制已被重开，请重试")
+                        if current.active_export != expected_previous:
+                            raise ReviewConflictError("维护期间训练导出已变化，请重试")
+                        return current.model_copy(update={"active_export": next_reference})
+
+                    updated = self.reviews.mutate(
+                        manifest,
+                        review.revision,
+                        replace_export,
+                    )
+                    item.update(
+                        {
+                            "status": "reexported",
+                            "updated_review_revision": updated.revision,
+                            "object_key": reference.object_key,
+                            "hdf5_schema_version": reference.hdf5_schema_version,
+                            "sha256": reference.sha256,
+                        }
+                    )
+                results.append(item)
+        logger.info(
+            "批量重导已完成训练制品 actor_id=%s apply=%s candidates=%d",
+            actor_id,
+            apply,
+            sum(item["status"] in {"ready", "reexported"} for item in results),
+        )
+        return {
+            "apply": apply,
+            "actor_id": actor_id,
+            "target_hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+            "recordings": results,
+        }
+
     def _publish_benchmark_snapshot(
         self,
         files: list[tuple[str, str, Path]],
@@ -2205,7 +2299,7 @@ class AnnotationService:
                 )
             if incompatible_recordings:
                 raise ValueError(
-                    "以下已完成录制仍引用历史 30 Hz 导出，需 reopen 后重新完成："
+                    "以下已完成录制仍引用非当前 HDF5 导出；请由管理员执行显式重导："
                     + "、".join(sorted(incompatible_recordings))
                 )
             if not files:

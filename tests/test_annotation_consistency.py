@@ -428,6 +428,66 @@ def test_reopen_and_reexport_selects_new_immutable_object(tmp_path: Path) -> Non
     assert active.object_key == second.object_key
 
 
+def test_admin_can_explicitly_reexport_completed_legacy_training_artifact(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    _ready_review(service, recording_id)
+    completed = service.update_workflow(
+        recording_id,
+        AnnotationReviewWorkflowRequest(
+            action="complete",
+            expected_revision=service.review(recording_id).revision,
+        ),
+        "xfan0282",
+    )
+    assert completed.active_export is not None
+    previous_object = completed.active_export.object_key
+    manifest = service.required_manifest(recording_id)
+
+    downgraded = service.reviews.mutate(
+        manifest,
+        completed.revision,
+        lambda review: review.model_copy(
+            update={
+                "active_export": review.active_export.model_copy(
+                    update={"hdf5_schema_version": "3.1.0"}
+                )
+            }
+        ),
+    )
+    before_annotations = downgraded.annotations
+    before_workflow = downgraded.workflow
+
+    preview = service.reexport_completed_training(actor_id="xfan0282")
+    assert preview["apply"] is False
+    assert preview["recordings"] == [
+        {
+            "recording_id": recording_id,
+            "status": "ready",
+            "review_revision": downgraded.revision,
+            "previous_object_key": previous_object,
+            "previous_hdf5_schema_version": "3.1.0",
+        }
+    ]
+    assert service.review(recording_id).revision == downgraded.revision
+
+    result = service.reexport_completed_training(actor_id="xfan0282", apply=True)
+    assert result["recordings"][0]["status"] == "reexported"
+    current = service.review(recording_id)
+    assert current.revision == downgraded.revision + 1
+    assert current.annotations == before_annotations
+    assert current.workflow == before_workflow
+    assert current.active_export is not None
+    assert current.active_export.hdf5_schema_version == "3.2.0"
+    assert current.active_export.object_key != previous_object
+    assert store.stat(previous_object) is not None
+
+
 def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = LocalFilesystemStore(settings.storage.root)

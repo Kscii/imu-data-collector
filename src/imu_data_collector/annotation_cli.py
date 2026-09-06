@@ -130,6 +130,7 @@ def main() -> None:
             "serve",
             "start",
             "cleanup-orphans",
+            "reexport-completed-training",
             "archive-calibration-evidence",
             "migrate-participant-identity",
             "rollback-participant-identity",
@@ -155,6 +156,7 @@ def main() -> None:
     parser.add_argument("--plan-token")
     parser.add_argument("--confirmation")
     parser.add_argument("--migration-id")
+    parser.add_argument("--actor-id")
     parser.add_argument(
         "--project",
         default="project-51b589c7-8d5e-4e78-a10",
@@ -167,6 +169,7 @@ def main() -> None:
     settings = load_settings(args.config)
     if args.command in {
         "cleanup-orphans",
+        "reexport-completed-training",
         "archive-calibration-evidence",
         "migrate-participant-identity",
         "rollback-participant-identity",
@@ -184,6 +187,13 @@ def main() -> None:
             result = service.cleanup_orphan_uploads(
                 min_age=timedelta(days=args.min_age_days),
                 dry_run=args.dry_run,
+            )
+        elif args.command == "reexport-completed-training":
+            if not args.actor_id:
+                parser.error("重导训练制品需要 --actor-id")
+            result = service.reexport_completed_training(
+                actor_id=args.actor_id,
+                apply=args.apply,
             )
         elif args.command == "archive-calibration-evidence":
             if args.delete_source and not args.apply:
