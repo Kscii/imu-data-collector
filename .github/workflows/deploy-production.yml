@@ -1,8 +1,12 @@
-name: 部署生产环境
+name: 手动重试生产部署
 
 on:
   workflow_dispatch:
     inputs:
+      run_id:
+        description: 已成功生成生产包的 main CI run ID
+        required: true
+        type: string
       confirmation:
         description: 输入 DEPLOY PRODUCTION
         required: true
@@ -14,6 +18,7 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -29,44 +34,33 @@ jobs:
       name: production
       url: https://imu.kscii.tech
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          python-version: "3.12"
-          enable-cache: true
-      - uses: actions/setup-node@v7.0.0
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: 重新执行发布门禁
+      - name: 验证来源 CI run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
         run: |
-          uv sync --frozen --dev
-          uv run ruff check src tests scripts/verify-soft3888-compatibility.py
-          uv run pytest -q
-          npm ci --prefix frontend
-          npm run build --prefix frontend
-      - name: 生成最小部署包
-        id: bundle
+          set -euo pipefail
+          [[ "${RUN_ID}" =~ ^[0-9]+$ ]]
+          payload="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          test "$(jq -r .name <<< "${payload}")" = "CI"
+          test "$(jq -r .head_branch <<< "${payload}")" = "main"
+          test "$(jq -r .conclusion <<< "${payload}")" = "success"
+          echo "head_sha=$(jq -r .head_sha <<< "${payload}")" >> "${GITHUB_OUTPUT}"
+      - uses: actions/download-artifact@v7
+        with:
+          name: imu-annotation-production-bundle
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: 校验生产包元数据
+        env:
+          EXPECTED_RELEASE_ID: ${{ steps.source.outputs.head_sha }}
         run: |
-          bundle="imu-annotation-${GITHUB_SHA}.tar.gz"
-          deployer="imu-annotation-deploy-${GITHUB_SHA}"
-          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-            --exclude='*/__pycache__' --exclude='*.pyc' -czf "${bundle}" \
-            LICENSE README.md pyproject.toml uv.lock \
-            configs/activities.yaml configs/calibration-evidence.yaml \
-            configs/systemd/imu-annotation.service \
-            configs/systemd/imu-annotation-gc.service \
-            configs/systemd/imu-annotation-gc.timer \
-            configs/systemd/imu-upload-broker.service \
-            frontend/dist-annotation src
-          install -m 0755 scripts/deploy/imu-annotation-deploy "${deployer}"
-          digest="$(sha256sum "${bundle}" | cut -d ' ' -f 1)"
-          deployer_digest="$(sha256sum "${deployer}" | cut -d ' ' -f 1)"
-          echo "path=${bundle}" >> "${GITHUB_OUTPUT}"
-          echo "sha256=${digest}" >> "${GITHUB_OUTPUT}"
-          echo "deployer_path=${deployer}" >> "${GITHUB_OUTPUT}"
-          echo "deployer_sha256=${deployer_digest}" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+          source release-metadata.env
+          test "${RELEASE_ID}" = "${EXPECTED_RELEASE_ID}"
+          echo "${BUNDLE_SHA256}  ${BUNDLE}" | sha256sum --check --strict
+          echo "${DEPLOYER_SHA256}  ${DEPLOYER}" | sha256sum --check --strict
       - uses: google-github-actions/auth@v3
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
@@ -82,21 +76,16 @@ jobs:
         run: |
           timeout="$(gcloud compute backend-services describe "${BACKEND_SERVICE}" \
             --project "${PROJECT_ID}" --global --format='value(timeoutSec)')"
-          if [[ "${timeout}" != 3600 ]]; then
-            echo "${BACKEND_SERVICE} timeoutSec=${timeout}; run scripts/deploy/configure-large-downloads first" >&2
-            exit 1
-          fi
+          test "${timeout}" = 3600
       - name: 通过 IAP 上传并原子部署
         env:
-          BUNDLE: ${{ steps.bundle.outputs.path }}
-          BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
-          DEPLOYER: ${{ steps.bundle.outputs.deployer_path }}
-          DEPLOYER_SHA256: ${{ steps.bundle.outputs.deployer_sha256 }}
           KEEP_STOPPED: ${{ inputs.keep_stopped }}
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           ZONE: ${{ vars.GCP_ZONE }}
           VM: ${{ vars.GCP_VM }}
         run: |
+          set -euo pipefail
+          source release-metadata.env
           gcloud compute scp --quiet --tunnel-through-iap --scp-flag=-O \
             --project "${PROJECT_ID}" --zone "${ZONE}" \
             "${BUNDLE}" "${DEPLOYER}" "${VM}:/tmp/"
@@ -106,7 +95,7 @@ jobs:
               echo '${DEPLOYER_SHA256}  /tmp/${DEPLOYER}' | sha256sum --check --strict; \
               sudo install -o root -g root -m 0755 /tmp/${DEPLOYER} /usr/local/sbin/imu-annotation-deploy.next; \
               echo '${DEPLOYER_SHA256}  /usr/local/sbin/imu-annotation-deploy.next' | sudo sha256sum --check --strict; \
-              if sudo /usr/local/sbin/imu-annotation-deploy.next /tmp/${BUNDLE} ${GITHUB_SHA} ${BUNDLE_SHA256} ${KEEP_STOPPED}; then \
+              if sudo /usr/local/sbin/imu-annotation-deploy.next /tmp/${BUNDLE} ${RELEASE_ID} ${BUNDLE_SHA256} ${KEEP_STOPPED}; then \
                 sudo mv -f /usr/local/sbin/imu-annotation-deploy.next /usr/local/sbin/imu-annotation-deploy; \
                 rm -f /tmp/${DEPLOYER}; \
               else \

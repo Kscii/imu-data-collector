@@ -14,63 +14,256 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Python 与数据合同
+  scope:
+    name: 变更范围
     runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.scope.outputs.backend }}
+      frontend: ${{ steps.scope.outputs.frontend }}
+      service: ${{ steps.scope.outputs.service }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: 分类本次变更
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          backend=false
+          frontend=false
+          service=false
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            backend=true
+            frontend=true
+          else
+            if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+              base="${BASE_SHA}"
+              head="${HEAD_SHA}"
+            else
+              base="${BEFORE_SHA}"
+              head="${GITHUB_SHA}"
+              if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
+                base="$(git rev-list --max-parents=0 "${head}" | tail -1)"
+              fi
+            fi
+            git diff --name-only --no-renames "${base}" "${head}" > "${RUNNER_TEMP}/changed-files"
+            while IFS= read -r path; do
+              case "${path}" in
+                src/*|tests/*|pyproject.toml|uv.lock|scripts/*|configs/*)
+                  backend=true
+                  ;;
+                .github/workflows/*)
+                  backend=true
+                  frontend=true
+                  ;;
+              esac
+              case "${path}" in
+                frontend/*)
+                  frontend=true
+                  ;;
+              esac
+              case "${path}" in
+                src/*|pyproject.toml|uv.lock|frontend/*|configs/activities.yaml|configs/calibration-evidence.yaml|configs/systemd/*|scripts/deploy/imu-annotation-deploy)
+                  service=true
+                  ;;
+              esac
+            done < "${RUNNER_TEMP}/changed-files"
+          fi
+          echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
+          echo "frontend=${frontend}" >> "${GITHUB_OUTPUT}"
+          echo "service=${service}" >> "${GITHUB_OUTPUT}"
+          echo "backend=${backend} frontend=${frontend} service=${service}"
+
+  backend:
+    name: Python 与数据合同
+    needs: scope
+    runs-on: ubuntu-latest
+    steps:
+      - name: 无 Python 或数据合同变更
+        if: needs.scope.outputs.backend != 'true'
+        run: echo "跳过 Python 与数据合同测试。"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: needs.scope.outputs.backend == 'true'
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        if: needs.scope.outputs.backend == 'true'
         with:
           python-version: "3.12"
           enable-cache: true
       - name: 安装锁定依赖
+        if: needs.scope.outputs.backend == 'true'
         run: uv sync --frozen --dev
       - name: Ruff
+        if: needs.scope.outputs.backend == 'true'
         run: uv run ruff check src tests scripts/verify-soft3888-compatibility.py
       - name: 本机更新脚本语法
+        if: needs.scope.outputs.backend == 'true'
         run: >-
           bash -n
           scripts/update-local-capture.sh
           scripts/install-user-service.sh
           scripts/deploy/imu-annotation-deploy
       - name: Pytest
+        if: needs.scope.outputs.backend == 'true'
         run: uv run pytest -q
       - name: SOFT3888 temporal v3 合同
+        if: needs.scope.outputs.backend == 'true'
         run: uv run pytest -q tests/test_review_artifacts.py::test_aligned_export_uses_three_root_datasets_and_exact_grid
-
-  desktop-portability:
-    name: 桌面兼容性 · ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          python-version: "3.12"
-          enable-cache: true
-      - name: 安装锁定依赖
-        run: uv sync --frozen --dev
-      - name: 公共核心与平台适配测试
-        run: uv run pytest -q
-      - name: CLI 导入与主机诊断
-        run: uv run imu-collector doctor --report-only
 
   frontend:
     name: 两套前端构建
+    needs: scope
     runs-on: ubuntu-latest
     steps:
+      - name: 无前端变更
+        if: >-
+          needs.scope.outputs.frontend != 'true' &&
+          !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
+        run: echo "跳过两套前端构建。"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: >-
+          needs.scope.outputs.frontend == 'true' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
       - uses: actions/setup-node@v7.0.0
+        if: >-
+          needs.scope.outputs.frontend == 'true' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: 安装锁定依赖
+        if: >-
+          needs.scope.outputs.frontend == 'true' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         working-directory: frontend
         run: npm ci
       - name: 构建采集端与标注端
+        if: >-
+          needs.scope.outputs.frontend == 'true' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         working-directory: frontend
         run: npm run build
+      - uses: actions/upload-artifact@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
+        with:
+          name: annotation-frontend
+          path: frontend/dist-annotation
+          retention-days: 2
+
+  bundle:
+    name: 生成已验证生产包
+    needs: [scope, backend, frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@v7
+        with:
+          name: annotation-frontend
+          path: frontend/dist-annotation
+      - name: 生成最小部署包
+        run: |
+          set -euo pipefail
+          bundle="imu-annotation-${GITHUB_SHA}.tar.gz"
+          deployer="imu-annotation-deploy-${GITHUB_SHA}"
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            --exclude='*/__pycache__' --exclude='*.pyc' -czf "${bundle}" \
+            LICENSE README.md pyproject.toml uv.lock \
+            configs/activities.yaml configs/calibration-evidence.yaml \
+            configs/systemd/imu-annotation.service \
+            configs/systemd/imu-annotation-gc.service \
+            configs/systemd/imu-annotation-gc.timer \
+            configs/systemd/imu-upload-broker.service \
+            frontend/dist-annotation src
+          install -m 0755 scripts/deploy/imu-annotation-deploy "${deployer}"
+          {
+            echo "RELEASE_ID=${GITHUB_SHA}"
+            echo "BUNDLE=${bundle}"
+            echo "BUNDLE_SHA256=$(sha256sum "${bundle}" | cut -d ' ' -f 1)"
+            echo "DEPLOYER=${deployer}"
+            echo "DEPLOYER_SHA256=$(sha256sum "${deployer}" | cut -d ' ' -f 1)"
+          } > release-metadata.env
+      - uses: actions/upload-artifact@v6
+        with:
+          name: imu-annotation-production-bundle
+          path: |
+            imu-annotation-*.tar.gz
+            imu-annotation-deploy-*
+            release-metadata.env
+          retention-days: 14
+
+  deploy:
+    name: 部署生产环境
+    needs: [scope, bundle]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production
+      url: https://imu.kscii.tech
+    concurrency:
+      group: production-deployment
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: imu-annotation-production-bundle
+      - name: 校验生产包元数据
+        run: |
+          set -euo pipefail
+          source release-metadata.env
+          test "${RELEASE_ID}" = "${GITHUB_SHA}"
+          echo "${BUNDLE_SHA256}  ${BUNDLE}" | sha256sum --check --strict
+          echo "${DEPLOYER_SHA256}  ${DEPLOYER}" | sha256sum --check --strict
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: ">= 416.0.0"
+      - name: 验证大文件下载基础设施
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          BACKEND_SERVICE: ${{ vars.GCP_ANNOTATION_BACKEND || 'imu-annotation-backend' }}
+        run: |
+          timeout="$(gcloud compute backend-services describe "${BACKEND_SERVICE}" \
+            --project "${PROJECT_ID}" --global --format='value(timeoutSec)')"
+          test "${timeout}" = 3600
+      - name: 通过 IAP 上传并原子部署
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          ZONE: ${{ vars.GCP_ZONE }}
+          VM: ${{ vars.GCP_VM }}
+        run: |
+          set -euo pipefail
+          source release-metadata.env
+          gcloud compute scp --quiet --tunnel-through-iap --scp-flag=-O \
+            --project "${PROJECT_ID}" --zone "${ZONE}" \
+            "${BUNDLE}" "${DEPLOYER}" "${VM}:/tmp/"
+          gcloud compute ssh --quiet --tunnel-through-iap \
+            --project "${PROJECT_ID}" --zone "${ZONE}" "${VM}" \
+            --command "set -euo pipefail; \
+              echo '${DEPLOYER_SHA256}  /tmp/${DEPLOYER}' | sha256sum --check --strict; \
+              sudo install -o root -g root -m 0755 /tmp/${DEPLOYER} /usr/local/sbin/imu-annotation-deploy.next; \
+              echo '${DEPLOYER_SHA256}  /usr/local/sbin/imu-annotation-deploy.next' | sudo sha256sum --check --strict; \
+              if sudo /usr/local/sbin/imu-annotation-deploy.next /tmp/${BUNDLE} ${RELEASE_ID} ${BUNDLE_SHA256} false; then \
+                sudo mv -f /usr/local/sbin/imu-annotation-deploy.next /usr/local/sbin/imu-annotation-deploy; \
+                rm -f /tmp/${DEPLOYER}; \
+              else \
+                sudo rm -f /usr/local/sbin/imu-annotation-deploy.next; \
+                exit 1; \
+              fi"
+      - name: 验证公网入口
+        run: |
+          curl --fail --silent --show-error --output /dev/null https://imu.kscii.tech/api/v1/health
+          curl --fail --silent --show-error --output /dev/null https://upload.imu.kscii.tech/health

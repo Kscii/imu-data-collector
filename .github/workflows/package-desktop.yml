@@ -2,7 +2,17 @@ name: 构建桌面安装包
 
 on:
   workflow_dispatch:
-  pull_request:
+    inputs:
+      target:
+        description: 只构建需要交付的平台
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - macos-arm64
+          - macos-x86_64
+          - all
   push:
     tags: ["desktop-v*"]
 
@@ -11,86 +21,58 @@ permissions:
 
 jobs:
   scope:
-    name: 判断是否影响桌面安装包
+    name: 选择桌面安装包
     runs-on: ubuntu-latest
     outputs:
-      build_desktop: ${{ steps.scope.outputs.build_desktop }}
+      build_windows: ${{ steps.scope.outputs.build_windows }}
+      build_macos: ${{ steps.scope.outputs.build_macos }}
+      mac_matrix: ${{ steps.scope.outputs.mac_matrix }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-      - name: 区分标注端专属、共享前端与桌面端变更
-        id: classify
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
-            echo "scope=build" >> "${GITHUB_OUTPUT}"
-            echo "手动运行或桌面版本标签：构建桌面安装包。"
-            exit 0
-          fi
-
-          changed_files="${RUNNER_TEMP}/desktop-scope-files"
-          git diff --name-only --no-renames -z "${BASE_SHA}" "${HEAD_SHA}" > "${changed_files}"
-          scope="$(python3 scripts/desktop_ci_scope.py --null < "${changed_files}")"
-          echo "scope=${scope}" >> "${GITHUB_OUTPUT}"
-          echo "路径判定：${scope}"
-      - uses: actions/setup-node@v7.0.0
-        if: steps.classify.outputs.scope == 'compare_capture'
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: 比较 PR 前后的采集端 WebUI 产物
-        id: compare
-        if: steps.classify.outputs.scope == 'compare_capture'
-        shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          base_tree="${RUNNER_TEMP}/capture-base-tree"
-          base_dist="${RUNNER_TEMP}/capture-base-dist"
-          head_dist="${RUNNER_TEMP}/capture-head-dist"
-          git worktree add --detach "${base_tree}" "${BASE_SHA}"
-          (
-            cd "${base_tree}/frontend"
-            npm ci
-            IMU_FRONTEND_OUT_DIR="${base_dist}" npm run build:capture
-          )
-          (
-            cd frontend
-            npm ci
-            IMU_FRONTEND_OUT_DIR="${head_dist}" npm run build:capture
-          )
-          if diff --recursive --brief "${base_dist}" "${head_dist}"; then
-            echo "capture_changed=false" >> "${GITHUB_OUTPUT}"
-            echo "采集端产物逐文件一致。"
-          else
-            echo "capture_changed=true" >> "${GITHUB_OUTPUT}"
-            echo "采集端产物发生变化。"
-          fi
-      - name: 输出桌面构建结论
+      - name: 输出桌面构建矩阵
         id: scope
         shell: bash
         env:
-          SCOPE: ${{ steps.classify.outputs.scope }}
-          CAPTURE_CHANGED: ${{ steps.compare.outputs.capture_changed }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TARGET: ${{ inputs.target }}
         run: |
-          if [[ "${SCOPE}" == "skip" ]] || [[ "${SCOPE}" == "compare_capture" && "${CAPTURE_CHANGED}" == "false" ]]; then
-            echo "build_desktop=false" >> "${GITHUB_OUTPUT}"
-            echo "采集端不受影响：跳过 Windows/macOS 安装包。"
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            target=all
           else
-            echo "build_desktop=true" >> "${GITHUB_OUTPUT}"
-            echo "包含桌面端变更：构建 Windows/macOS 安装包。"
+            target="${REQUESTED_TARGET}"
           fi
+          case "${target}" in
+            windows)
+              echo "build_windows=true" >> "${GITHUB_OUTPUT}"
+              echo "build_macos=false" >> "${GITHUB_OUTPUT}"
+              echo 'mac_matrix={"include":[]}' >> "${GITHUB_OUTPUT}"
+              ;;
+            macos-arm64)
+              echo "build_windows=false" >> "${GITHUB_OUTPUT}"
+              echo "build_macos=true" >> "${GITHUB_OUTPUT}"
+              echo 'mac_matrix={"include":[{"runner":"macos-15","arch":"arm64"}]}' >> "${GITHUB_OUTPUT}"
+              ;;
+            macos-x86_64)
+              echo "build_windows=false" >> "${GITHUB_OUTPUT}"
+              echo "build_macos=true" >> "${GITHUB_OUTPUT}"
+              echo 'mac_matrix={"include":[{"runner":"macos-15-intel","arch":"x86_64"}]}' >> "${GITHUB_OUTPUT}"
+              ;;
+            all)
+              echo "build_windows=true" >> "${GITHUB_OUTPUT}"
+              echo "build_macos=true" >> "${GITHUB_OUTPUT}"
+              echo 'mac_matrix={"include":[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-15-intel","arch":"x86_64"}]}' >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "未知构建目标：${target}" >&2
+              exit 2
+              ;;
+          esac
+          echo "桌面构建目标：${target}"
 
   windows:
     name: Windows 10/11 x64 安装器
     needs: scope
-    if: needs.scope.outputs.build_desktop == 'true'
+    if: needs.scope.outputs.build_windows == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -121,8 +103,15 @@ jobs:
           if (-not $env:OAUTH_CLIENT_ID) { throw "缺少仓库变量 DESKTOP_GOOGLE_OAUTH_CLIENT_ID" }
           uv run python scripts/prepare_desktop_config.py --output build/desktop-config --broker-url $env:BROKER_URL --oauth-client-id $env:OAUTH_CLIENT_ID
           "IMU_DESKTOP_CONFIG_DIR=$((Resolve-Path build/desktop-config).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Windows 单元与平台适配测试
-        run: uv run pytest -q
+      - name: Windows 桌面打包冒烟测试
+        run: >-
+          uv run pytest -q
+          tests/test_ble.py
+          tests/test_cli.py
+          tests/test_desktop_cloud.py
+          tests/test_host.py
+          tests/test_tray.py
+          tests/test_video.py
       - name: 解析安装器版本
         shell: pwsh
         run: |
@@ -165,15 +154,10 @@ jobs:
   macos:
     name: macOS 13+ ${{ matrix.arch }} DMG
     needs: scope
-    if: needs.scope.outputs.build_desktop == 'true'
+    if: needs.scope.outputs.build_macos == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
+      matrix: ${{ fromJSON(needs.scope.outputs.mac_matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -221,8 +205,15 @@ jobs:
           key: macos-ffmpeg-${{ matrix.arch }}-n8.1.2-b35605ace3ddf7c1a5d67a2eb553f034aef41d55-nasm2.16.03-v2
       - name: 从锁定源码构建 FFmpeg 与 x264
         run: ./packaging/macos/prepare-ffmpeg.sh
-      - name: macOS 单元与平台适配测试
-        run: uv run pytest -q
+      - name: macOS 桌面打包冒烟测试
+        run: >-
+          uv run pytest -q
+          tests/test_ble.py
+          tests/test_cli.py
+          tests/test_desktop_cloud.py
+          tests/test_host.py
+          tests/test_tray.py
+          tests/test_video.py
       - name: 生成应用图标
         run: uv run python packaging/macos/prepare-icon.py
       - name: 构建菜单栏应用

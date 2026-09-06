@@ -1,0 +1,34 @@
+name: 桌面跨平台回归
+
+on:
+  schedule:
+    - cron: "0 19 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-portability
+  cancel-in-progress: true
+
+jobs:
+  portability:
+    name: 桌面兼容性 · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 安装锁定依赖
+        run: uv sync --frozen --dev
+      - name: 完整单元与平台适配测试
+        run: uv run pytest -q
+      - name: CLI 导入与主机诊断
+        run: uv run imu-collector doctor --report-only
