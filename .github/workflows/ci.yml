@@ -149,7 +149,7 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         working-directory: frontend
         run: npm run build
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
         with:
           name: annotation-frontend
@@ -189,7 +189,7 @@ jobs:
             echo "DEPLOYER=${deployer}"
             echo "DEPLOYER_SHA256=$(sha256sum "${deployer}" | cut -d ' ' -f 1)"
           } > release-metadata.env
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: imu-annotation-production-bundle
           path: |
