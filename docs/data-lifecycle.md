@@ -64,6 +64,10 @@ training-snapshots/<snapshot_id>/
   cw12eu_<snapshot_id>.tar
   manifest.json
 
+client-deliveries/<snapshot_id>/hdf5-v1/
+  cw12eu-client-<snapshot_id>.h5
+  manifest.json
+
 benchmark-datasets/team/cw12eu/<snapshot_id>/
   datasets/cw12eu.h5
   manifest.json
@@ -97,7 +101,8 @@ aligned SHA-256 和逻辑摘要计算内容指纹，并生成 `snapshot-<digest>
 - TAR 自包含所有 aligned 和逐文件 SHA-256 manifest；
 - 同时合并生成一个可被 benchmark 直接读取的 `cw12eu.h5`；
 - 新快照冻结每条录制的 MP4 引用、SHA-256 和样本到视频媒体时间的 `view.json`；
-- 可按同一 snapshot ID 在后台生成独立客户 ZIP；训练 TAR/HDF5 本身仍不包含视频；
+- 可按同一 snapshot ID 在后台直接生成独立的 client_delivery H5；training_dataset H5 本身
+  仍不包含视频；
 - 合并 HDF5 与 manifest 写入不可变 snapshot 前缀，再用 generation 前置条件原子推进
   `current.json`；
 - 快照生成过程中发生的后续标注不会改变本次快照；
@@ -106,15 +111,16 @@ aligned SHA-256 和逻辑摘要计算内容指纹，并生成 `snapshot-<digest>
 - 当前录制删除不影响已经生成的自包含快照。
 
 快照没有“撤销”状态或墓碑。需要弃用某个快照时，应先生成新的当前快照。平台侧管理员清理
-删除 TAR、冻结 view 和已生成的客户 ZIP，最后删除平台 manifest；已经发布到
+删除 TAR、冻结 view 和已生成的客户 H5，最后删除平台 manifest；已经发布到
 `benchmark-datasets/` 的不可变 HDF5、manifest 和 current pointer 不随之删除。训练系统解析
 受校验的 `current.json` 或显式 snapshot ID，不能把
 对象列表中的“最新”当作隐式依赖。
 
 快照存在多层显式版本，不能混为一个字段：平台对象存储侧清单使用 `4.0.0`，TAR 内
 `manifest.json` 使用 `2.0.0`，每个 `aligned.h5` 与合并后的 `cw12eu.h5` 使用 IMU HDF5
-`3.1.0`，benchmark manifest 使用 `imu_benchmark_dataset_manifest_v1` 并声明
-`imu_benchmark_contract_v2`。清单记录规范对象键、字节数、物理 SHA-256 和逻辑内容摘要；
+`3.2.0` 且 profile 为 `training_dataset`，benchmark manifest 使用
+`imu_benchmark_dataset_manifest_v2` 并声明 `dataset_handoff = 1.0.0`。清单记录规范对象键、
+字节数、物理 SHA-256 和逻辑内容摘要；
 消费者必须先校验 manifest，再校验实际文件。
 
 `imu-fall-benchmark` 直接从 `benchmark-datasets/team/cw12eu/current.json` 解析并校验合并后的
@@ -122,7 +128,7 @@ HDF5；TAR 保留给逐录制归档和审计。团队录制不是第三方原始
 adapter；它在此平台完成单位换算、同步、标注和严格 25 Hz 重采样后才发布。
 
 标注平台的“数据集”页只读解析公共和团队 `current.json`，并把不可变历史 manifest 折叠展示。
-目录只接受 `imu_benchmark_contract_v2`、HDF5 `3.1.0`、25 Hz 以及与集合相符的
+目录只接受 `imu_benchmark_contract_v2`、HDF5 `3.2.0`、`training_dataset`、25 Hz 以及与集合相符的
 `evaluation_role`；下载对象键只能来自已验证 manifest，不能由浏览器传入任意路径。网页允许
 下载 manifest 和单个 H5 用于检查，正式训练仍使用 benchmark 仓库的 `./benchmark data pull`
 完成整套 SHA-256 校验和原子激活。目录 API 没有上传、删除或推进 current pointer 的能力。
@@ -154,7 +160,7 @@ generation 删除原始制品、review、导出和相关诊断引用；对象存
 
 训练快照保留自包含训练数据，并把客户查看所需的视频复制到快照自己的不可变前缀，因此不再
 依赖当前录制或 review。快照清理只允许管理员，并要求
-`DELETE <snapshot_id>`。删除顺序是 TAR、客户 ZIP、冻结 view，最后是平台清单；失败后可用
+`DELETE <snapshot_id>`。删除顺序是 TAR、客户 H5、冻结 view，最后是平台清单；失败后可用
 同一确认安全重试。
 
 每日垃圾回收只处理超过保留期的中断 capture、已失去源 manifest 的索引回执、无当前引用的

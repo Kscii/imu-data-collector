@@ -60,7 +60,7 @@ def _install_snapshot(
         metadata={"sha256": digest},
     )
     manifest = {
-        "schema_version": "imu_benchmark_dataset_manifest_v1",
+        "schema_version": "imu_benchmark_dataset_manifest_v2",
         "contract_version": "imu_benchmark_contract_v2",
         "kind": kind,
         "snapshot_id": snapshot_id,
@@ -74,7 +74,9 @@ def _install_snapshot(
                 "size_bytes": len(payload),
                 "sha256": digest,
                 "logical_content_sha256": "a" * 64,
-                "hdf5_schema_version": "3.1.0",
+                "content_type": "application/x-hdf5",
+                "hdf5_schema_version": "3.2.0",
+                "artifact_profile": "training_dataset",
                 "sampling_rate_hz": 25.0,
                 "evaluation_role": ("cross_validation" if kind == "base" else "training_only"),
                 "sequences": 2,
@@ -90,7 +92,7 @@ def _install_snapshot(
         ],
     }
     if kind == "team":
-        manifest["handoff_contract_version"] = "0.3.0"
+        manifest["handoff_contract_version"] = "1.0.0"
     manifest_key = f"{prefix}/{snapshot_id}/manifest.json"
     store.write_json(manifest_key, manifest, if_generation_match=0)
     manifest_sha = hashlib.sha256(store.read_bytes(manifest_key)).hexdigest()
@@ -104,7 +106,7 @@ def _install_snapshot(
             "updated_at_utc": created_at_utc,
         }
         if kind == "team":
-            current_payload["handoff_contract_version"] = "0.3.0"
+            current_payload["handoff_contract_version"] = "1.0.0"
         store.write_json(
             f"{prefix}/current.json",
             current_payload,

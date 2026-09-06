@@ -211,7 +211,8 @@ def test_aligned_export_uses_three_root_datasets_and_exact_grid(tmp_path: Path) 
 
     with h5py.File(output, "r") as handle:
         assert set(handle.keys()) == {"samples", "sequences", "annotations"}
-        assert handle.attrs["imu_schema_version"] == "3.1.0"
+        assert handle.attrs["imu_schema_version"] == "3.2.0"
+        assert handle.attrs["artifact_profile"] == "training_dataset"
         assert handle.attrs["sampling_rate_hz"] == 25.0
         assert handle.attrs["evaluation_role"] == "training_only"
         assert handle["samples"].shape == (50, 6)
@@ -420,7 +421,8 @@ def test_training_snapshot_contains_manifest_and_per_recording_h5(tmp_path: Path
         manifest = json.loads(manifest_stream.read())
         assert manifest["schema_version"] == "2.0.0"
         assert manifest["dataset_id"] == "cw12eu"
-        assert manifest["hdf5_schema_version"] == "3.1.0"
+        assert manifest["hdf5_schema_version"] == "3.2.0"
+        assert manifest["artifact_profile"] == "training_dataset"
         assert manifest["sampling_rate_hz"] == 25
         assert manifest["files"] == [
             {
@@ -446,7 +448,8 @@ def test_merge_training_exports_creates_benchmark_shard(tmp_path: Path) -> None:
     )
     with h5py.File(merged, "r") as handle:
         assert handle.attrs["dataset_id"] == "cw12eu"
-        assert handle.attrs["imu_schema_version"] == "3.1.0"
+        assert handle.attrs["imu_schema_version"] == "3.2.0"
+        assert handle.attrs["artifact_profile"] == "training_dataset"
         assert handle.attrs["evaluation_role"] == "training_only"
         assert handle.attrs["sampling_rate_hz"] == 25.0
         assert handle.attrs["sequence_count"] == 1

@@ -330,8 +330,12 @@ type TrainingSnapshot = {
     eligible: boolean;
     state: "ineligible" | "not_created" | "queued" | "running" | "ready" | "failed";
     message?: string | null;
-    archive_size_bytes?: number;
-    archive_sha256?: string;
+    artifact_size_bytes?: number;
+    artifact_sha256?: string;
+    contract_version?: string;
+    hdf5_schema_version?: string;
+    artifact_profile?: string;
+    content_type?: string;
   };
   created?: boolean;
 };
@@ -3167,7 +3171,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
     try {
       const result = await api<NonNullable<TrainingSnapshot["delivery"]>>(`/api/v1/training-snapshots/${snapshotId}/delivery`, { method: "POST" });
       setMessage(result.state === "ready"
-        ? tr("交付包已经存在，可直接下载", "The delivery package is ready to download")
+        ? tr("客户 H5 已存在，可直接下载", "The client HDF5 is ready to download")
         : tr("已加入后台生成队列，可离开本页继续工作", "Queued in the background; you may leave this page"));
       await refresh();
     } catch (value) {
@@ -3184,20 +3188,20 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
-      <div className="panel-title">训练快照</div>
-      <p className="stage-help">{tr("生成操作只冻结正式数据并暂存不可变 TAR 与 cw12eu.h5。请先在 benchmark 按 snapshot ID 验证，再单独激活团队 current；相同内容会复用同一个快照。", "Generation only freezes production data and stages immutable TAR and cw12eu.h5 artifacts. Validate by snapshot ID in benchmark, then activate team current separately; unchanged content reuses the same snapshot.")}</p>
+      <div className="panel-title">{tr("训练快照", "Training snapshots")}</div>
+      <p className="stage-help">{tr("生成训练快照只冻结正式数据并暂存不可变 TAR 与 3.2 training_dataset H5。请先在 benchmark 按 snapshot ID 验证，再单独激活团队 current。客户 H5 是独立后台任务；生成完成后，本行会显示下载、格式版本、大小与 SHA-256。相同内容会复用同一个快照。", "Creating a training snapshot only freezes production data and stages an immutable TAR plus a 3.2 training_dataset HDF5. Validate it by snapshot ID in the benchmark, then activate team current separately. The client HDF5 is a separate background job; when ready, this row shows its download, format version, size, and SHA-256. Unchanged content reuses the same snapshot.")}</p>
       <div className="save-row">
-        <button className="primary" disabled={busy} onClick={createSnapshot}>{busy ? "正在处理…" : "生成当前训练快照"}</button>
-        <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>刷新列表</button>
+        <button className="primary" disabled={busy} onClick={createSnapshot}>{busy ? tr("正在处理…", "Working…") : tr("生成当前训练快照", "Create current training snapshot")}</button>
+        <button disabled={busy} onClick={() => refresh().catch((value) => setError((value as Error).message))}>{tr("刷新列表", "Refresh list")}</button>
         <span>{tr(
           `当前操作者 ${session.unikey} · 所有成员可生成和下载，管理员可清理历史快照`,
           `Current operator ${session.unikey} · All members can create and download snapshots; administrators can delete historical snapshots`,
         )}</span>
       </div>
-      {snapshots.length === 0 ? <span className="muted">目前还没有训练快照。</span> : <>
+      {snapshots.length === 0 ? <span className="muted">{tr("目前还没有训练快照。", "No training snapshots yet.")}</span> : <>
         {currentSnapshot && <SnapshotRow snapshot={currentSnapshot} current session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} onGenerateDelivery={generateDelivery} />}
         {otherSnapshots.length > 0 && <details className="snapshot-history" open={!currentSnapshot}>
-          <summary>{tr("待验证或历史快照", "Staged or historical snapshots")}（{otherSnapshots.length}）</summary>
+          <summary>{tr(`待验证或历史快照（${otherSnapshots.length}）`, `Staged or historical snapshots (${otherSnapshots.length})`)}</summary>
           {otherSnapshots.map((snapshot) => <SnapshotRow key={snapshot.snapshot_id} snapshot={snapshot} session={session} busy={busy} onDelete={deleteSnapshot} onActivate={activateSnapshot} onGenerateDelivery={generateDelivery} />)}
         </details>}
       </>}
@@ -3208,20 +3212,22 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
 function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onActivate, onGenerateDelivery }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void; onActivate: (snapshotId: string) => void; onGenerateDelivery: (snapshotId: string) => void }) {
   return <article className={current ? "current-snapshot" : ""}>
     <div>
-      <strong>{current ? "当前训练快照" : "历史训练快照"} · {snapshot.snapshot_id}</strong>
-      <span>{snapshot.recording_count} 条录制 · {(snapshot.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · 创建者 {snapshot.created_by ?? "未知"}</span>
-      <details><summary>校验信息</summary><span>TAR SHA-256 {snapshot.archive_sha256}</span>{snapshot.benchmark && <span> · HDF5 SHA-256 {snapshot.benchmark.hdf5_sha256} · current {snapshot.benchmark.current_object_key}</span>}</details>
+      <strong>{current ? tr("当前训练快照", "Current training snapshot") : tr("历史训练快照", "Historical training snapshot")} · {snapshot.snapshot_id}</strong>
+      <span>{snapshot.recording_count} {tr("条录制", "recordings")} · {(snapshot.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · {tr("创建者", "created by")} {snapshot.created_by ?? tr("未知", "unknown")}</span>
+      <details><summary>{tr("校验信息", "Verification")}</summary><span>TAR SHA-256 {snapshot.archive_sha256}</span>{snapshot.benchmark && <span> · HDF5 SHA-256 {snapshot.benchmark.hdf5_sha256} · current {snapshot.benchmark.current_object_key}</span>}</details>
     </div>
     <div className="save-row">
-      <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>下载 TAR</a>
+      <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/download`} download>{tr("下载 TAR", "Download TAR")}</a>
       {snapshot.delivery?.eligible && <a className="button-link" href={`?view=delivery&snapshot=${encodeURIComponent(snapshot.snapshot_id)}`}>{tr("团队在线复核", "Team online review")}</a>}
-      {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/delivery/download`} download>{tr("下载客户 ZIP", "Download client ZIP")}</a>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link primary" href={`/api/v1/training-snapshots/${snapshot.snapshot_id}/delivery/download`} download>{tr("下载客户 H5", "Download client HDF5")}</a>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <span className="muted">HDF5 {snapshot.delivery.hdf5_schema_version} · {snapshot.delivery.contract_version} · {((snapshot.delivery.artifact_size_bytes ?? 0) / 1024 ** 3).toFixed(2)} GiB</span>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && snapshot.delivery.artifact_sha256 && <button onClick={() => navigator.clipboard.writeText(snapshot.delivery?.artifact_sha256 ?? "")}>{tr("复制客户 H5 SHA-256", "Copy client HDF5 SHA-256")}</button>}
       {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link" href="https://viewer.imu.kscii.tech" target="_blank" rel="noreferrer">{tr("打开本地文件查看器", "Open local-file viewer")}</a>}
-      {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || snapshot.delivery.state === "queued" || snapshot.delivery.state === "running"} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{snapshot.delivery.state === "queued" || snapshot.delivery.state === "running" ? tr("后台生成中…", "Generating…") : snapshot.delivery.state === "failed" ? tr("重试生成客户包", "Retry delivery") : tr("生成客户交付包", "Create client delivery")}</button>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || snapshot.delivery.state === "queued" || snapshot.delivery.state === "running"} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{snapshot.delivery.state === "queued" || snapshot.delivery.state === "running" ? tr("后台生成中…", "Generating…") : snapshot.delivery.state === "failed" ? tr("重试生成客户 H5", "Retry client HDF5") : tr("生成客户 H5", "Create client HDF5")}</button>}
       {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && snapshot.delivery.message && <span className={snapshot.delivery.state === "failed" ? "warning-text" : "muted"}>{snapshot.delivery.state === "failed" ? tr("生成失败：", "Generation failed: ") : ""}{snapshot.delivery.message}</span>}
-      {!snapshot.delivery?.eligible && <span className="muted" title={snapshot.delivery?.message ?? ""}>{tr("历史快照不可生成交付包", "Legacy snapshot is not delivery eligible")}</span>}
+      {!snapshot.delivery?.eligible && <span className="muted" title={snapshot.delivery?.message ?? ""}>{tr("该快照不可生成客户 H5", "This snapshot is not eligible for client HDF5 delivery")}</span>}
       {snapshot.benchmark && !snapshot.benchmark.is_current && <button disabled={busy} onClick={() => onActivate(snapshot.snapshot_id)}>{tr("验证后激活 current", "Activate current after validation")}</button>}
-      {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>清理快照</button>}
+      {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>{tr("清理快照", "Delete snapshot")}</button>}
     </div>
   </article>;
 }
@@ -3523,7 +3529,7 @@ function DatasetSnapshot({ snapshot }: { snapshot: DatasetCatalogSnapshot }) {
     <div className="dataset-snapshot-heading">
       <div>
         <strong>{snapshot.current ? tr("当前版本", "Current version") : tr("历史版本", "Historical version")} · {snapshot.snapshot_id}</strong>
-        <span>{snapshot.files.length} {tr("个 H5", "H5 files")} · {tr("总时长", "total duration")} {formatDatasetDuration(snapshot.total_duration_seconds)} · schema 3.1.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
+        <span>{snapshot.files.length} {tr("个 H5", "H5 files")} · {tr("总时长", "total duration")} {formatDatasetDuration(snapshot.total_duration_seconds)} · schema 3.2.0 · 25 Hz · {new Date(snapshot.created_at_utc).toLocaleString()}</span>
       </div>
       <a className="button-link" href={`${base}/manifest/download`} download>{tr("下载 manifest", "Download manifest")}</a>
     </div>

@@ -892,12 +892,12 @@ def create_annotation_app(
         return object_download_response(
             store=object_store,
             info=artifact,
-            filename=f'cw12eu-delivery-{payload["snapshot_id"]}.zip',
-            media_type="application/zip",
+            filename=f'cw12eu-client-{payload["snapshot_id"]}.h5',
+            media_type="application/x-hdf5",
             range_header=range_header,
-            sha256=str(payload["archive_sha256"]),
+            sha256=str(payload["artifact_sha256"]),
             head=request.method == "HEAD",
-            label="客户交付 ZIP",
+            label="客户 H5",
         )
 
     @app.get("/api/v1/training-snapshots/{snapshot_id}/viewer")

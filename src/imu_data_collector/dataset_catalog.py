@@ -13,11 +13,12 @@ from typing import Any, Literal
 from imu_data_collector.storage import ObjectInfo, ObjectStore
 
 CURRENT_SCHEMA = "imu_benchmark_current_v1"
-MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v1"
+MANIFEST_SCHEMA = "imu_benchmark_dataset_manifest_v2"
 CONTRACT_VERSION = "imu_benchmark_contract_v2"
-HDF5_SCHEMA_VERSION = "3.1.0"
+HDF5_SCHEMA_VERSION = "3.2.0"
+HDF5_ARTIFACT_PROFILE = "training_dataset"
 SAMPLING_RATE_HZ = 25.0
-DATASET_HANDOFF_VERSION = "0.3.0"
+DATASET_HANDOFF_VERSION = "1.0.0"
 Kind = Literal["base", "team"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
@@ -126,7 +127,9 @@ class DatasetCatalog:
             "size_bytes",
             "sha256",
             "logical_content_sha256",
+            "content_type",
             "hdf5_schema_version",
+            "artifact_profile",
             "sampling_rate_hz",
             "evaluation_role",
             "sequences",
@@ -155,7 +158,11 @@ class DatasetCatalog:
             if entry.get("object_key") != expected_key:
                 raise ValueError("manifest 数据文件对象键不符合快照目录")
             if entry.get("hdf5_schema_version") != HDF5_SCHEMA_VERSION:
-                raise ValueError("目录只接受 HDF5 schema 3.1.0")
+                raise ValueError("目录只接受 HDF5 schema 3.2.0")
+            if entry.get("artifact_profile") != HDF5_ARTIFACT_PROFILE:
+                raise ValueError("目录只接受 training_dataset profile")
+            if entry.get("content_type") != "application/x-hdf5":
+                raise ValueError("目录只接受 application/x-hdf5")
             if float(entry.get("sampling_rate_hz", 0.0)) != SAMPLING_RATE_HZ:
                 raise ValueError("目录只接受 25 Hz 数据")
             if entry.get("evaluation_role") != expected_role:
@@ -186,8 +193,10 @@ class DatasetCatalog:
             info = self.store.stat(expected_key)
             if info is None or info.size_bytes != size:
                 raise ValueError(f"数据文件缺失或大小不一致：{filename}")
+            if info.content_type != "application/x-hdf5":
+                raise ValueError(f"数据文件 content type 不一致：{filename}")
             metadata_sha = info.metadata.get("sha256")
-            if metadata_sha and metadata_sha != digest:
+            if metadata_sha != digest:
                 raise ValueError(f"数据文件 SHA-256 metadata 不一致：{filename}")
             files[dataset_id] = (entry, info)
         return ValidatedSnapshot(
