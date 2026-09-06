@@ -309,6 +309,7 @@ type Session = {
 
 type TrainingSnapshot = {
   snapshot_id: string;
+  snapshot_schema_version?: string | null;
   created_at_utc: string | null;
   created_by: string | null;
   content_fingerprint: string | null;
@@ -325,6 +326,11 @@ type TrainingSnapshot = {
     manifest_sha256: string;
     current_object_key: string;
     is_current: boolean;
+    manifest_schema_version?: string | null;
+    contract_version?: string | null;
+    handoff_contract_version?: string | null;
+    hdf5_schema_version?: string | null;
+    artifact_profile?: string | null;
   } | null;
   delivery?: {
     eligible: boolean;
@@ -403,11 +409,19 @@ type DatasetCatalogCollection = {
   available: boolean;
   current: DatasetCatalogSnapshot | null;
   history: DatasetCatalogSnapshot[];
-  warnings: string[];
+  issues: {
+    code: "current_missing" | "current_legacy_version" | "current_invalid" | "staged_snapshot_invalid";
+    scope: "current" | "history";
+    severity: "info" | "warning" | "blocking";
+    reason_code?: string | null;
+    object_key: string;
+    detail: string;
+  }[];
+  legacy_history_count: number;
 };
 
 type DatasetCatalogDocument = {
-  schema_version: "imu_dataset_catalog_v1";
+  schema_version: "imu_dataset_catalog_v2";
   collections: DatasetCatalogCollection[];
 };
 
@@ -1179,16 +1193,16 @@ export default function App() {
     <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
       <header className={annotationApplication && tab === "annotate" ? "workbench-header" : ""}>
         <div>
-          <span className="eyebrow">{annotationApplication ? "CW12EU-T · 独立标注" : "CW12EU-T · 本机采集"}</span>
-          <h1>{annotationApplication ? "IMU 数据标注平台" : "IMU 数采平台"}</h1>
+          <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("CW12EU-T · 本机采集", "CW12EU-T · Local capture")}</span>
+          <h1>{annotationApplication ? tr("IMU 数据标注平台", "IMU Annotation Platform") : tr("IMU 数采平台", "IMU Data Collector")}</h1>
         </div>
-        <div className={`state state-${live.state}`}>{annotationApplication ? session ? `当前登录 ${session.unikey}` : "正在验证身份" : live.session_type === "devices_preview" ? "设备预览" : stateLabel(live.state)}</div>
+        <div className={`state state-${live.state}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>标注与同步</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>设备校准证据</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>标签管理</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>训练快照</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>数据集</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>模型</button>}</> : <>
-          <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>采集</button>
-          <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>记录与发布</button>
-          {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>IMU 诊断</button>}
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+          <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
+          <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
+          {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>{tr("IMU 诊断", "IMU diagnostics")}</button>}
         </>}
       </nav>
       {annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
@@ -3210,10 +3224,19 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
 }
 
 function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onActivate, onGenerateDelivery }: { snapshot: TrainingSnapshot; current?: boolean; session: Session; busy: boolean; onDelete: (snapshotId: string) => void; onActivate: (snapshotId: string) => void; onGenerateDelivery: (snapshotId: string) => void }) {
+  const createdAt = snapshot.created_at_utc
+    ? new Date(snapshot.created_at_utc).toLocaleString()
+    : tr("未知时间", "Unknown time");
+  const versions = [
+    snapshot.snapshot_schema_version && `${tr("快照格式", "Snapshot format")} ${snapshot.snapshot_schema_version}`,
+    snapshot.benchmark?.hdf5_schema_version && `HDF5 ${snapshot.benchmark.hdf5_schema_version}`,
+    snapshot.benchmark?.handoff_contract_version && `${tr("交接契约", "Handoff contract")} ${snapshot.benchmark.handoff_contract_version}`,
+  ].filter((value): value is string => Boolean(value));
   return <article className={current ? "current-snapshot" : ""}>
     <div>
       <strong>{current ? tr("当前训练快照", "Current training snapshot") : tr("历史训练快照", "Historical training snapshot")} · {snapshot.snapshot_id}</strong>
-      <span>{snapshot.recording_count} {tr("条录制", "recordings")} · {(snapshot.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · {tr("创建者", "created by")} {snapshot.created_by ?? tr("未知", "unknown")}</span>
+      <span>{snapshot.recording_count} {tr("条录制", "recordings")} · {(snapshot.archive_size_bytes / 1024 ** 2).toFixed(2)} MiB · {tr("创建时间", "created")} <time dateTime={snapshot.created_at_utc ?? undefined} title={snapshot.created_at_utc ?? ""}>{createdAt}</time> · {tr("创建者", "created by")} {snapshot.created_by ?? tr("未知", "unknown")}</span>
+      {versions.length > 0 && <span>{versions.join(" · ")}</span>}
       <details><summary>{tr("校验信息", "Verification")}</summary><span>TAR SHA-256 {snapshot.archive_sha256}</span>{snapshot.benchmark && <span> · HDF5 SHA-256 {snapshot.benchmark.hdf5_sha256} · current {snapshot.benchmark.current_object_key}</span>}</details>
     </div>
     <div className="save-row">
@@ -3506,6 +3529,25 @@ function DatasetCatalogPage() {
 
 function DatasetCollection({ collection }: { collection: DatasetCatalogCollection }) {
   const title = collection.kind === "base" ? tr("公共交叉验证数据", "Public cross-validation data") : tr("团队训练数据", "Team training data");
+  const currentIssues = collection.issues.filter((issue) => issue.scope === "current" && issue.code !== "current_missing");
+  const stagedIssues = collection.issues.filter((issue) => issue.scope === "history");
+  const issueText = (issue: DatasetCatalogCollection["issues"][number]) => {
+    if (issue.code === "current_legacy_version") {
+      return tr(
+        "当前指针仍使用旧版数据契约。请先验证并激活 HDF5 3.2 快照。",
+        "The current pointer still uses a legacy data contract. Validate and activate an HDF5 3.2 snapshot first.",
+      );
+    }
+    if (issue.reason_code === "artifact_content_type_mismatch") {
+      return tr("HDF5 对象的 Content-Type 与 manifest 不一致。", "The HDF5 object Content-Type does not match its manifest.");
+    }
+    if (issue.reason_code === "artifact_sha256_metadata_mismatch") {
+      return tr("HDF5 对象缺少或具有不匹配的 SHA-256 元数据。", "The HDF5 object has missing or mismatched SHA-256 metadata.");
+    }
+    return issue.code === "current_invalid"
+      ? tr("当前数据版本未通过目录校验，请管理员检查。", "The current dataset version failed catalog validation. Administrator attention is required.")
+      : tr("一个待发布快照未通过目录校验。", "A staged snapshot failed catalog validation.");
+  };
   return <section className="dataset-collection">
     <div className="dataset-collection-heading">
       <div>
@@ -3514,7 +3556,15 @@ function DatasetCollection({ collection }: { collection: DatasetCatalogCollectio
       </div>
       <span className={`dataset-availability ${collection.available ? "available" : ""}`}>{collection.available ? tr("当前版本可用", "Current version available") : tr("尚未发布", "Not published")}</span>
     </div>
-    {collection.warnings.map((warning) => <div className="warning-banner compact-banner" key={warning}>{warning}</div>)}
+    {currentIssues.map((issue) => <div className="warning-banner compact-banner" key={`${issue.code}:${issue.object_key}`}>{issueText(issue)}</div>)}
+    {stagedIssues.length > 0 && <details className="catalog-diagnostics">
+      <summary>{tr(`${stagedIssues.length} 个待发布快照需要处理`, `${stagedIssues.length} staged snapshot${stagedIssues.length === 1 ? "" : "s"} require attention`)}</summary>
+      {stagedIssues.map((issue) => <div className="stage-help" key={`${issue.code}:${issue.object_key}`}><code>{issue.object_key}</code> · {issueText(issue)}</div>)}
+    </details>}
+    {collection.legacy_history_count > 0 && <div className="muted">{tr(
+      `已隐藏 ${collection.legacy_history_count} 个旧契约快照；它们不会影响当前版本。`,
+      `${collection.legacy_history_count} legacy snapshot${collection.legacy_history_count === 1 ? "" : "s"} hidden; they do not affect the current version.`,
+    )}</div>}
     {collection.current && <DatasetSnapshot snapshot={collection.current} />}
     {collection.history.length > 0 && <details className="snapshot-history dataset-history">
       <summary>{tr("历史版本", "Historical versions")}（{collection.history.length}）</summary>

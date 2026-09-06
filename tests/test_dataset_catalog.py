@@ -157,6 +157,7 @@ def test_catalog_lists_current_then_newest_history_and_optional_team(
     ]
     assert team["available"] is False
     assert team["current"] is None
+    assert team["issues"][0]["code"] == "current_missing"
 
 
 def test_team_snapshot_reports_total_duration(tmp_path: Path) -> None:
@@ -202,13 +203,27 @@ def test_invalid_current_and_history_are_reported_but_not_downloadable(
         {"schema_version": "unknown"},
         if_generation_match=0,
     )
+    store.write_json(
+        "benchmark-datasets/base/legacy/manifest.json",
+        {"schema_version": "imu_benchmark_dataset_manifest_v1"},
+        if_generation_match=0,
+    )
 
     base = DatasetCatalog(store).collection("base")
 
     assert base["available"] is False
     assert base["current"] is None
-    assert any("SHA-256" in warning for warning in base["warnings"])
-    assert any("broken" in warning for warning in base["warnings"])
+    assert {issue["code"] for issue in base["issues"]} == {
+        "current_invalid",
+        "staged_snapshot_invalid",
+    }
+    assert next(
+        issue for issue in base["issues"] if issue["scope"] == "current"
+    )["detail"].endswith("SHA-256 不一致")
+    assert next(
+        issue for issue in base["issues"] if issue["scope"] == "history"
+    )["object_key"].endswith("broken/manifest.json")
+    assert base["legacy_history_count"] == 1
     assert fixture["manifest"]["snapshot_id"] in {item["snapshot_id"] for item in base["history"]}
 
 

@@ -33,3 +33,15 @@ test("英文数据集页面的统计字段和指纹标题显式本地化", () =>
   assert.doesNotMatch(appSource, /\$\{file\.rows\.toLocaleString\(\)\} 行/);
   assert.doesNotMatch(appSource, /<summary>文件指纹<\/summary>/);
 });
+
+test("应用标题、主导航和数据目录状态不依赖 DOM 文本替换", () => {
+  for (const expected of [
+    'tr("IMU 数据标注平台", "IMU Annotation Platform")',
+    'tr("设备校准证据", "Calibration evidence")',
+    'tr("训练快照", "Training snapshots")',
+    '"当前指针仍使用旧版数据契约。请先验证并激活 HDF5 3.2 快照。"',
+  ]) {
+    assert.ok(appSource.includes(expected), `缺少显式本地化：${expected}`);
+  }
+  assert.doesNotMatch(appSource, /collection\.warnings/);
+});
