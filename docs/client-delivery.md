@@ -1,49 +1,46 @@
-# 客户数据交付与公开只读查看器
+# 客户单 H5 交付与公开只读查看器
 
 ## 交付单位
 
-每个客户交付包严格绑定一个不可变训练快照 `snapshot_id`。平台在“训练快照”页面后台生成
-`cw12eu_client_delivery_v2` ZIP64；生成过程不阻塞标注和其他快照操作。相同快照与相同交付
-合同只生成同一内容。旧 v1 包不原地升级，也不再显示为当前可下载交付物。
+每个客户交付物严格绑定一个不可变训练快照 `snapshot_id`。平台在“训练快照”页面后台直接生成
+一个 `cw12eu-client-<snapshot_id>.h5`，不会先创建 ZIP。生成任务不阻塞标注或其他快照操作；
+同一快照与同一合同只复用同一不可变对象。
 
-交付 ZIP 包含：
+客户 H5 使用 `imu_schema_version = "3.2.0"` 和
+`artifact_profile = "client_delivery"`，包含：
 
-- `dataset/cw12eu.h5`：严格 25 Hz、六轴 SI 单位的合并训练数据，HDF5 schema 3.1.0；
-- `recordings/<sequence_index>/video.mp4`：该录制用于复核的原始可识别视频；
-- `recordings/<sequence_index>/view.json`：样本、标注和视频媒体时间的冻结映射；
-- `taxonomies/<taxonomy_id>/<version>.json`：标注使用的冻结 code、name 与跌倒类别；
-- `manifest.json`：快照身份、数据合同、录制列表及文件清单；
-- `README.md`、`DATASET_CARD.md` 与 `SHA256SUMS`。
+- `/samples`、`/sequences`、`/annotations`：25 Hz、六轴 SI 数据与标注；
+- `/media/index`、`/media/videos/*`、`/media/timing/*`：逐录制原始 MP4 字节和真实时间映射；
+- `/labels/catalog`、`/labels/sequence_versions`：解释历史标注所需的冻结 code/name/version。
 
-录制目录使用四位 `sequence_index`，不直接使用可能包含 Windows 非法字符的录制 ID。真实
-`recording_id` 始终保存在 manifest 和 view 中。
+交付物不包含原始 BLE 通知、原始计数、采集 H5、review、UniKey、邮箱、可逆身份映射或内嵌说明
+文档。可识别视频会进入客户 H5，因此仍受参与者同意、客户授权和保留期限约束。
 
-视频不嵌入训练 HDF5，原始 BLE 包和内部采集 H5 也不进入客户包。生成器在服务端核验所有
-来源文件的大小与 SHA-256；查看器只负责本地浏览，不替代交付端的完整性门禁。
+物理 HDF5 结构以共享规范
+[`imu-hdf5-v3.2.md`](contracts/imu-hdf5-v3.2.md) 为准；服务端对象布局和 sidecar 见
+[`client-delivery-contract.md`](contracts/client-delivery-contract.md)。
 
-完整字段和兼容规则见
-[`docs/contracts/client-delivery-contract.md`](contracts/client-delivery-contract.md)。
+## 生成与完整性
+
+生成器只读取不可变训练 H5、冻结视频、冻结 view 和冻结 taxonomy。它先做磁盘预检，在唯一临时
+文件中生成，关闭 H5 后重新校验三张核心表、每段 timing、taxonomy 引用、视频物理范围和逐视频
+SHA-256，再计算整个 H5 的 SHA-256。最终 H5 上传并验证成功后才写 manifest。
+
+整个文件的 SHA-256 不写入 H5 自身，而保存在 GCS metadata、交付 manifest 和下载响应头。
+下载支持 HTTP Range（200/206/416），便于大文件断点续传。成品不得经过 `h5repack` 或原地修改，
+否则视频物理偏移合同失效。
 
 ## 公开查看
 
-公开静态站点 `https://viewer.imu.kscii.tech` 支持拖入完整 v2 ZIP 或独立 `cw12eu.h5`。文件只在
-浏览器本地处理，不上传到标注服务器，也不读取当前 review。ZIP 模式显示冻结视频、曲线、标注
-和 taxonomy name；独立 H5 模式只显示 HDF5 内的 stable code，不用当前在线 taxonomy 猜测
-历史名称。
+`https://viewer.imu.kscii.tech` 只接受 HDF5 3.2 的 `training_dataset` 或
+`client_delivery` profile。文件只在浏览器本地处理，不上传服务器。客户 profile 可以播放
+内嵌视频，并通过逐段线性插值同步视频、25 Hz IMU 和标注；training profile 没有视频，但仍可
+移动时间轴查看曲线和稳定 code。
 
-查看器默认不重新计算包内 SHA-256，只进行合同、路径、类型、大小和引用关系检查，并显示
-“未执行内容哈希校验”。`SHA256SUMS` 保留给接收方的命令行或审计流程使用。
-
-大文件优先通过 ZIP64 成员范围直接读取。浏览器不能直接使用成员切片时，只把当前视频按块
-临时写入 OPFS；刷新后的新页面先清理上次会话目录，且不使用持久视频缓存。
-
-## 时间轴显示
-
-录制查看器共享视频、完整录制峰值概览、当前点附近 2/5/10 秒六轴原始点、标注区间和 impact
-事件的当前时间。视频和 IMU 不假定相同帧率，所有跳转使用冻结 `view.json` 的真实时间映射。
+查看器不会在打开数 GiB 文件时自动计算整体 SHA-256。用户可按需启动校验，查看进度并取消。
+下载页显示合同版本、文件大小和服务端 SHA-256，接收方应在正式交付时完成一次整体校验。
 
 ## 隐私边界
 
-客户交付包包含可识别参与者的视频，只能在已有参与者同意和交付授权范围内生成、保存和传输。
-公开查看器本身不托管客户数据；ZIP 下载仍由 Google/IAP 白名单保护。下载后的访问、传输和
-保留期限由交付方与客户约定。查看器的 MIT 软件许可证不等于数据许可证。
+公开查看器不托管客户数据，也不绕过标注平台的 Google/IAP 下载授权。下载后的访问、传输和保留
+期限由交付方与客户约定；查看器软件许可证不等于数据许可证。

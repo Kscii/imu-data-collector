@@ -2,7 +2,7 @@
 
 Date: 2026-09-04
 
-Decision: technically viable, rejected for the production customer-delivery contract
+Decision: adopted by the HDF5 3.2 `client_delivery` profile after full-size validation
 
 ## Question
 
@@ -38,21 +38,35 @@ same SHA-256 as the source MP4. The narrow byte-range technique therefore works
 when the media dataset is contiguous, unfiltered and its immutable physical
 offset is frozen after the file is finalized.
 
+A later local experiment converted the immutable 11-recording snapshot
+`snapshot-84f6cd83ce754f9cd5cd9e49` and produced these measurements:
+
+| Item | Result |
+| --- | ---: |
+| Source package | 2,842,101,659 bytes |
+| Single HDF5 | 2,839,336,957 bytes |
+| Core HDF5 plus video payload | 2,837,495,521 bytes |
+| HDF5 overhead over net payload | 0.0649% |
+| Recordings / videos | 11 / 11 |
+| Experimental HDF5 SHA-256 | `a8a8314ae8dfdf6f4dc0a6d3e3ceb3ceaba2e4d7560e14b495e47318eba79b24` |
+
+This digest identifies the historical experiment only; production 3.2 delivery
+is regenerated from immutable source objects and receives a new digest.
+
 ## Product decision
 
-This layout is not adopted for customer delivery. It couples large identifying
-media to a scientific data container, makes any HDF5 rewrite copy the video,
-reduces compatibility with ordinary HDF5 tooling, and enlarges the failure
-scope of one corrupt file. A physical offset is also a storage-layout property,
-not a normal portable HDF5 semantic contract.
+The later full-size experiment used the existing 11-recording, approximately
+2.84 GB snapshot and confirmed that the same physical-range technique works for
+all 11 videos with low container overhead. The layout is therefore adopted by
+the HDF5 3.2 `client_delivery` profile. The strict `training_dataset` profile
+continues to exclude media.
 
-The production v2 delivery remains a ZIP64/`ZIP_STORED` package containing one
-unchanged `cw12eu.h5`, independent MP4 files and explicit `view.json` mappings.
-This retains direct browser slicing while keeping training HDF5 independent of
-video. No embedded-video prototype code or branch is retained.
+The trade-offs remain real: regeneration rewrites the large file, ordinary HDF5
+tools expose video as bytes rather than a media player, and any repack or in-place
+mutation invalidates the frozen physical offsets. Production construction must
+therefore close and fully validate the file, verify every MP4 by physical range,
+publish it immutably, and never run `h5repack` on the result.
 
-## Remaining limitation
-
-This experiment established format feasibility with synthetic media, not
-performance on a complete customer package. Large-package acceptance belongs
-to the ZIP v2 viewer tests and must use an authorised real delivery artifact.
+Cross-browser and cross-platform acceptance of the final production-generated
+artifact remains a release gate; the synthetic experiment alone is not that
+acceptance evidence.

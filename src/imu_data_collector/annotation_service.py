@@ -24,21 +24,20 @@ from pydantic import ValidationError
 from imu_data_collector.annotation_catalog import AnnotationCatalog
 from imu_data_collector.annotation_review import AnnotationReviewStore
 from imu_data_collector.artifacts import (
+    TRAINING_ARTIFACT_PROFILE,
     TRAINING_SCHEMA_VERSION,
     create_training_snapshot_archive,
     export_aligned,
     merge_training_exports,
 )
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
-from imu_data_collector.client_delivery import (
-    CLIENT_DELIVERY_CONTRACT_VERSION,
-    CLIENT_DELIVERY_SCHEMA_VERSION,
-    build_delivery_archive,
+from imu_data_collector.client_hdf5 import (
+    CLIENT_ARTIFACT_PROFILE,
+    CLIENT_DELIVERY_MANIFEST_SCHEMA,
+    CLIENT_HDF5_CONTRACT_VERSION,
+    build_client_hdf5,
     canonical_json,
-    delivery_dataset_card,
-    delivery_readme,
     public_taxonomy,
-    safe_archive_component,
 )
 from imu_data_collector.config import (
     ImuSettings,
@@ -105,7 +104,6 @@ def _training_snapshot_fingerprint(recordings: list[dict[str, Any]]) -> str:
         return result
 
     identity = {
-        "snapshot_manifest_schema_version": TRAINING_SNAPSHOT_SCHEMA_VERSION,
         "handoff_contract_version": DATASET_HANDOFF_VERSION,
         "recordings": [identity_recording(item) for item in recordings],
     }
@@ -1849,6 +1847,100 @@ class AnnotationService:
             raise ValueError("当前训练导出对象与 review.json 不一致")
         return reference, info
 
+    def reexport_completed_training(
+        self,
+        *,
+        actor_id: str,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """将已完成正式录制的派生训练制品重导为当前合同。
+
+        这是显式的一次性维护操作：不修改同步、标注或工作流状态，也不覆盖
+        历史对象；应用时仅创建新的不可变导出并以乐观锁更新 active_export。
+        """
+
+        self._require_allowed_actor(actor_id)
+        if actor_id not in self.settings.identity.admins:
+            raise ValueError("只有管理员可以批量重导训练制品")
+        results: list[dict[str, Any]] = []
+        with self._release_delete_lock:
+            for manifest in self.catalog.list():
+                if manifest.data_tier.value != "prod":
+                    continue
+                review, _generation = self.reviews.load(manifest)
+                if review.workflow.state != ReviewWorkflowState.COMPLETED:
+                    continue
+                previous = review.active_export
+                if (
+                    previous is not None
+                    and previous.sampling_rate_hz == 25.0
+                    and previous.hdf5_schema_version == TRAINING_SCHEMA_VERSION
+                ):
+                    results.append(
+                        {
+                            "recording_id": manifest.recording_id,
+                            "status": "current",
+                            "review_revision": review.revision,
+                            "object_key": previous.object_key,
+                            "hdf5_schema_version": previous.hdf5_schema_version,
+                        }
+                    )
+                    continue
+                item: dict[str, Any] = {
+                    "recording_id": manifest.recording_id,
+                    "status": "ready",
+                    "review_revision": review.revision,
+                    "previous_object_key": previous.object_key if previous else None,
+                    "previous_hdf5_schema_version": (
+                        previous.hdf5_schema_version if previous else None
+                    ),
+                }
+                if apply:
+                    reference = self._build_training_export(
+                        manifest,
+                        review,
+                        review.revision,
+                    )
+
+                    def replace_export(
+                        current: ReviewDocument,
+                        expected_previous: TrainingExportReference | None = previous,
+                        next_reference: TrainingExportReference = reference,
+                    ) -> ReviewDocument:
+                        if current.workflow.state != ReviewWorkflowState.COMPLETED:
+                            raise ValueError("维护期间录制已被重开，请重试")
+                        if current.active_export != expected_previous:
+                            raise ReviewConflictError("维护期间训练导出已变化，请重试")
+                        return current.model_copy(update={"active_export": next_reference})
+
+                    updated = self.reviews.mutate(
+                        manifest,
+                        review.revision,
+                        replace_export,
+                    )
+                    item.update(
+                        {
+                            "status": "reexported",
+                            "updated_review_revision": updated.revision,
+                            "object_key": reference.object_key,
+                            "hdf5_schema_version": reference.hdf5_schema_version,
+                            "sha256": reference.sha256,
+                        }
+                    )
+                results.append(item)
+        logger.info(
+            "批量重导已完成训练制品 actor_id=%s apply=%s candidates=%d",
+            actor_id,
+            apply,
+            sum(item["status"] in {"ready", "reexported"} for item in results),
+        )
+        return {
+            "apply": apply,
+            "actor_id": actor_id,
+            "target_hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+            "recordings": results,
+        }
+
     def _publish_benchmark_snapshot(
         self,
         files: list[tuple[str, str, Path]],
@@ -1881,7 +1973,9 @@ class AnnotationService:
                 "size_bytes": merged.stat().st_size,
                 "sha256": physical_sha256,
                 "logical_content_sha256": logical_sha256,
+                "content_type": "application/x-hdf5",
                 "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+                "artifact_profile": TRAINING_ARTIFACT_PROFILE,
                 "sampling_rate_hz": 25.0,
                 "evaluation_role": "training_only",
                 "sequences": len(sequences),
@@ -1899,6 +1993,7 @@ class AnnotationService:
             "logical_content_sha256": logical_sha256,
             "snapshot_id": snapshot_id,
             "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+            "artifact_profile": TRAINING_ARTIFACT_PROFILE,
             "sampling_rate_hz": "25",
             "evaluation_role": "training_only",
         }
@@ -1919,7 +2014,7 @@ class AnnotationService:
                 raise ValueError("同一 benchmark snapshot 的 cw12eu.h5 内容不一致") from error
 
         benchmark_manifest = {
-            "schema_version": "imu_benchmark_dataset_manifest_v1",
+            "schema_version": "imu_benchmark_dataset_manifest_v2",
             "kind": "team",
             "contract_version": "imu_benchmark_contract_v2",
             "handoff_contract_version": DATASET_HANDOFF_VERSION,
@@ -1979,18 +2074,37 @@ class AnnotationService:
             raise ValueError("benchmark manifest SHA-256 不一致")
         manifest = json.loads(manifest_bytes)
         if (
-            manifest.get("snapshot_id") != snapshot_id
+            manifest.get("schema_version") != "imu_benchmark_dataset_manifest_v2"
+            or manifest.get("contract_version") != "imu_benchmark_contract_v2"
+            or manifest.get("snapshot_id") != snapshot_id
             or manifest.get("kind") != "team"
             or manifest.get("handoff_contract_version") != DATASET_HANDOFF_VERSION
         ):
             raise ValueError("benchmark manifest 与待激活快照不一致")
+        files = manifest.get("files")
+        if not isinstance(files, list) or len(files) != 1:
+            raise ValueError("benchmark manifest 必须恰好包含一个团队 HDF5")
+        descriptor = files[0]
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("hdf5_schema_version") != TRAINING_SCHEMA_VERSION
+            or descriptor.get("artifact_profile") != TRAINING_ARTIFACT_PROFILE
+            or descriptor.get("content_type") != "application/x-hdf5"
+            or descriptor.get("sha256") != benchmark.get("hdf5_sha256")
+            or descriptor.get("logical_content_sha256")
+            != benchmark.get("logical_content_sha256")
+        ):
+            raise ValueError("benchmark manifest HDF5 描述符无效")
         artifact = self.store.stat(str(benchmark.get("hdf5_object_key") or ""))
         if (
             artifact is None
+            or artifact.content_type != "application/x-hdf5"
             or artifact.size_bytes != int(benchmark.get("hdf5_size_bytes", -1))
             or artifact.metadata.get("sha256") != benchmark.get("hdf5_sha256")
             or artifact.metadata.get("logical_content_sha256")
             != benchmark.get("logical_content_sha256")
+            or artifact.metadata.get("hdf5_schema_version") != TRAINING_SCHEMA_VERSION
+            or artifact.metadata.get("artifact_profile") != TRAINING_ARTIFACT_PROFILE
         ):
             raise ValueError("benchmark HDF5 与待激活快照不一致")
         current_key = str(benchmark["current_object_key"])
@@ -2185,7 +2299,7 @@ class AnnotationService:
                 )
             if incompatible_recordings:
                 raise ValueError(
-                    "以下已完成录制仍引用历史 30 Hz 导出，需 reopen 后重新完成："
+                    "以下已完成录制仍引用非当前 HDF5 导出；请由管理员执行显式重导："
                     + "、".join(sorted(incompatible_recordings))
                 )
             if not files:
@@ -2428,28 +2542,59 @@ class AnnotationService:
                 "state": "ineligible",
                 "message": identity_issue,
             }
-        sidecar_key = f"client-deliveries/{snapshot_id}/v2/manifest.json"
+        benchmark = payload.get("benchmark")
+        source = (
+            self.store.stat(str(benchmark.get("hdf5_object_key") or ""))
+            if isinstance(benchmark, dict)
+            else None
+        )
+        if (
+            source is None
+            or source.metadata.get("hdf5_schema_version") != TRAINING_SCHEMA_VERSION
+            or source.metadata.get("artifact_profile") != TRAINING_ARTIFACT_PROFILE
+        ):
+            return {
+                "eligible": False,
+                "state": "ineligible",
+                "message": "该快照不是 HDF5 3.2 training_dataset；请重新生成当前训练快照",
+            }
+        sidecar_key = f"client-deliveries/{snapshot_id}/hdf5-v1/manifest.json"
         try:
             sidecar, _generation = self.store.read_json(sidecar_key)
         except FileNotFoundError:
             sidecar = None
         if sidecar is not None:
-            artifact = self.store.stat(str(sidecar.get("archive_object_key") or ""))
+            artifact = self.store.stat(str(sidecar.get("artifact_object_key") or ""))
             if (
-                sidecar.get("schema_version") == CLIENT_DELIVERY_SCHEMA_VERSION
+                sidecar.get("schema_version") == CLIENT_DELIVERY_MANIFEST_SCHEMA
+                and sidecar.get("contract_version") == CLIENT_HDF5_CONTRACT_VERSION
+                and sidecar.get("hdf5_schema_version") == TRAINING_SCHEMA_VERSION
+                and sidecar.get("artifact_profile") == CLIENT_ARTIFACT_PROFILE
                 and artifact is not None
-                and artifact.size_bytes == int(sidecar.get("archive_size_bytes", -1))
-                and artifact.metadata.get("sha256") == sidecar.get("archive_sha256")
+                and artifact.content_type == "application/x-hdf5"
+                and artifact.size_bytes == int(sidecar.get("artifact_size_bytes", -1))
+                and artifact.metadata.get("sha256") == sidecar.get("artifact_sha256")
                 and artifact.metadata.get("snapshot_id") == snapshot_id
+                and artifact.metadata.get("content_fingerprint")
+                == str(payload["content_fingerprint"])
+                and artifact.metadata.get("hdf5_schema_version")
+                == TRAINING_SCHEMA_VERSION
+                and artifact.metadata.get("artifact_profile")
+                == CLIENT_ARTIFACT_PROFILE
+                and artifact.metadata.get("contract_version")
+                == CLIENT_HDF5_CONTRACT_VERSION
             ):
                 return {
                     "eligible": True,
                     "state": "ready",
-                    "archive_size_bytes": artifact.size_bytes,
-                    "archive_sha256": sidecar["archive_sha256"],
+                    "artifact_size_bytes": artifact.size_bytes,
+                    "artifact_sha256": sidecar["artifact_sha256"],
                     "generated_at_utc": sidecar.get("generated_at_utc"),
                     "generated_by": sidecar.get("generated_by"),
                     "contract_version": sidecar.get("contract_version"),
+                    "hdf5_schema_version": sidecar.get("hdf5_schema_version"),
+                    "artifact_profile": sidecar.get("artifact_profile"),
+                    "content_type": "application/x-hdf5",
                 }
         with self._delivery_job_lock:
             job = dict(self._delivery_jobs.get(snapshot_id, {}))
@@ -2508,40 +2653,22 @@ class AnnotationService:
             with self._delivery_job_lock:
                 self._delivery_jobs[snapshot_id] = {
                     "state": "running",
-                    "message": "正在生成不可变 ZIP",
+                    "message": "正在生成并校验不可变客户 H5",
                 }
             payload = self._training_snapshot_payload(snapshot_id)
             if identity_issue := self._client_delivery_identity_issue(payload):
                 raise ValueError(identity_issue)
             dataset_path = self._cached_benchmark_h5(payload)
             build_recordings: list[dict[str, Any]] = []
-            public_recordings: list[dict[str, Any]] = []
             taxonomies_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
-            file_entries: list[dict[str, Any]] = [
-                {
-                    "path": "dataset/cw12eu.h5",
-                    "size_bytes": dataset_path.stat().st_size,
-                    "sha256": payload["benchmark"]["hdf5_sha256"],
-                    "role": "training_hdf5",
-                }
-            ]
             predicted_size = dataset_path.stat().st_size
             for recording in payload["recordings"]:
                 view = self._snapshot_view(snapshot_id, recording)
                 recording_id = str(recording["recording_id"])
-                participant_id = str(recording["participant_id"])
                 video = dict(recording["video"])
-                archive_prefix = f"recordings/{int(view['sequence_index']):04d}"
-                video_path = f"{archive_prefix}/video.mp4"
-                view_path = f"{archive_prefix}/view.json"
-                taxonomy_id = safe_archive_component(
-                    str(view["taxonomy_id"]), name="taxonomy_id"
-                )
-                taxonomy_version = safe_archive_component(
-                    str(view["taxonomy_version"]), name="taxonomy version"
-                )
+                taxonomy_id = str(view["taxonomy_id"])
+                taxonomy_version = str(view["taxonomy_version"])
                 taxonomy_identity = (taxonomy_id, taxonomy_version)
-                taxonomy_path = f"taxonomies/{taxonomy_id}/{taxonomy_version}.json"
                 if taxonomy_identity not in taxonomies_by_identity:
                     definition = self.taxonomies.version(taxonomy_version).model_dump(
                         mode="json"
@@ -2550,193 +2677,112 @@ class AnnotationService:
                         raise ValueError(
                             f"冻结 taxonomy 身份不一致：{taxonomy_id} {taxonomy_version}"
                         )
-                    taxonomy_payload = public_taxonomy(definition)
                     taxonomies_by_identity[taxonomy_identity] = {
-                        "taxonomy_id": taxonomy_id,
-                        "version": taxonomy_version,
-                        "path": taxonomy_path,
-                        "payload": taxonomy_payload,
+                        "payload": public_taxonomy(definition),
                     }
-                view_bytes = canonical_json(view)
-                file_entries.extend(
-                    [
-                        {
-                            "path": video_path,
-                            "size_bytes": video["size_bytes"],
-                            "sha256": video["sha256"],
-                            "role": "review_video",
-                            "recording_id": recording_id,
-                        },
-                        {
-                            "path": view_path,
-                            "size_bytes": len(view_bytes),
-                            "sha256": hashlib.sha256(view_bytes).hexdigest(),
-                            "role": "video_sample_mapping",
-                            "recording_id": recording_id,
-                        },
-                    ]
-                )
-                predicted_size += int(video["size_bytes"]) + len(view_bytes)
+                predicted_size += int(video["size_bytes"])
                 build_recordings.append(
                     {
                         "recording_id": recording_id,
-                        "archive_prefix": archive_prefix,
+                        "sequence_index": int(view["sequence_index"]),
                         "video": video,
                         "view": view,
-                    }
-                )
-                public_recordings.append(
-                    {
-                        "recording_id": recording_id,
-                        "participant_id": participant_id,
-                        "sequence_index": view["sequence_index"],
-                        "merged_sample_start": view["merged_sample_start"],
-                        "merged_sample_stop": view["merged_sample_stop"],
-                        "video_path": video_path,
-                        "view_path": view_path,
-                        "taxonomy_path": taxonomy_path,
                     }
                 )
             taxonomies = [
                 taxonomies_by_identity[identity]
                 for identity in sorted(taxonomies_by_identity)
             ]
-            for taxonomy in taxonomies:
-                taxonomy_bytes = canonical_json(taxonomy["payload"])
-                file_entries.append(
-                    {
-                        "path": taxonomy["path"],
-                        "size_bytes": len(taxonomy_bytes),
-                        "sha256": hashlib.sha256(taxonomy_bytes).hexdigest(),
-                        "role": "activity_taxonomy",
-                        "taxonomy_id": taxonomy["taxonomy_id"],
-                        "taxonomy_version": taxonomy["version"],
-                    }
-                )
-                predicted_size += len(taxonomy_bytes)
-            readme = delivery_readme(snapshot_id)
-            file_entries.append(
-                {
-                    "path": "README.md",
-                    "size_bytes": len(readme),
-                    "sha256": hashlib.sha256(readme).hexdigest(),
-                    "role": "documentation",
-                }
-            )
-            dataset_card_manifest = {
-                "snapshot_id": snapshot_id,
-                "recordings": public_recordings,
-                "sampling_rate_hz": 25.0,
-                "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
-            }
-            dataset_card = delivery_dataset_card(dataset_card_manifest)
-            file_entries.append(
-                {
-                    "path": "DATASET_CARD.md",
-                    "size_bytes": len(dataset_card),
-                    "sha256": hashlib.sha256(dataset_card).hexdigest(),
-                    "role": "documentation",
-                }
-            )
             output = (
                 self.cache_root
                 / "client-deliveries"
                 / snapshot_id
-                / f".{snapshot_id}.{os.getpid()}.{threading.get_ident()}.zip"
+                / f".{snapshot_id}.{os.getpid()}.{threading.get_ident()}.h5"
             )
             output.parent.mkdir(parents=True, exist_ok=True)
             free = shutil.disk_usage(output.parent).free
             required = predicted_size + 512 * 1024 * 1024
             if free < required:
                 raise ValueError(
-                    "生成交付 ZIP 的本地磁盘空间不足："
+                    "生成客户 H5 的本地磁盘空间不足："
                     f"需要至少 {required / 1024**3:.2f} GiB，"
                     f"当前可用 {free / 1024**3:.2f} GiB"
                 )
-            package_manifest = {
-                "schema_version": CLIENT_DELIVERY_SCHEMA_VERSION,
-                "contract_version": CLIENT_DELIVERY_CONTRACT_VERSION,
-                "snapshot_id": snapshot_id,
-                "snapshot_content_fingerprint": payload["content_fingerprint"],
-                "snapshot_created_at_utc": payload["created_at_utc"],
-                "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
-                "sampling_rate_hz": 25.0,
-                "coordinate_frame": "sensor_local",
-                "gravity_retained": True,
-                "channels": [
-                    "acceleration_x_mps2",
-                    "acceleration_y_mps2",
-                    "acceleration_z_mps2",
-                    "angular_velocity_x_radps",
-                    "angular_velocity_y_radps",
-                    "angular_velocity_z_radps",
-                ],
-                "video_contains_identifiable_participants": True,
-                "content_hash_verification": "available_not_required_by_viewer",
-                "taxonomies": [
-                    {
-                        key: taxonomy[key]
-                        for key in ("taxonomy_id", "version", "path")
-                    }
-                    for taxonomy in taxonomies
-                ],
-                "recordings": public_recordings,
-                "files": file_entries,
-            }
 
             def read_chunk(key: str, cursor: int) -> bytes:
-                return self.store.read_bytes(key, cursor, cursor + 4 * 1024 * 1024 - 1)
+                return self.store.read_bytes(
+                    key, cursor, cursor + 4 * 1024 * 1024 - 1
+                )
 
-            archive_sha256, archive_size = build_delivery_archive(
+            report = build_client_hdf5(
                 output,
-                package_manifest=package_manifest,
                 dataset_path=dataset_path,
+                snapshot_id=snapshot_id,
+                snapshot_content_fingerprint=str(payload["content_fingerprint"]),
+                snapshot_created_at_utc=str(payload["created_at_utc"]),
                 recordings=build_recordings,
                 taxonomies=taxonomies,
                 read_object_chunks=read_chunk,
             )
-            archive_key = (
-                f"client-deliveries/{snapshot_id}/v2/"
-                f"cw12eu-delivery-{snapshot_id}.zip"
+            artifact_key = (
+                f"client-deliveries/{snapshot_id}/hdf5-v1/"
+                f"cw12eu-client-{snapshot_id}.h5"
             )
             metadata = {
-                "sha256": archive_sha256,
+                "sha256": report.sha256,
                 "snapshot_id": snapshot_id,
                 "content_fingerprint": str(payload["content_fingerprint"]),
+                "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+                "artifact_profile": CLIENT_ARTIFACT_PROFILE,
+                "contract_version": CLIENT_HDF5_CONTRACT_VERSION,
             }
             try:
-                archive = self.store.put_file(
+                artifact = self.store.put_file(
                     output,
-                    archive_key,
-                    content_type="application/zip",
+                    artifact_key,
+                    content_type="application/x-hdf5",
                     metadata=metadata,
                 )
             except ObjectConflictError as error:
-                archive = self.store.stat(archive_key)
+                artifact = self.store.stat(artifact_key)
                 if (
-                    archive is None
-                    or archive.size_bytes != archive_size
-                    or any(archive.metadata.get(key) != value for key, value in metadata.items())
+                    artifact is None
+                    or artifact.size_bytes != report.size_bytes
+                    or artifact.content_type != "application/x-hdf5"
+                    or any(
+                        artifact.metadata.get(key) != value
+                        for key, value in metadata.items()
+                    )
                 ):
-                    raise ValueError("同一快照的客户交付 ZIP 内容不一致") from error
+                    raise ValueError("同一快照的客户 H5 内容不一致") from error
             sidecar = {
-                **package_manifest,
+                "schema_version": CLIENT_DELIVERY_MANIFEST_SCHEMA,
+                "contract_version": CLIENT_HDF5_CONTRACT_VERSION,
+                "snapshot_id": snapshot_id,
+                "snapshot_content_fingerprint": str(payload["content_fingerprint"]),
+                "snapshot_created_at_utc": str(payload["created_at_utc"]),
+                "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+                "artifact_profile": CLIENT_ARTIFACT_PROFILE,
+                "content_type": "application/x-hdf5",
+                "recording_count": report.recording_count,
+                "video_bytes": report.video_bytes,
                 "generated_at_utc": datetime.now(UTC).isoformat(),
                 "generated_by": actor_id,
-                "archive_object_key": archive_key,
-                "archive_size_bytes": archive.size_bytes,
-                "archive_sha256": archive_sha256,
+                "artifact_object_key": artifact_key,
+                "artifact_size_bytes": artifact.size_bytes,
+                "artifact_sha256": report.sha256,
             }
+            sidecar_key = (
+                f"client-deliveries/{snapshot_id}/hdf5-v1/manifest.json"
+            )
             try:
                 self.store.write_json(
-                    f"client-deliveries/{snapshot_id}/v2/manifest.json",
+                    sidecar_key,
                     sidecar,
                     if_generation_match=0,
                 )
             except ObjectConflictError as error:
-                existing, _generation = self.store.read_json(
-                    f"client-deliveries/{snapshot_id}/v2/manifest.json"
-                )
+                existing, _generation = self.store.read_json(sidecar_key)
                 if any(
                     existing.get(key) != sidecar.get(key)
                     for key in (
@@ -2744,16 +2790,18 @@ class AnnotationService:
                         "contract_version",
                         "snapshot_id",
                         "snapshot_content_fingerprint",
-                        "archive_object_key",
-                        "archive_size_bytes",
-                        "archive_sha256",
+                        "hdf5_schema_version",
+                        "artifact_profile",
+                        "artifact_object_key",
+                        "artifact_size_bytes",
+                        "artifact_sha256",
                     )
                 ):
                     raise ValueError("同一快照的客户交付清单内容不一致") from error
             with self._delivery_job_lock:
                 self._delivery_jobs[snapshot_id] = {"state": "ready", "message": None}
         except Exception as error:
-            logger.exception("生成客户交付包失败 snapshot_id=%s", snapshot_id)
+            logger.exception("生成客户 H5 失败 snapshot_id=%s", snapshot_id)
             with self._delivery_job_lock:
                 self._delivery_jobs[snapshot_id] = {
                     "state": "failed",
@@ -2766,13 +2814,13 @@ class AnnotationService:
     def client_delivery_download(self, snapshot_id: str) -> tuple[dict[str, Any], Any]:
         status = self.client_delivery_status(snapshot_id)
         if status["state"] != "ready":
-            raise FileNotFoundError("客户交付包尚未生成")
+            raise FileNotFoundError("客户 H5 尚未生成")
         sidecar, _generation = self.store.read_json(
-            f"client-deliveries/{snapshot_id}/v2/manifest.json"
+            f"client-deliveries/{snapshot_id}/hdf5-v1/manifest.json"
         )
-        artifact = self.store.stat(str(sidecar["archive_object_key"]))
+        artifact = self.store.stat(str(sidecar["artifact_object_key"]))
         if artifact is None:
-            raise FileNotFoundError("客户交付 ZIP 缺失")
+            raise FileNotFoundError("客户 H5 缺失")
         return sidecar, artifact
 
     def snapshot_viewer(self, snapshot_id: str) -> dict[str, Any]:

@@ -26,7 +26,8 @@ from imu_data_collector.review import verify_source_artifacts
 from imu_data_collector.sync import assess_conditional_fixed_offset
 from imu_data_collector.validation import validate_annotations
 
-TRAINING_SCHEMA_VERSION = "3.1.0"
+TRAINING_SCHEMA_VERSION = "3.2.0"
+TRAINING_ARTIFACT_PROFILE = "training_dataset"
 TARGET_RATE_HZ = 25
 NANOSECONDS_PER_SECOND = 1_000_000_000
 
@@ -97,6 +98,7 @@ def create_training_snapshot_archive(
         "schema_version": "2.0.0",
         "dataset_id": "cw12eu",
         "hdf5_schema_version": TRAINING_SCHEMA_VERSION,
+        "artifact_profile": TRAINING_ARTIFACT_PROFILE,
         "sampling_rate_hz": TARGET_RATE_HZ,
         "files": manifest_files,
     }
@@ -316,6 +318,8 @@ def merge_training_exports(
         with h5py.File(path, "r") as source:
             if (
                 str(source.attrs.get("imu_schema_version", "")) != TRAINING_SCHEMA_VERSION
+                or str(source.attrs.get("artifact_profile", ""))
+                != TRAINING_ARTIFACT_PROFILE
                 or float(source.attrs.get("sampling_rate_hz", 0.0)) != TARGET_RATE_HZ
                 or str(source.attrs.get("evaluation_role", "")) != "training_only"
             ):
@@ -376,6 +380,7 @@ def merge_training_exports(
             output.attrs.update(
                 {
                     "imu_schema_version": TRAINING_SCHEMA_VERSION,
+                    "artifact_profile": TRAINING_ARTIFACT_PROFILE,
                     "dataset_id": "cw12eu",
                     "sampling_rate_hz": float(TARGET_RATE_HZ),
                     "axis_frame": "sensor_local",
@@ -557,6 +562,7 @@ def export_aligned(
             output.attrs.update(
                 {
                     "imu_schema_version": TRAINING_SCHEMA_VERSION,
+                    "artifact_profile": TRAINING_ARTIFACT_PROFILE,
                     "dataset_id": "cw12eu",
                     "sampling_rate_hz": float(TARGET_RATE_HZ),
                     "axis_frame": "sensor_local",

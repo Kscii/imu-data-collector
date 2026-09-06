@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import shutil
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -83,9 +84,24 @@ class LocalFilesystemStore:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        # Windows does not allow a reader to open a file while os.replace is
+        # exchanging it in every filesystem/AV combination.  Background jobs
+        # and status polling share one store instance, so serialize the small
+        # mutable JSON control objects while keeping large artifact IO unlocked.
+        self._json_lock = threading.RLock()
 
     def resolve(self, key: str) -> Path:
-        path = (self.root / _safe_key(key)).resolve()
+        relative = _safe_key(key)
+        candidate = self.root / relative
+        # Windows may resolve a not-yet-created descendant through the short
+        # 8.3 spelling of a temporary parent.  That makes a lexically safe key
+        # appear unrelated to the same root while a background writer is
+        # creating the file.  _safe_key already rejects absolute paths and
+        # parent traversal; retain the symlink containment check on POSIX and
+        # use the safe lexical path on Windows.
+        if os.name == "nt":
+            return candidate
+        path = candidate.resolve()
         if not path.is_relative_to(self.root):
             raise ValueError("对象键越出存储根目录")
         return path
@@ -168,9 +184,11 @@ class LocalFilesystemStore:
             return handle.read(None if end is None else end - (start or 0) + 1)
 
     def read_json(self, key: str) -> tuple[dict[str, Any], int]:
-        path = self.resolve(key)
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle), path.stat().st_mtime_ns
+        with self._json_lock:
+            path = self.resolve(key)
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return payload, path.stat().st_mtime_ns
 
     def write_json(
         self,
@@ -179,24 +197,25 @@ class LocalFilesystemStore:
         *,
         if_generation_match: int | None,
     ) -> ObjectInfo:
-        path = self.resolve(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        current = path.stat().st_mtime_ns if path.exists() else 0
-        if if_generation_match is not None and current != if_generation_match:
-            raise ObjectConflictError("对象 generation 已更新")
-        temporary = path.with_name(
-            f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
-        )
-        try:
-            temporary.write_bytes(
-                (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
-                    "utf-8"
-                )
+        with self._json_lock:
+            path = self.resolve(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            current = path.stat().st_mtime_ns if path.exists() else 0
+            if if_generation_match is not None and current != if_generation_match:
+                raise ObjectConflictError("对象 generation 已更新")
+            temporary = path.with_name(
+                f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
             )
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return self._info(key, path)
+            try:
+                temporary.write_bytes(
+                    (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+                        "utf-8"
+                    )
+                )
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return self._info(key, path)
 
     def stat(self, key: str) -> ObjectInfo | None:
         path = self.resolve(key)

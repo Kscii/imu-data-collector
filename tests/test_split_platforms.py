@@ -1,12 +1,11 @@
 import hashlib
-import io
 import json
 import os
 import sqlite3
 import time
-import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -69,6 +68,28 @@ class FailOnceSnapshotDeleteStore(LocalFilesystemStore):
             self.fail_once = False
             raise ObjectConflictError("模拟训练快照 TAR generation 冲突")
         return super().delete(key, if_generation_match=if_generation_match)
+
+
+class FailOnceDeliveryManifestStore(LocalFilesystemStore):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.fail_once = True
+
+    def write_json(
+        self,
+        key: str,
+        payload: dict[str, object],
+        *,
+        if_generation_match: int | None,
+    ):
+        if self.fail_once and key.endswith("/hdf5-v1/manifest.json"):
+            self.fail_once = False
+            raise RuntimeError("模拟 H5 已上传但 manifest 写入失败")
+        return super().write_json(
+            key,
+            payload,
+            if_generation_match=if_generation_match,
+        )
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -195,7 +216,8 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
     with h5py.File(aligned, "w") as handle:
         handle.attrs.update(
             {
-                "imu_schema_version": "3.1.0",
+                "imu_schema_version": "3.2.0",
+                "artifact_profile": "training_dataset",
                 "sampling_rate_hz": 25.0,
                 "evaluation_role": "training_only",
                 "logical_content_sha256": logical_digest,
@@ -238,7 +260,8 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
             "logical_content_sha256": logical_digest,
             "recording_id": recording_id,
             "source_review_revision": "0",
-            "hdf5_schema_version": "3.1.0",
+            "hdf5_schema_version": "3.2.0",
+            "artifact_profile": "training_dataset",
             "sampling_rate_hz": "25",
         },
     )
@@ -256,7 +279,7 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
             ),
             "active_export": TrainingExportReference(
                 export_schema_version="2.0.0",
-                hdf5_schema_version="3.1.0",
+                hdf5_schema_version="3.2.0",
                 sampling_rate_hz=25.0,
                 filename="aligned.h5",
                 source_review_revision=0,
@@ -963,6 +986,10 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
             f"/api/v1/training-snapshots/{snapshot_id}/delivery/download",
             headers={"Range": "bytes=-10"},
         )
+        unsatisfiable = client.get(
+            f"/api/v1/training-snapshots/{snapshot_id}/delivery/download",
+            headers={"Range": "bytes=999999999-"},
+        )
         head = client.head(
             f"/api/v1/training-snapshots/{snapshot_id}/delivery/download"
         )
@@ -980,56 +1007,126 @@ def test_snapshot_customer_delivery_and_read_only_viewer(tmp_path: Path) -> None
     assert len(partial.content) == 10
     assert suffix.status_code == 206
     assert len(suffix.content) == 10
+    assert unsatisfiable.status_code == 416
+    assert unsatisfiable.headers["content-range"].startswith("bytes */")
     assert head.status_code == 200
     assert head.content == b""
     assert head.headers["accept-ranges"] == "bytes"
-    assert head.headers["x-content-sha256"] == status["archive_sha256"]
+    assert head.headers["x-content-sha256"] == status["artifact_sha256"]
+    assert head.headers["content-type"].startswith("application/x-hdf5")
+    assert "cw12eu-client-" in head.headers["content-disposition"]
     assert viewer.json()["recordings"][0]["recording_id"] == recording_id
     assert overview.json()["values"] == [[0.0] * 6, [0.0] * 6]
     assert video.status_code == 206
     assert video.content == b"2345"
-    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
-        names = set(archive.namelist())
-        assert "dataset/cw12eu.h5" in names
-        assert "recordings/0000/video.mp4" in names
-        assert "recordings/0000/view.json" in names
-        assert {
-            "manifest.json",
-            "README.md",
-            "DATASET_CARD.md",
-            "SHA256SUMS",
-        } <= names
-        assert all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
-        assert not any("capture.h5" in name or "raw" in name for name in names)
-        package_manifest = json.loads(archive.read("manifest.json"))
-        assert package_manifest["schema_version"] == "cw12eu_client_delivery_v2"
-        assert package_manifest["contract_version"] == "2.0.0"
-        assert package_manifest["snapshot_id"] == snapshot_id
-        assert package_manifest["hdf5_schema_version"] == "3.1.0"
-        assert package_manifest["recordings"][0]["recording_id"] == recording_id
-        assert package_manifest["recordings"][0]["video_path"] == (
-            "recordings/0000/video.mp4"
+    assert hashlib.sha256(downloaded.content).hexdigest() == status["artifact_sha256"]
+    client_h5 = tmp_path / "downloaded-client.h5"
+    client_h5.write_bytes(downloaded.content)
+    with h5py.File(client_h5, "r") as handle:
+        assert handle.attrs["imu_schema_version"] == "3.2.0"
+        assert handle.attrs["artifact_profile"] == "client_delivery"
+        assert handle.attrs["client_delivery_contract_version"] == "1.0.0"
+        assert set(handle) == {
+            "samples",
+            "sequences",
+            "annotations",
+            "media",
+            "labels",
+        }
+        assert bytes(handle["media/videos/0"][:]) == b"0123456789"
+        assert handle["media/videos/0"].chunks is None
+        assert len(handle["media/index"]) == 1
+        assert len(handle["labels/sequence_versions"]) == 1
+        assert "xfan0282" not in str(handle["labels/catalog"][:])
+
+
+def test_client_delivery_retry_recovers_uploaded_orphan_h5(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = FailOnceDeliveryManifestStore(settings.storage.root)
+    recording_id = _publish_fixture(
+        store,
+        tmp_path,
+        recording_id="20260826T000000.000000Z",
+        data_tier=DataTier.PROD,
+    )
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        client.post("/api/v1/index/refresh")
+        _install_completed_review(app, store, tmp_path, recording_id)
+        snapshot_id = client.post("/api/v1/training-snapshots").json()["snapshot_id"]
+
+        first = client.post(f"/api/v1/training-snapshots/{snapshot_id}/delivery")
+        assert first.status_code == 200
+        for _attempt in range(200):
+            failed = client.get(
+                f"/api/v1/training-snapshots/{snapshot_id}/delivery"
+            ).json()
+            if failed["state"] == "failed":
+                break
+            time.sleep(0.01)
+        assert failed["state"] == "failed"
+        prefix = f"client-deliveries/{snapshot_id}/hdf5-v1/"
+        assert [item.key for item in store.list(prefix) if item.key.endswith(".h5")]
+        assert store.stat(f"{prefix}manifest.json") is None
+
+        retry = client.post(f"/api/v1/training-snapshots/{snapshot_id}/delivery")
+        assert retry.status_code == 200
+        for _attempt in range(200):
+            ready = client.get(
+                f"/api/v1/training-snapshots/{snapshot_id}/delivery"
+            ).json()
+            if ready["state"] in {"ready", "failed"}:
+                break
+            time.sleep(0.01)
+        assert ready["state"] == "ready", ready
+        assert len(
+            [item.key for item in store.list(prefix) if item.key.endswith(".h5")]
+        ) == 1
+        assert store.stat(f"{prefix}manifest.json") is not None
+
+    temporary_outputs = list(
+        (settings.storage.cache_root / "client-deliveries").rglob(".*.h5")
+    )
+    assert temporary_outputs == []
+
+
+def test_client_delivery_fails_cleanly_when_local_disk_is_insufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_fixture(
+        store,
+        tmp_path,
+        recording_id="20260826T000000.000000Z",
+        data_tier=DataTier.PROD,
+    )
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        client.post("/api/v1/index/refresh")
+        _install_completed_review(app, store, tmp_path, recording_id)
+        snapshot_id = client.post("/api/v1/training-snapshots").json()["snapshot_id"]
+        monkeypatch.setattr(
+            "imu_data_collector.annotation_service.shutil.disk_usage",
+            lambda _path: SimpleNamespace(total=1, used=1, free=0),
         )
-        assert len(package_manifest["taxonomies"]) == 1
-        taxonomy_path = package_manifest["taxonomies"][0]["path"]
-        taxonomy = json.loads(archive.read(taxonomy_path))
-        assert set(taxonomy) == {
-            "schema_version",
-            "taxonomy_id",
-            "version",
-            "fall",
-            "non_fall",
-        }
-        assert all(set(item) == {"code", "name", "active"} for item in taxonomy["fall"])
-        assert "xfan0282" not in archive.read(taxonomy_path).decode()
-        checksums = {
-            name: digest
-            for digest, name in (
-                line.split("  ", 1) for line in archive.read("SHA256SUMS").decode().splitlines()
-            )
-        }
-        for name, digest in checksums.items():
-            assert hashlib.sha256(archive.read(name)).hexdigest() == digest
+
+        queued = client.post(f"/api/v1/training-snapshots/{snapshot_id}/delivery")
+        assert queued.status_code == 200
+        for _attempt in range(200):
+            status = client.get(
+                f"/api/v1/training-snapshots/{snapshot_id}/delivery"
+            ).json()
+            if status["state"] == "failed":
+                break
+            time.sleep(0.01)
+
+    assert status["state"] == "failed"
+    assert "磁盘空间不足" in status["message"]
+    assert store.list(f"client-deliveries/{snapshot_id}/hdf5-v1/") == []
+    assert list((settings.storage.cache_root / "client-deliveries").rglob(".*.h5")) == []
 
 
 def test_training_snapshot_cleanup_retries_after_generation_conflict(tmp_path: Path) -> None:

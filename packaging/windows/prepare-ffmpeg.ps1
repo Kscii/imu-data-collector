@@ -1,8 +1,8 @@
 $ErrorActionPreference = "Stop"
 
-$releaseTag = "autobuild-2026-08-20-13-45"
-$archiveName = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"
-$expectedSha256 = "410c82fc0a7d713fd83412138271b8559faa8cf8a74a75eaf541dfca75ea4590"
+$releaseTag = "autobuild-2026-08-31-13-27"
+$archiveName = "ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip"
+$expectedSha256 = "273abb45f3f9f76c303e35ff39f5bb6c23c163ae65f6244a32b7d4a7f6cf0616"
 $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$releaseTag/$archiveName"
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 $archive = Join-Path $tempRoot $archiveName
