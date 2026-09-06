@@ -91,7 +91,17 @@ class LocalFilesystemStore:
         self._json_lock = threading.RLock()
 
     def resolve(self, key: str) -> Path:
-        path = (self.root / _safe_key(key)).resolve()
+        relative = _safe_key(key)
+        candidate = self.root / relative
+        # Windows may resolve a not-yet-created descendant through the short
+        # 8.3 spelling of a temporary parent.  That makes a lexically safe key
+        # appear unrelated to the same root while a background writer is
+        # creating the file.  _safe_key already rejects absolute paths and
+        # parent traversal; retain the symlink containment check on POSIX and
+        # use the safe lexical path on Windows.
+        if os.name == "nt":
+            return candidate
+        path = candidate.resolve()
         if not path.is_relative_to(self.root):
             raise ValueError("对象键越出存储根目录")
         return path
