@@ -21,8 +21,9 @@ jobs:
       backend: ${{ steps.scope.outputs.backend }}
       frontend: ${{ steps.scope.outputs.frontend }}
       service: ${{ steps.scope.outputs.service }}
+      workflow: ${{ steps.scope.outputs.workflow }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: 分类本次变更
@@ -38,9 +39,11 @@ jobs:
           backend=false
           frontend=false
           service=false
+          workflow=false
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             backend=true
             frontend=true
+            workflow=true
           else
             if [[ "${EVENT_NAME}" == "pull_request" ]]; then
               base="${BASE_SHA}"
@@ -61,6 +64,7 @@ jobs:
                 .github/workflows/*)
                   backend=true
                   frontend=true
+                  workflow=true
                   ;;
               esac
               case "${path}" in
@@ -78,7 +82,8 @@ jobs:
           echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
           echo "frontend=${frontend}" >> "${GITHUB_OUTPUT}"
           echo "service=${service}" >> "${GITHUB_OUTPUT}"
-          echo "backend=${backend} frontend=${frontend} service=${service}"
+          echo "workflow=${workflow}" >> "${GITHUB_OUTPUT}"
+          echo "backend=${backend} frontend=${frontend} service=${service} workflow=${workflow}"
 
   backend:
     name: Python 与数据合同
@@ -88,9 +93,9 @@ jobs:
       - name: 无 Python 或数据合同变更
         if: needs.scope.outputs.backend != 'true'
         run: echo "跳过 Python 与数据合同测试。"
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.scope.outputs.backend == 'true'
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         if: needs.scope.outputs.backend == 'true'
         with:
           python-version: "3.12"
@@ -125,7 +130,7 @@ jobs:
           needs.scope.outputs.frontend != 'true' &&
           !(github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         run: echo "跳过两套前端构建。"
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: >-
           needs.scope.outputs.frontend == 'true' ||
           (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
@@ -149,7 +154,7 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         working-directory: frontend
         run: npm run build
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
         with:
           name: annotation-frontend
@@ -162,8 +167,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/download-artifact@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@v8
         with:
           name: annotation-frontend
           path: frontend/dist-annotation
@@ -189,7 +194,7 @@ jobs:
             echo "DEPLOYER=${deployer}"
             echo "DEPLOYER_SHA256=$(sha256sum "${deployer}" | cut -d ' ' -f 1)"
           } > release-metadata.env
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: imu-annotation-production-bundle
           path: |
@@ -213,7 +218,7 @@ jobs:
       group: production-deployment
       cancel-in-progress: false
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: imu-annotation-production-bundle
       - name: 校验生产包元数据
@@ -267,3 +272,28 @@ jobs:
         run: |
           curl --fail --silent --show-error --output /dev/null https://imu.kscii.tech/api/v1/health
           curl --fail --silent --show-error --output /dev/null https://upload.imu.kscii.tech/health
+
+  artifact-roundtrip:
+    name: Actions 制品往返校验
+    needs: scope
+    if: needs.scope.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 生成小型校验制品
+        run: |
+          mkdir artifact-smoke
+          echo "${GITHUB_SHA}" > artifact-smoke/payload.txt
+          cd artifact-smoke
+          sha256sum payload.txt > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: action-major-smoke-${{ github.run_id }}
+          path: artifact-smoke
+          retention-days: 1
+      - uses: actions/download-artifact@v8
+        with:
+          name: action-major-smoke-${{ github.run_id }}
+          path: artifact-readback
+      - name: 校验下载内容
+        working-directory: artifact-readback
+        run: sha256sum --check --strict SHA256SUMS

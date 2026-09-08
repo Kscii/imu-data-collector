@@ -75,13 +75,13 @@ jobs:
     if: needs.scope.outputs.build_windows == 'true'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           python-version: "3.12"
           enable-cache: true
@@ -146,7 +146,7 @@ jobs:
       - name: 生成 SHA-256
         shell: pwsh
         run: Get-FileHash dist-installer\*.exe -Algorithm SHA256 | Format-List | Out-File dist-installer\SHA256SUMS-Windows.txt
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: imu-data-collector-windows-x64
           path: dist-installer/*
@@ -160,13 +160,13 @@ jobs:
       matrix: ${{ fromJSON(needs.scope.outputs.mac_matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           python-version: "3.12"
           enable-cache: true
@@ -199,7 +199,7 @@ jobs:
           [[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "APP_VERSION=$version" >> "${GITHUB_ENV}"
           echo "APP_BUNDLE_VERSION=$bundle_version" >> "${GITHUB_ENV}"
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: third_party/ffmpeg
           key: macos-ffmpeg-${{ matrix.arch }}-n8.1.2-b35605ace3ddf7c1a5d67a2eb553f034aef41d55-nasm2.16.03-v2
@@ -248,7 +248,7 @@ jobs:
           test -d "$mountpoint/IMU Data Collector.app"
           hdiutil detach "$mountpoint"
           shasum -a 256 "$dmg" > "dist-installer/SHA256SUMS-macOS-${{ matrix.arch }}.txt"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: imu-data-collector-macos-${{ matrix.arch }}
           path: dist-installer/*
@@ -261,7 +261,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: imu-data-collector-*
           path: release-artifacts
