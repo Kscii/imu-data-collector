@@ -47,7 +47,7 @@ jobs:
           test "$(jq -r .head_branch <<< "${payload}")" = "main"
           test "$(jq -r .conclusion <<< "${payload}")" = "success"
           echo "head_sha=$(jq -r .head_sha <<< "${payload}")" >> "${GITHUB_OUTPUT}"
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: imu-annotation-production-bundle
           run-id: ${{ inputs.run_id }}

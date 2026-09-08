@@ -4,6 +4,12 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # New cryptography majors no longer provide the universal2 wheel required
+      # by the supported Intel macOS desktop packaging job. Keep reviewing
+      # compatible updates within the pinned 46.x line.
+      - dependency-name: cryptography
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: /frontend
     schedule:
