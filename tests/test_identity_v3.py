@@ -324,6 +324,20 @@ def test_local_upgrade_migration_is_archived_neutral_and_idempotent(
             handle["imu/samples/raw_counts"], np.arange(24).reshape(4, 6)
         )
 
+    # 模拟文件迁移完成回执丢失，且目标目录只剩一部分文件；续跑必须验证
+    # 已有 H5 并补齐缺失 MKV，而不是因为目标目录存在就跳过整条录制。
+    receipt_path = (
+        data_root
+        / "_identity_migrations"
+        / result["plan"]["migration_id"]
+        / "receipt.json"
+    )
+    receipt_path.unlink()
+    (new_directory / f"{new_id}.mkv").unlink()
+    resumed = auto_migrate_local_identity(data_root)
+    assert resumed is not None
+    assert (new_directory / f"{new_id}.mkv").read_bytes() == b"mkv"
+
     assert auto_migrate_local_identity(data_root) is None
 
 

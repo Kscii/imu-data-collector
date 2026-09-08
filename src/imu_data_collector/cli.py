@@ -20,13 +20,23 @@ import uvicorn
 
 from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.capture_api import create_capture_app
+from imu_data_collector.catalog import RecordingCatalog
+from imu_data_collector.catalog_repair import (
+    REPAIR_CONFIRMATION,
+    apply_catalog_repair,
+    build_catalog_repair_plan,
+)
 from imu_data_collector.characterization import (
     correct_characterization_stage,
     recover_interrupted_characterization,
     write_accel_pose_pair_report,
     write_characterization_report,
 )
-from imu_data_collector.config import load_activity_taxonomy, load_settings
+from imu_data_collector.config import (
+    load_activity_taxonomy,
+    load_calibration_evidence,
+    load_settings,
+)
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.cw12eu import (
     NotificationKind,
@@ -39,7 +49,9 @@ from imu_data_collector.models import (
     CharacterizationStage,
     CharacterizationStageRequest,
     CharacterizationStartRequest,
+    PublishTarget,
 )
+from imu_data_collector.storage import create_object_store
 from imu_data_collector.sync_experiment import write_sync_experiment_report
 from imu_data_collector.validation import validate_capture_h5
 from imu_data_collector.video import (
@@ -156,6 +168,15 @@ def _parser() -> argparse.ArgumentParser:
     migrate_identity.add_argument("--apply", action="store_true")
     migrate_identity.add_argument("--plan-token")
     migrate_identity.add_argument("--confirmation")
+    repair_catalog = subparsers.add_parser(
+        "repair-identity-catalog",
+        help="对账并恢复身份迁移前的发布状态与质量警告；默认只输出计划",
+    )
+    repair_catalog.add_argument("--catalog-backup", type=Path, required=True)
+    repair_catalog.add_argument("--migration-plan", type=Path, required=True)
+    repair_catalog.add_argument("--apply", action="store_true")
+    repair_catalog.add_argument("--plan-token")
+    repair_catalog.add_argument("--confirmation")
     return parser
 
 
@@ -600,6 +621,47 @@ def main() -> None:
             result = apply_local_plan(
                 settings.data_root,
                 plan,
+                plan_token=args.plan_token,
+                confirmation=args.confirmation,
+                catalog=RecordingCatalog(settings.catalog_path),
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command == "repair-identity-catalog":
+        if settings.publish.mode != "direct_gcs":
+            raise SystemExit("一次性 catalog 修复当前只允许在 direct_gcs 管理机运行")
+        evidence = load_calibration_evidence(settings.calibration_evidence_path)
+        calibration_ids = {
+            str(item["recording_id"])
+            for item in evidence.get("evidence", [])
+        }
+        catalog = RecordingCatalog(settings.catalog_path)
+        store = create_object_store(
+            settings.storage.backend,
+            settings.storage.root,
+            settings.storage.bucket,
+            settings.storage.project,
+        )
+        plan = build_catalog_repair_plan(
+            data_root=settings.data_root,
+            catalog=catalog,
+            backup_catalog_path=args.catalog_backup,
+            migration_plan_path=args.migration_plan,
+            store=store,
+            calibration_recording_ids=calibration_ids,
+            publish_target=PublishTarget.DIRECT_GCS,
+        )
+        if not args.apply:
+            result = plan
+        else:
+            if not args.plan_token or not args.confirmation:
+                raise SystemExit(
+                    "--apply 需要 --plan-token 和 --confirmation；"
+                    f"确认文本为 {REPAIR_CONFIRMATION}"
+                )
+            result = apply_catalog_repair(
+                catalog=catalog,
+                migration_plan_path=args.migration_plan,
+                plan=plan,
                 plan_token=args.plan_token,
                 confirmation=args.confirmation,
             )

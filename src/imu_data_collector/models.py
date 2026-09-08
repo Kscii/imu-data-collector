@@ -62,6 +62,8 @@ class PublishState(StrEnum):
     VERIFYING = "verifying"
     UPLOADED = "uploaded"
     PUBLISHED = "published"
+    LEGACY_PUBLISHED = "legacy_published"
+    REMOTE_MISSING = "remote_missing"
     RETRY_WAIT = "retry_wait"
     VERIFIED = "verified"
     FAILED = "failed"
@@ -685,6 +687,9 @@ class RecordingSummary(BaseModel):
     )
     index_message: str = ""
     manifest_generation: int | None = None
+    # 身份迁移后，校准证据仍可能由旧 recording_id 的不可变云端对象承载。
+    # None 表示尚无可核验的远端发布引用。
+    publication_recording_id: str | None = None
     finalization_job: BackgroundJobStatus | None = None
     upload_job: BackgroundJobStatus | None = None
 

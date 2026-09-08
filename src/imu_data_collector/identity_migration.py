@@ -15,6 +15,7 @@ from typing import Any
 import h5py
 import numpy as np
 
+from imu_data_collector.catalog import RecordingCatalog
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ArtifactDescriptor,
@@ -648,6 +649,7 @@ def apply_local_plan(
     *,
     plan_token: str,
     confirmation: str,
+    catalog: RecordingCatalog | None = None,
 ) -> dict[str, Any]:
     if plan["plan_token"] != plan_token:
         raise ValueError("本地计划已经变化，请重新 dry-run")
@@ -662,7 +664,24 @@ def apply_local_plan(
         plan_path.write_text(
             json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+    def catalog_captures() -> list[dict[str, str]]:
+        output: list[dict[str, str]] = []
+        for capture in plan["captures"]:
+            target = data_root / capture["new_collection_id"] / capture["new_recording_id"]
+            output.append(
+                {
+                    "old_recording_id": capture["old_recording_id"],
+                    "new_recording_id": capture["new_recording_id"],
+                    "new_collection_id": capture["new_collection_id"],
+                    "h5_path": str(target / f"{capture['new_recording_id']}.h5"),
+                    "mkv_path": str(target / f"{capture['new_recording_id']}.mkv"),
+                }
+            )
+        return output
+
     if receipt_path.is_file():
+        if catalog is not None:
+            catalog.remap_identity(catalog_captures())
         return json.loads(receipt_path.read_text(encoding="utf-8"))
     for item in plan["captures"]:
         source = (data_root / item["source_directory"]).resolve()
@@ -679,23 +698,50 @@ def apply_local_plan(
             / item["new_collection_id"]
             / item["new_recording_id"]
         )
-        if not target.exists():
-            target.mkdir(parents=True)
-            for old_file in item["files"]:
-                source_file = archived / old_file["path"]
-                name = old_file["path"].replace(
-                    item["old_recording_id"], item["new_recording_id"]
-                )
-                destination = target / name
+        target.mkdir(parents=True, exist_ok=True)
+        for old_file in item["files"]:
+            source_file = archived / old_file["path"]
+            name = old_file["path"].replace(
+                item["old_recording_id"], item["new_recording_id"]
+            )
+            destination = target / name
+            if destination.exists():
                 if source_file.suffix == ".h5":
-                    neutralize_capture_h5(
-                        source_file,
-                        destination,
-                        recording_id=item["new_recording_id"],
-                        collection_id=item["new_collection_id"],
-                    )
-                else:
-                    shutil.copy2(source_file, destination)
+                    with h5py.File(destination, "r") as handle:
+                        identity_matches = (
+                            str(handle.attrs.get("recording_id", ""))
+                            == item["new_recording_id"]
+                            and str(handle.attrs.get("collection_id", ""))
+                            == item["new_collection_id"]
+                            and "participant_id" not in handle.attrs
+                        )
+                    if not identity_matches or _dataset_contract(
+                        destination
+                    ) != _dataset_contract(source_file):
+                        raise ValueError(f"已有迁移 H5 与计划不一致：{destination}")
+                elif sha256_file(destination) != old_file["sha256"]:
+                    raise ValueError(f"已有迁移文件与源不一致：{destination}")
+                continue
+            temporary = destination.with_name(
+                f"{destination.name}.identity-migrating"
+            )
+            temporary.unlink(missing_ok=True)
+            if source_file.suffix == ".h5":
+                neutralize_capture_h5(
+                    source_file,
+                    temporary,
+                    recording_id=item["new_recording_id"],
+                    collection_id=item["new_collection_id"],
+                )
+            else:
+                shutil.copy2(source_file, temporary)
+                if sha256_file(temporary) != old_file["sha256"]:
+                    temporary.unlink(missing_ok=True)
+                    raise ValueError(f"迁移文件 SHA-256 不匹配：{destination}")
+            temporary.replace(destination)
+    catalog_result = (
+        catalog.remap_identity(catalog_captures()) if catalog is not None else None
+    )
     receipt = {
         "schema_version": "1.0.0",
         "migration_id": plan["migration_id"],
@@ -703,6 +749,7 @@ def apply_local_plan(
         "plan_token": plan_token,
         "recording_count": len(plan["captures"]),
         "completed_at_utc": datetime.now(UTC).isoformat(),
+        "catalog": catalog_result,
     }
     receipt_path.write_text(
         json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -710,7 +757,9 @@ def apply_local_plan(
     return receipt
 
 
-def auto_migrate_local_identity(data_root: Path) -> dict[str, Any] | None:
+def auto_migrate_local_identity(
+    data_root: Path, catalog: RecordingCatalog | None = None
+) -> dict[str, Any] | None:
     """桌面升级时幂等迁移；无旧命名录制时不产生任何写入。"""
 
     migration_parent = data_root / "_identity_migrations"
@@ -724,6 +773,7 @@ def auto_migrate_local_identity(data_root: Path) -> dict[str, Any] | None:
             plan,
             plan_token=plan["plan_token"],
             confirmation=CONFIRMATION,
+            catalog=catalog,
         )
         return {"plan": plan, "receipt": receipt}
     try:
@@ -737,5 +787,6 @@ def auto_migrate_local_identity(data_root: Path) -> dict[str, Any] | None:
         plan,
         plan_token=plan["plan_token"],
         confirmation=CONFIRMATION,
+        catalog=catalog,
     )
     return {"plan": plan, "receipt": receipt}

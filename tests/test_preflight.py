@@ -176,6 +176,42 @@ def test_startup_revalidation_does_not_touch_uploaded_recording(
     assert coordinator.catalog.get("uploaded-recording") == summary
 
 
+def test_startup_revalidation_preserves_non_legacy_historical_blocker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    summary = RecordingSummary(
+        recording_id="historical-blocker",
+        collection_id="pilot",
+        data_tier="prod",
+        state=RecordingState.NEEDS_ATTENTION,
+        started_at_utc="2026-08-30T00:00:00Z",
+        validation_issues=[
+            "IMU packet timestamp maximum residual exceeds 0.5 seconds"
+        ],
+    )
+    coordinator.catalog.upsert(summary)
+    called = False
+
+    def validate(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ValidationReport(False, ("new policy result",), (), {})
+
+    monkeypatch.setattr(
+        "imu_data_collector.coordinator.validate_capture_h5",
+        validate,
+    )
+
+    result = coordinator.revalidate_unuploaded_recordings()
+
+    assert result["scanned"] == 0
+    assert result["skipped"] == 1
+    assert not called
+    assert coordinator.catalog.get("historical-blocker") == summary
+
+
 @pytest.mark.asyncio
 async def test_release_preview_is_idempotent_and_cleans_stale_session(
     tmp_path: Path,

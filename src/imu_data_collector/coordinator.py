@@ -20,7 +20,7 @@ from imu_data_collector.broker_client import (
     publish_recording_via_broker,
     read_index_receipt_via_broker,
 )
-from imu_data_collector.catalog import RecordingCatalog
+from imu_data_collector.catalog import LEGACY_PACKET_RESIDUAL_ISSUE, RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
 from imu_data_collector.cw12eu import (
@@ -80,12 +80,12 @@ class RecordingCoordinator:
         # 首次安装的 Windows/macOS 用户尚没有数据目录；健康接口需要在录制前
         # 就能统计磁盘空间，因此由应用启动负责创建，而不是等第一条录制。
         self.settings.data_root.mkdir(parents=True, exist_ok=True)
-        identity_migration = auto_migrate_local_identity(self.settings.data_root)
-        self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.catalog = RecordingCatalog(settings.catalog_path)
+        identity_migration = auto_migrate_local_identity(
+            self.settings.data_root, self.catalog
+        )
+        self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         if identity_migration is not None:
-            for item in identity_migration["plan"]["captures"]:
-                self.catalog.delete(item["old_recording_id"])
             rebuild_catalog(self.settings.data_root, self.catalog)
         self.remote = RcloneRemoteStore(settings.upload)
         self.object_store = create_object_store(
@@ -1124,6 +1124,7 @@ class RecordingCoordinator:
                 "index_state": "not_requested",
                 "index_message": "已保存到本机对象目录，尚未上传团队云端",
                 "manifest_generation": manifest_generation,
+                "publication_recording_id": recording_id,
             }
         else:
             update = {
@@ -1132,6 +1133,7 @@ class RecordingCoordinator:
                 "index_state": "pending",
                 "index_message": "团队云端已接收，等待标注端扫描并回执",
                 "manifest_generation": manifest_generation,
+                "publication_recording_id": recording_id,
             }
         updated = summary.model_copy(update=update)
         self.catalog.upsert(updated)
@@ -2192,7 +2194,11 @@ class RecordingCoordinator:
         """读取标注端回执，严格区分上传成功与实际进入标注索引。"""
 
         summary = self._required_summary(recording_id)
-        if summary.upload_state not in {"uploaded", "published"}:
+        if summary.upload_state not in {
+            "uploaded",
+            "published",
+            "legacy_published",
+        }:
             return summary
         if summary.publish_target not in {
             PublishTarget.BROKER,
@@ -2208,11 +2214,14 @@ class RecordingCoordinator:
             )
             self.catalog.upsert(updated)
             return updated
-        key = f"index-receipts/{recording_id}.json"
+        publication_recording_id = (
+            summary.publication_recording_id or recording_id
+        )
+        key = f"index-receipts/{publication_recording_id}.json"
         try:
             if summary.publish_target == PublishTarget.BROKER:
                 payload = await read_index_receipt_via_broker(
-                    recording_id,
+                    publication_recording_id,
                     self.settings,
                     self.cloud_auth,
                 )
@@ -2292,7 +2301,16 @@ class RecordingCoordinator:
         for summary in self.catalog.list():
             if summary.state != RecordingState.NEEDS_ATTENTION:
                 continue
-            if summary.upload_state in {"uploaded", "published"}:
+            # 该启动迁移只负责把旧版 0.2 秒阻断规则重分类为质量警告。
+            # 其他历史结论必须保留，不能用今天的 schema/taxonomy 策略静默覆盖。
+            if LEGACY_PACKET_RESIDUAL_ISSUE not in summary.validation_issues:
+                result["skipped"] += 1
+                continue
+            if summary.upload_state in {
+                "uploaded",
+                "published",
+                "legacy_published",
+            }:
                 result["skipped"] += 1
                 continue
             result["scanned"] += 1
