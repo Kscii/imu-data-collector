@@ -18,6 +18,13 @@ export type RecordingFilters = {
 
 export type RecordingQueueKey = "mine" | "unassigned" | "others" | "completed";
 
+export const RECORDING_QUEUE_PRIORITY: readonly RecordingQueueKey[] = [
+  "mine",
+  "unassigned",
+  "others",
+  "completed",
+];
+
 export function recordingQueueKey(recording: QueueRecording, actor: string): RecordingQueueKey {
   if (recording.workflow_state === "completed") return "completed";
   if (recording.workflow_state === "in_progress") {
@@ -55,9 +62,12 @@ export function preferredRecordingId(recordings: QueueRecording[], actor: string
     participant: "",
     collection: "",
   });
-  return groups.mine[0]?.recording_id
-    ?? groups.unassigned[0]?.recording_id
-    ?? groups.others[0]?.recording_id
-    ?? groups.completed[0]?.recording_id
-    ?? "";
+  const queue = firstNonEmptyRecordingQueue(groups);
+  return queue ? groups[queue][0]?.recording_id ?? "" : "";
+}
+
+export function firstNonEmptyRecordingQueue(
+  groups: Record<RecordingQueueKey, QueueRecording[]>,
+): RecordingQueueKey | null {
+  return RECORDING_QUEUE_PRIORITY.find((key) => groups[key].length > 0) ?? null;
 }
