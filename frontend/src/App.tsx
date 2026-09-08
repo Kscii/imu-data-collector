@@ -3,8 +3,10 @@ import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from 
 import { resolveAnnotationShortcut } from "./annotationShortcuts";
 import { intervalFollowAnchorIndex, intervalsAtTime } from "./annotationTimeline";
 import {
+  firstNonEmptyRecordingQueue,
   groupRecordingQueues,
   preferredRecordingId,
+  recordingQueueKey,
   type RecordingQueueKey,
 } from "./recordingQueue";
 import {
@@ -1886,6 +1888,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   const [recordingTier, setRecordingTier] = useState<"all" | "test" | "prod">("all");
   const [recordingParticipant, setRecordingParticipant] = useState("");
   const [recordingCollection, setRecordingCollection] = useState("");
+  const [recordingQueueTab, setRecordingQueueTab] = useState<RecordingQueueKey>("mine");
   const [taskTab, setTaskTab] = useState<AnnotationTaskTab>(() => {
     const requested = new URLSearchParams(location.search).get("task");
     return (["sync", "annotate", "data", "manage"] as string[]).includes(requested ?? "")
@@ -2039,6 +2042,14 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       window.requestAnimationFrame(() => recordingDrawerButtonRef.current?.focus());
     };
   }, [recordingDrawerOpen]);
+
+  useEffect(() => {
+    if (!recordingDrawerOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      selectedRecordingButtonRef.current?.scrollIntoView({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [recordingDrawerOpen, recordingQueueTab]);
 
   useEffect(() => {
     const pending = saveState === "saving" || saveState === "error" || saveState === "conflict";
@@ -2622,6 +2633,27 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
     { key: "others", zh: "其他成员进行中", en: "Others in progress" },
     { key: "completed", zh: "已完成", en: "Completed" },
   ];
+  const visibleRecordingCount = queueOrder.reduce(
+    (total, group) => total + recordingQueues[group.key].length,
+    0,
+  );
+  const activeRecordingQueue = recordingQueues[recordingQueueTab];
+  const openRecordingDrawer = () => {
+    const current = recordings.find((item) => item.recording_id === selected);
+    if (current) {
+      const currentQueue = recordingQueueKey(current, session.unikey);
+      if (!recordingQueues[currentQueue].some((item) => item.recording_id === selected)) {
+        setRecordingQuery("");
+        setRecordingTier("all");
+        setRecordingParticipant("");
+        setRecordingCollection("");
+      }
+      setRecordingQueueTab(currentQueue);
+    } else {
+      setRecordingQueueTab(firstNonEmptyRecordingQueue(recordingQueues) ?? "mine");
+    }
+    setRecordingDrawerOpen(true);
+  };
   const participantFilters = Array.from(new Set(recordings.map((item) => item.participant_id).filter((item): item is string => Boolean(item)))).sort();
   const collectionFilters = Array.from(new Set(recordings.map((item) => item.collection_id))).sort();
   const orderedAnnotationIntervals: OrderedAnnotationInterval[] = doc ? [
@@ -2806,7 +2838,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   return (
     <main className="annotation-workbench">
       <section className="annotation-workbench-bar">
-        <button ref={recordingDrawerButtonRef} onClick={() => setRecordingDrawerOpen(true)}>{tr("录制列表", "Recordings")}</button>
+        <button ref={recordingDrawerButtonRef} onClick={openRecordingDrawer}>{tr("录制列表", "Recordings")}</button>
         <div className="annotation-recording-summary">
           <strong>{selectedRecording ? `${selectedRecording.participant_id ?? "待确认身份"} · ${tierLabel(selectedRecording.data_tier)}` : "未选择录制"}</strong>
           {selected && <code title={selected}>{selected}</code>}
@@ -2843,26 +2875,65 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
               <button onClick={copyRecordingId} disabled={!selected}>{copiedRecordingId === selected ? tr("已复制", "Copied") : tr("复制当前 ID", "Copy current ID")}</button>
             </div>
             {indexMessage && <span className="index-message">{indexMessage}</span>}
+            <nav className="recording-queue-tabs" role="tablist" aria-label={tr("录制任务状态", "Recording task status")}>
+              {queueOrder.map((group, index) => <button
+                id={`recording-queue-tab-${group.key}`}
+                key={group.key}
+                type="button"
+                role="tab"
+                aria-selected={recordingQueueTab === group.key}
+                aria-controls="recording-queue-panel"
+                tabIndex={recordingQueueTab === group.key ? 0 : -1}
+                className={recordingQueueTab === group.key ? "active" : ""}
+                onClick={() => setRecordingQueueTab(group.key)}
+                onKeyDown={(event) => {
+                  let nextIndex = index;
+                  if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (index + 1) % queueOrder.length;
+                  else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (index - 1 + queueOrder.length) % queueOrder.length;
+                  else if (event.key === "Home") nextIndex = 0;
+                  else if (event.key === "End") nextIndex = queueOrder.length - 1;
+                  else return;
+                  event.preventDefault();
+                  const next = queueOrder[nextIndex];
+                  setRecordingQueueTab(next.key);
+                  recordingDrawerRef.current
+                    ?.querySelector<HTMLButtonElement>(`#recording-queue-tab-${next.key}`)
+                    ?.focus();
+                }}
+              >
+                <span>{tr(group.zh, group.en)}</span>
+                <strong>{recordingQueues[group.key].length}</strong>
+              </button>)}
+            </nav>
           </div>
-          <div className="recording-drawer-list">
-            {queueOrder.map((group) => <details className="recording-queue" key={group.key} open={group.key === "mine" || group.key === "unassigned" || recordingQueues[group.key].some((item) => item.recording_id === selected) || undefined}>
-              <summary>{tr(group.zh, group.en)} <span>{recordingQueues[group.key].length}</span></summary>
-              <div>
-                {recordingQueues[group.key].length === 0 && <span className="muted recording-queue-empty">{tr("没有匹配录制", "No matching recordings")}</span>}
-                {recordingQueues[group.key].map((recording) => <button ref={selected === recording.recording_id ? selectedRecordingButtonRef : undefined} key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}>
-                  <strong>{recording.participant_id ?? tr("待选择参与者", "Participant pending")} · {tierLabel(recording.data_tier)}</strong>
-                  <span>{recording.recording_id}</span>
-                  <span>{recording.collection_id} · {recording.duration_ns ? seconds(recording.duration_ns) : "—"}</span>
-                  <span className={`recording-workflow-status workflow-${recording.workflow_state ?? "unassigned"}`}>
-                    {recording.workflow_state === "completed"
-                      ? tr(`标注已完成 · ${recording.annotator_id ?? "负责人未知"}`, `Completed · ${recording.annotator_id ?? "unknown owner"}`)
-                      : recording.workflow_state === "in_progress"
-                        ? tr(`已分配给 ${recording.annotator_id ?? "未知"} · 标注中`, `Assigned to ${recording.annotator_id ?? "unknown"} · in progress`)
-                        : tr("未分配 · 标注未完成", "Unassigned · incomplete")}
-                  </span>
-                </button>)}
-              </div>
-            </details>)}
+          <div className="recording-drawer-list-wrap">
+            <div
+              id="recording-queue-panel"
+              className="recording-drawer-list"
+              role="tabpanel"
+              aria-labelledby={`recording-queue-tab-${recordingQueueTab}`}
+            >
+              {activeRecordingQueue.length === 0 && <div className="recording-queue-empty-state">
+                <strong>{tr("当前状态下没有匹配录制", "No matching recordings in this status")}</strong>
+                <span>{tr("可以调整上方搜索或筛选条件，其他状态的数量仍显示在页签中。", "Adjust the search or filters above; counts for other statuses remain visible in the tabs.")}</span>
+              </div>}
+              {activeRecordingQueue.map((recording) => <button ref={selected === recording.recording_id ? selectedRecordingButtonRef : undefined} key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}>
+                <strong>{recording.participant_id ?? tr("待选择参与者", "Participant pending")} · {tierLabel(recording.data_tier)}</strong>
+                <span>{recording.recording_id}</span>
+                <span>{recording.collection_id} · {recording.duration_ns ? seconds(recording.duration_ns) : "—"}</span>
+                <span className={`recording-workflow-status workflow-${recording.workflow_state ?? "unassigned"}`}>
+                  {recording.workflow_state === "completed"
+                    ? tr(`标注已完成 · ${recording.annotator_id ?? "负责人未知"}`, `Completed · ${recording.annotator_id ?? "unknown owner"}`)
+                    : recording.workflow_state === "in_progress"
+                      ? tr(`已分配给 ${recording.annotator_id ?? "未知"} · 标注中`, `Assigned to ${recording.annotator_id ?? "unknown"} · in progress`)
+                      : tr("未分配 · 标注未完成", "Unassigned · incomplete")}
+                </span>
+              </button>)}
+            </div>
+          </div>
+          <div className="recording-drawer-footer" aria-live="polite">
+            <span>{tr(`当前显示 ${activeRecordingQueue.length} 条`, `Showing ${activeRecordingQueue.length}`)}</span>
+            <span>{tr(`筛选结果共 ${visibleRecordingCount} 条 · 列表可滚动`, `${visibleRecordingCount} filtered total · list scrolls`)}</span>
           </div>
         </aside>
       </>}

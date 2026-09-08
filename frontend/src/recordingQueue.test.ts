@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { groupRecordingQueues, preferredRecordingId, type QueueRecording } from "./recordingQueue.ts";
+import {
+  firstNonEmptyRecordingQueue,
+  groupRecordingQueues,
+  preferredRecordingId,
+  type QueueRecording,
+} from "./recordingQueue.ts";
 
 const recordings: QueueRecording[] = [
   { recording_id: "done", collection_id: "c2", participant_id: "p2", annotator_id: "me", workflow_state: "completed", data_tier: "prod", started_at_utc: "2026-01-04" },
@@ -26,4 +31,15 @@ test("过滤条件在分组前统一应用", () => {
   const groups = groupRecordingQueues(recordings, "me", { query: "c1", tier: "prod", participant: "p1", collection: "c1" });
   assert.deepEqual([...groups.mine, ...groups.others].map((item) => item.recording_id), ["mine", "other"]);
   assert.equal(groups.completed.length, 0);
+});
+
+test("空选择时按任务优先级打开第一个非空队列", () => {
+  const groups = groupRecordingQueues(recordings.filter((item) => item.recording_id !== "mine"), "me", {
+    query: "",
+    tier: "all",
+    participant: "",
+    collection: "",
+  });
+  assert.equal(firstNonEmptyRecordingQueue(groups), "unassigned");
+  assert.equal(firstNonEmptyRecordingQueue({ mine: [], unassigned: [], others: [], completed: [] }), null);
 });
