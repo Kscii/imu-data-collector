@@ -20,7 +20,9 @@ from imu_data_collector.models import (
     CalibrationProfile,
     CaptureManifestV2,
     DataTier,
+    DeviceConfigurationReference,
     RecordingSummary,
+    SensorReference,
 )
 from imu_data_collector.storage import ObjectConflictError, ObjectStore
 
@@ -139,7 +141,9 @@ def _put_idempotent(store: ObjectStore, path: Path, artifact: ArtifactDescriptor
 
 
 def _require_annotation_capabilities(
-    store: ObjectStore, source_h5_schema_version: str
+    store: ObjectStore,
+    source_h5_schema_version: str,
+    manifest_schema_version: str = "3.2.0",
 ) -> AnnotationCapabilities:
     """在第一个对象上传前确认生产标注端确实理解本次交接格式。"""
 
@@ -152,8 +156,8 @@ def _require_annotation_capabilities(
             "标注端尚未公布能力合同，已在上传任何对象前停止"
         ) from error
     capabilities = AnnotationCapabilities.model_validate(payload)
-    if "3.0.0" not in capabilities.accepted_manifest_schema_versions:
-        raise RuntimeError("标注端不接受 manifest schema 3.0.0")
+    if manifest_schema_version not in capabilities.accepted_manifest_schema_versions:
+        raise RuntimeError(f"标注端不接受 manifest schema {manifest_schema_version}")
     if source_h5_schema_version not in capabilities.accepted_capture_h5_schema_versions:
         raise RuntimeError(
             "标注端不接受 capture H5 schema " + source_h5_schema_version
@@ -234,6 +238,58 @@ async def prepare_publication(
                 else None
             ),
         )
+        sensor = None
+        configuration = None
+        sensor_sn = str(handle.attrs.get("sensor_sn", ""))
+        profile_sha256 = str(handle.attrs.get("device_profile_sha256", ""))
+        # Custom pre-registry deployments may still create the new capture H5
+        # schema with explicit legacy placeholders. Keep their established 3.0
+        # handoff rather than inventing a registry-backed identity that cannot
+        # be resolved by the annotation service.
+        if sensor_sn not in {"", "legacy-unassigned"} and profile_sha256 not in {
+            "",
+            "legacy",
+        }:
+            sensor = SensorReference(
+                sensor_sn=sensor_sn,
+                device_profile_sha256=profile_sha256,
+                protocol_id=str(imu_attrs.get("protocol", "cw12eu_v1")),
+                firmware_version=str(imu_attrs.get("firmware_version", "unknown")),
+                firmware_evidence_status=str(
+                    imu_attrs.get("firmware_evidence_status", "unknown")
+                ),
+            )
+        configuration_snapshot_id = str(
+            handle.attrs.get("configuration_snapshot_id", "")
+        )
+        configuration_snapshot_sha256 = str(
+            handle.attrs.get("configuration_snapshot_sha256", "")
+        )
+        configuration_content_sha256 = str(
+            handle.attrs.get("configuration_content_sha256", "")
+        )
+        si_profile_id = str(handle.attrs.get("si_profile_id", ""))
+        if (
+            configuration_snapshot_id not in {"", "legacy"}
+            and configuration_snapshot_sha256 not in {"", "legacy"}
+            and configuration_content_sha256 not in {"", "legacy"}
+            and si_profile_id not in {"", "unverified"}
+        ):
+            configuration = DeviceConfigurationReference(
+                snapshot_id=configuration_snapshot_id,
+                snapshot_sha256=configuration_snapshot_sha256,
+                content_sha256=configuration_content_sha256,
+                source=str(handle.attrs.get("configuration_source", "bootstrap")),
+                approval_state_at_capture=str(
+                    handle.attrs.get("configuration_approval_state", "local")
+                ),
+                checked_at_utc=(
+                    str(handle.attrs["configuration_checked_at_utc"])
+                    if "configuration_checked_at_utc" in handle.attrs
+                    else None
+                ),
+                si_profile_id=si_profile_id,
+            )
     proxy_path = await build_preview_mp4(
         mkv_path,
         h5_path.parent / "preview.mp4",
@@ -260,7 +316,13 @@ async def prepare_publication(
             )
         )
     manifest = CaptureManifestV2(
-        schema_version="3.0.0",
+        schema_version=(
+            "3.2.0"
+            if configuration is not None
+            else "3.1.0"
+            if sensor is not None
+            else "3.0.0"
+        ),
         recording_id=summary.recording_id,
         collection_id=summary.collection_id,
         data_tier=DataTier(summary.data_tier),
@@ -270,6 +332,8 @@ async def prepare_publication(
         source_h5_schema_version=source_schema,
         software_revision=os.environ.get("IMU_PLATFORM_REVISION", "working-tree"),
         calibration=calibration,
+        sensor=sensor,
+        configuration=configuration,
         artifacts=artifacts,
     )
     return manifest, paths
@@ -288,6 +352,7 @@ async def publish_recording(
             _require_annotation_capabilities,
             store,
             manifest.source_h5_schema_version,
+            manifest.schema_version,
         )
     artifacts = manifest.artifacts
     for artifact in artifacts:

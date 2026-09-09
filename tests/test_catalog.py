@@ -117,6 +117,57 @@ def test_new_catalog_rows_preserve_explicit_data_tier(tmp_path: Path) -> None:
     assert summary.data_tier == "test"
 
 
+def test_identity_remap_preserves_metadata_and_jobs(tmp_path: Path) -> None:
+    catalog = RecordingCatalog(tmp_path / "catalog.sqlite3")
+    old_id = "20260830T071943.008380Z_xfan0282"
+    new_id = "20260830T071943.008380Z"
+    warning = (
+        "IMU packet timestamp maximum residual is 337.400 ms; "
+        "warning threshold is 200 ms"
+    )
+    catalog.upsert(
+        RecordingSummary(
+            recording_id=old_id,
+            collection_id="20260830_xfan0282_01",
+            participant_id="xfan0282",
+            data_tier="prod",
+            state=RecordingState.READY,
+            started_at_utc="2026-08-30T07:19:43+00:00",
+            quality_warnings=[warning],
+            upload_state="uploaded",
+            publish_target="direct_gcs",
+            index_state="indexed",
+            manifest_generation=123,
+        )
+    )
+    catalog.enqueue_job(old_id, BackgroundJobKind.PUBLISH)
+    catalog.complete_job(old_id, BackgroundJobKind.PUBLISH)
+
+    result = catalog.remap_identity(
+        [
+            {
+                "old_recording_id": old_id,
+                "new_recording_id": new_id,
+                "new_collection_id": "20260830_session_01",
+                "h5_path": f"/data/{new_id}.h5",
+                "mkv_path": f"/data/{new_id}.mkv",
+            }
+        ]
+    )
+
+    assert result == {"migrated": 1, "unchanged": 0}
+    assert catalog.get(old_id) is None
+    summary = catalog.get(new_id)
+    assert summary is not None
+    assert summary.participant_id is None
+    assert summary.quality_warnings == [warning]
+    assert summary.upload_state == "uploaded"
+    assert summary.manifest_generation == 123
+    assert summary.publication_recording_id == old_id
+    assert summary.upload_job is not None
+    assert summary.upload_job.state == BackgroundJobState.SUCCEEDED
+
+
 def test_upsert_refreshes_formal_recording_start(tmp_path: Path) -> None:
     catalog = RecordingCatalog(tmp_path / "catalog.sqlite3")
     initial = RecordingSummary(

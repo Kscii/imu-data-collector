@@ -7,7 +7,11 @@ import { resolve } from "node:path";
 function captureApiBuildId() {
   const digest = createHash("sha256");
   const root = resolve(import.meta.dirname, "../src/imu_data_collector");
-  for (const name of ["capture_api.py", "coordinator.py", "models.py"]) {
+  for (const name of [
+    "capture_api.py", "coordinator.py", "models.py", "config.py", "broker_client.py",
+    "device_configuration.py", "device_registry.py", "device_binding.py",
+    "imu_protocols.py", "ble.py", "cw12eu.py"
+  ]) {
     digest.update(name);
     digest.update("\0");
     digest.update(readFileSync(resolve(root, name)));

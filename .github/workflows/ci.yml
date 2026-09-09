@@ -73,7 +73,7 @@ jobs:
                   ;;
               esac
               case "${path}" in
-                src/*|pyproject.toml|uv.lock|frontend/*|configs/activities.yaml|configs/calibration-evidence.yaml|configs/systemd/*|scripts/deploy/imu-annotation-deploy)
+                src/*|pyproject.toml|uv.lock|frontend/*|configs/activities.yaml|configs/calibration-evidence.yaml|configs/imu-devices.yaml|configs/systemd/*|scripts/deploy/imu-annotation-deploy)
                   service=true
                   ;;
               esac
@@ -181,6 +181,7 @@ jobs:
             --exclude='*/__pycache__' --exclude='*.pyc' -czf "${bundle}" \
             LICENSE README.md pyproject.toml uv.lock \
             configs/activities.yaml configs/calibration-evidence.yaml \
+            configs/imu-devices.yaml configs/device-config-bootstrap.lock.json \
             configs/systemd/imu-annotation.service \
             configs/systemd/imu-annotation-gc.service \
             configs/systemd/imu-annotation-gc.timer \

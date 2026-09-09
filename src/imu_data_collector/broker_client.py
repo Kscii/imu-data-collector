@@ -16,6 +16,16 @@ from imu_data_collector.broker_models import (
 )
 from imu_data_collector.config import Settings
 from imu_data_collector.desktop_auth import DesktopOAuthManager
+from imu_data_collector.device_configuration import (
+    ConfigurationReviewV2,
+    ConfigurationSnapshotSubmission,
+    ConfigurationSnapshotV2,
+    LocalConfigurationManager,
+)
+from imu_data_collector.device_registry import (
+    DeviceRegistryDocument,
+    activate_registry_snapshot,
+)
 from imu_data_collector.models import CaptureManifestV2, RecordingSummary
 from imu_data_collector.publisher import prepare_publication
 
@@ -76,6 +86,141 @@ def _broker_post(
     if not isinstance(value, dict):
         raise RuntimeError("上传代理返回了无效 JSON")
     return value
+
+
+def _broker_get(url: str, token: str, *, timeout: int = 30) -> dict:
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    value = response.json()
+    if not isinstance(value, dict):
+        raise RuntimeError("上传代理返回了无效 JSON")
+    return value
+
+
+async def refresh_device_registry_via_broker(
+    settings: Settings,
+    auth: DesktopOAuthManager,
+) -> tuple[DeviceRegistryDocument, dict]:
+    """Fetch one authenticated immutable bundle and activate the verified LKG."""
+
+    if not settings.cloud.broker_url:
+        raise RuntimeError("尚未配置上传代理 URL")
+    token = await asyncio.to_thread(auth.id_token)
+    base = settings.cloud.broker_url.rstrip("/")
+    pointer = await asyncio.to_thread(
+        _broker_get,
+        f"{base}/v1/device-registry/current",
+        token,
+    )
+    digest = str(pointer.get("snapshot_sha256", ""))
+    snapshot = await asyncio.to_thread(
+        _broker_get,
+        f"{base}/v1/device-registry/snapshots/{digest}",
+        token,
+    )
+    document = await asyncio.to_thread(
+        activate_registry_snapshot,
+        settings.device_registry_cache_path,
+        pointer,
+        snapshot,
+    )
+    settings.device_registry_path = settings.device_registry_cache_path
+    settings.device_registry_source = "lkg_cache"
+    return document, pointer
+
+
+async def refresh_device_configuration_via_broker(
+    settings: Settings,
+    auth: DesktopOAuthManager,
+    manager: LocalConfigurationManager,
+) -> dict:
+    """Refresh Current and searchable snapshots without silently changing selection."""
+
+    if not settings.cloud.broker_url:
+        raise RuntimeError("尚未配置上传代理 URL")
+    token = await asyncio.to_thread(auth.id_token)
+    base = settings.cloud.broker_url.rstrip("/")
+    listing = await asyncio.to_thread(
+        _broker_get,
+        f"{base}/v2/device-config/snapshots",
+        token,
+    )
+    current_id = listing.get("current_snapshot_id")
+    if current_id is not None and not isinstance(current_id, str):
+        raise RuntimeError("配置服务返回了无效 Current Snapshot ID")
+    summaries = listing.get("snapshots")
+    if not isinstance(summaries, list):
+        raise RuntimeError("配置服务返回了无效 Snapshot 列表")
+    cached = 0
+    for item in summaries:
+        if not isinstance(item, dict) or not isinstance(item.get("snapshot_id"), str):
+            continue
+        detail = await asyncio.to_thread(
+            _broker_get,
+            f"{base}/v2/device-config/snapshots/{item['snapshot_id']}",
+            token,
+        )
+        snapshot = ConfigurationSnapshotV2.model_validate(detail.get("snapshot"))
+        review = ConfigurationReviewV2.model_validate(detail.get("review"))
+        manager.cache_remote(
+            snapshot,
+            review,
+        )
+        cached += 1
+    manager.record_team_current(current_id)
+    return {
+        "current_snapshot_id": current_id,
+        "cached_snapshots": cached,
+        **manager.status(),
+    }
+
+
+async def publish_device_configuration_via_broker(
+    submission: ConfigurationSnapshotSubmission,
+    settings: Settings,
+    auth: DesktopOAuthManager,
+    manager: LocalConfigurationManager,
+) -> dict:
+    if not settings.cloud.broker_url:
+        raise RuntimeError("尚未配置上传代理 URL")
+    token = await asyncio.to_thread(auth.id_token)
+    base = settings.cloud.broker_url.rstrip("/")
+    payload = await asyncio.to_thread(
+        _broker_post,
+        f"{base}/v2/device-config/snapshots",
+        token,
+        submission.model_dump(mode="json"),
+    )
+    snapshot = ConfigurationSnapshotV2.model_validate(payload.get("snapshot"))
+    review = ConfigurationReviewV2.model_validate(payload.get("review"))
+    manager.cache_remote(snapshot, review)
+    return {
+        "snapshot": snapshot.model_dump(mode="json"),
+        "review": review.model_dump(mode="json"),
+    }
+
+
+async def reserve_device_identity_via_broker(
+    settings: Settings,
+    auth: DesktopOAuthManager,
+    *,
+    hardware_asset_id: str | None = None,
+) -> dict:
+    if not settings.cloud.broker_url:
+        raise RuntimeError("尚未配置上传代理 URL")
+    token = await asyncio.to_thread(auth.id_token)
+    base = settings.cloud.broker_url.rstrip("/")
+    if hardware_asset_id is None:
+        url = f"{base}/v2/device-config/identities/assets"
+        body: dict = {}
+    else:
+        url = f"{base}/v2/device-config/identities/revisions"
+        body = {"hardware_asset_id": hardware_asset_id}
+    return await asyncio.to_thread(_broker_post, url, token, body)
 
 
 async def publish_recording_via_broker(

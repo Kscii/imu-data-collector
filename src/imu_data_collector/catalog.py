@@ -55,7 +55,8 @@ class RecordingCatalog:
                     publish_target TEXT NOT NULL DEFAULT 'disabled',
                     index_state TEXT NOT NULL DEFAULT 'not_requested',
                     index_message TEXT NOT NULL DEFAULT '',
-                    manifest_generation INTEGER
+                    manifest_generation INTEGER,
+                    publication_recording_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS recordings_collection_idx
                     ON recordings(collection_id, started_at_utc);
@@ -105,6 +106,7 @@ class RecordingCatalog:
                 ("validation_issues_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("quality_warnings_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("publish_target", "TEXT NOT NULL DEFAULT 'disabled'"),
+                ("publication_recording_id", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(
@@ -156,8 +158,8 @@ class RecordingCatalog:
                     started_at_utc, ended_at_utc, duration_ns, h5_path, mkv_path,
                     issues_json, validation_issues_json, quality_warnings_json,
                     upload_state, publish_target, index_state, index_message,
-                    manifest_generation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    manifest_generation, publication_recording_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recording_id) DO UPDATE SET
                     collection_id=excluded.collection_id,
                     participant_id=excluded.participant_id,
@@ -175,7 +177,8 @@ class RecordingCatalog:
                     publish_target=excluded.publish_target,
                     index_state=excluded.index_state,
                     index_message=excluded.index_message,
-                    manifest_generation=excluded.manifest_generation
+                    manifest_generation=excluded.manifest_generation,
+                    publication_recording_id=excluded.publication_recording_id
                 """,
                 (
                     payload["recording_id"],
@@ -196,6 +199,7 @@ class RecordingCatalog:
                     payload["index_state"],
                     payload["index_message"],
                     payload["manifest_generation"],
+                    payload["publication_recording_id"],
                 ),
             )
 
@@ -476,7 +480,8 @@ class RecordingCatalog:
                     started_at_utc=?, ended_at_utc=?, duration_ns=?, h5_path=?,
                     mkv_path=?, issues_json=?, validation_issues_json=?,
                     quality_warnings_json=?, upload_state=?, index_state=?,
-                    index_message=?, manifest_generation=?, publish_target=?
+                    index_message=?, manifest_generation=?, publish_target=?,
+                    publication_recording_id=?
                 WHERE recording_id=?
                 """,
                 (
@@ -497,6 +502,7 @@ class RecordingCatalog:
                     payload["index_message"],
                     payload["manifest_generation"],
                     payload["publish_target"],
+                    payload["publication_recording_id"],
                     payload["recording_id"],
                 ),
             )
@@ -620,6 +626,91 @@ class RecordingCatalog:
                 (recording_id, generation),
             )
 
+    def remap_identity(self, captures: list[dict[str, str]]) -> dict[str, int]:
+        """原子迁移录制主键并保留所有不可从文件重建的本地状态。"""
+
+        migrated = 0
+        unchanged = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for item in captures:
+                    old_id = item["old_recording_id"]
+                    new_id = item["new_recording_id"]
+                    old_row = connection.execute(
+                        "SELECT * FROM recordings WHERE recording_id=?", (old_id,)
+                    ).fetchone()
+                    new_row = connection.execute(
+                        "SELECT * FROM recordings WHERE recording_id=?", (new_id,)
+                    ).fetchone()
+                    if old_row is None:
+                        if new_row is None:
+                            unchanged += 1
+                            continue
+                        expected = (
+                            item["new_collection_id"],
+                            item["h5_path"],
+                            item["mkv_path"],
+                        )
+                        actual = (
+                            str(new_row["collection_id"]),
+                            str(new_row["h5_path"]),
+                            str(new_row["mkv_path"]),
+                        )
+                        if actual != expected:
+                            raise ValueError(
+                                f"身份迁移后的 catalog 行与计划不一致：{new_id}"
+                            )
+                        unchanged += 1
+                        continue
+                    if new_row is not None and old_id != new_id:
+                        raise ValueError(f"catalog 已存在目标 recording_id：{new_id}")
+                    active = connection.execute(
+                        "SELECT 1 FROM recording_jobs WHERE recording_id=? "
+                        "AND state IN ('queued','running','retry_wait','waiting_auth')",
+                        (old_id,),
+                    ).fetchone()
+                    if active is not None:
+                        raise ValueError(f"录制仍有活动后台任务，拒绝迁移：{old_id}")
+                    publication_id = old_row["publication_recording_id"]
+                    if (
+                        publication_id is None
+                        and old_row["upload_state"]
+                        in {"uploaded", "published", "verified"}
+                        and old_row["publish_target"] in {"broker", "direct_gcs"}
+                    ):
+                        publication_id = old_id
+                    connection.execute(
+                        """
+                        UPDATE recordings SET recording_id=?, collection_id=?,
+                            participant_id='', h5_path=?, mkv_path=?,
+                            publication_recording_id=?
+                        WHERE recording_id=?
+                        """,
+                        (
+                            new_id,
+                            item["new_collection_id"],
+                            item["h5_path"],
+                            item["mkv_path"],
+                            publication_id,
+                            old_id,
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE recording_jobs SET recording_id=? WHERE recording_id=?",
+                        (new_id, old_id),
+                    )
+                    connection.execute(
+                        "UPDATE upload_jobs SET recording_id=? WHERE recording_id=?",
+                        (new_id, old_id),
+                    )
+                    migrated += 1
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {"migrated": migrated, "unchanged": unchanged}
+
     def delete(self, recording_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -656,6 +747,7 @@ class RecordingCatalog:
             index_state=row["index_state"],
             index_message=row["index_message"],
             manifest_generation=row["manifest_generation"],
+            publication_recording_id=row["publication_recording_id"],
             finalization_job=jobs.get(BackgroundJobKind.FINALIZE.value),
             upload_job=jobs.get(BackgroundJobKind.PUBLISH.value),
         )

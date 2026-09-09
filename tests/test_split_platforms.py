@@ -476,6 +476,8 @@ def test_annotation_reads_legacy_manifests_and_publishes_v3_capability(
             "2.0.0",
             "2.1.0",
             "3.0.0",
+            "3.1.0",
+            "3.2.0",
         ]
         assert capabilities["accepted_capture_h5_schema_versions"] == list(
             ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS

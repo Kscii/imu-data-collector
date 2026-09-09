@@ -34,7 +34,10 @@ class AnnotationReviewStore:
 
     def _initial(self, manifest: CaptureManifestV2) -> ReviewDocument:
         by_role = {item.role: item for item in manifest.artifacts}
-        legacy_identity = manifest.schema_version != "3.0.0" and manifest.participant_id
+        legacy_identity = (
+            manifest.schema_version not in {"3.0.0", "3.1.0", "3.2.0"}
+            and manifest.participant_id
+        )
         return ReviewDocument(
             schema_version="2.0.0" if legacy_identity else "3.0.0",
             recording_id=manifest.recording_id,

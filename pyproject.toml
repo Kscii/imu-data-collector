@@ -1,6 +1,6 @@
 [project]
 name = "imu-data-collector"
-version = "0.2.0"
+version = "0.3.0"
 description = "以时间戳为核心的 CW12EU-T IMU 与 UVC 视频数据采集平台"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

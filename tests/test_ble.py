@@ -7,6 +7,7 @@ from bleak.backends.device import BLEDevice
 import imu_data_collector.ble as ble_module
 from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.config import ImuSettings
+from imu_data_collector.cw12eu import pack_test_frame
 from imu_data_collector.device_binding import DeviceBindingStore
 
 
@@ -52,6 +53,46 @@ async def test_cached_bluez_device_path_bypasses_advertisement_scan(
     assert captured["bearer_path"] == cached_path
     assert captured["device"].details["path"] == cached_path
     assert captured["connected"] is True
+    assert source.connected
+
+
+@pytest.mark.asyncio
+async def test_pure_ble_device_skips_dual_mode_preferred_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cached_path = "/org/bluez/hci0/dev_E8_3D_C1_8A_10_1E"
+
+    async def find_cached(_address: str) -> str:
+        return cached_path
+
+    async def connect_bearer(_path: str) -> None:
+        raise AssertionError("纯 BLE 设备不应访问双模 PreferredBearer")
+
+    class FakeClient:
+        def __init__(self, _device: Any, **_kwargs: Any) -> None:
+            self.is_connected = False
+
+        async def connect(self) -> None:
+            self.is_connected = True
+
+    monkeypatch.setattr(
+        CW12EUBleSource, "_find_cached_device_path", staticmethod(find_cached)
+    )
+    monkeypatch.setattr(
+        CW12EUBleSource, "_connect_le_bearer", staticmethod(connect_bearer)
+    )
+    monkeypatch.setattr(ble_module, "BleakClient", FakeClient)
+    monkeypatch.setattr(ble_module.sys, "platform", "linux")
+
+    source = CW12EUBleSource(
+        ImuSettings(
+            name="acce&gyro_C18A101C",
+            address="E8:3D:C1:8A:10:1E",
+            force_le_bearer=False,
+        )
+    )
+    await source.connect()
+
     assert source.connected
 
 
@@ -120,6 +161,86 @@ async def test_scan_timeout_reports_target_not_advertising(
     assert caught.value.code == "imu_not_advertising"
     assert caught.value.phase == "scan"
     assert "其他电脑" in caught.value.hint
+
+
+@pytest.mark.asyncio
+async def test_registry_scan_returns_registered_and_commissioning_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeScanner:
+        @staticmethod
+        async def discover(**_kwargs: Any):
+            return {
+                "E8:3D:C1:8A:0F:7A": (
+                    BLEDevice("E8:3D:C1:8A:0F:7A", "acce&gyro_C18A0F78", None),
+                    SimpleNamespace(
+                        local_name="acce&gyro_C18A0F78",
+                        rssi=-42,
+                        service_uuids=["0000abf0-0000-1000-8000-00805f9b34fb"],
+                    ),
+                ),
+                "AA:BB:CC:DD:EE:FF": (
+                    BLEDevice("AA:BB:CC:DD:EE:FF", "acce&gyro_NEW", None),
+                    SimpleNamespace(
+                        local_name="acce&gyro_NEW",
+                        rssi=-51,
+                        service_uuids=["0000abf0-0000-1000-8000-00805f9b34fb"],
+                    ),
+                ),
+                "11:22:33:44:55:66": (
+                    BLEDevice("11:22:33:44:55:66", "Headphones", None),
+                    SimpleNamespace(local_name="Headphones", rssi=-30, service_uuids=[]),
+                ),
+                "E8:3D:C1:8A:FF:FF": (
+                    BLEDevice(
+                        "E8:3D:C1:8A:FF:FF", "acce&gyro_C18A0F78", None
+                    ),
+                    SimpleNamespace(
+                        local_name="acce&gyro_C18A0F78",
+                        rssi=-70,
+                        service_uuids=["0000abf0-0000-1000-8000-00805f9b34fb"],
+                    ),
+                ),
+            }
+
+    monkeypatch.setattr(ble_module, "BleakScanner", FakeScanner)
+    profiles = [
+        ImuSettings(
+            sensor_sn="IMU-0002-R01",
+            name="acce&gyro_C18A0F78",
+            address="E8:3D:C1:8A:0F:7A",
+            protocol="acce_gyro_abf0_v1",
+        )
+    ]
+
+    found = await CW12EUBleSource.discover(profiles=profiles)
+
+    assert len(found) == 3
+    by_address = {item["address"]: item for item in found}
+    assert by_address["E8:3D:C1:8A:0F:7A"]["matched_sensor_sns"] == [
+        "IMU-0002-R01"
+    ]
+    assert by_address["AA:BB:CC:DD:EE:FF"]["registration_state"] == "unregistered"
+    assert by_address["E8:3D:C1:8A:FF:FF"]["matched_sensor_sns"] == []
+    assert by_address["E8:3D:C1:8A:FF:FF"]["registration_state"] == "unregistered"
+
+
+def test_connection_signature_is_verified_only_by_a_protocol_frame() -> None:
+    source = CW12EUBleSource(
+        ImuSettings(
+            protocol="acce_gyro_abf0_v1",
+            frame_size_bytes=22,
+        )
+    )
+
+    source._on_notification(None, bytearray(b"\x00" * 22))
+    assert not source._verified_packet.is_set()
+    valid = (
+        b"\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x06\x00"
+        b"\x14\x00\x00\x00\x00\x00\x00\x00\r\n"
+    )
+    source._on_notification(None, bytearray(valid))
+    assert source._verified_packet.is_set()
 
 
 @pytest.mark.asyncio
@@ -203,7 +324,10 @@ async def test_macos_binding_is_saved_only_after_notification(
             self.is_connected = True
 
         async def start_notify(self, _uuid: str, callback: Any) -> None:
-            callback(None, bytearray(b"verified-notification"))
+            callback(
+                None,
+                bytearray(pack_test_frame((1, 2, 3, 4, 5, 6), b"\x00\x00\x00\x01")),
+            )
 
     store = DeviceBindingStore(tmp_path / "bindings.json")
     monkeypatch.setattr(ble_module.sys, "platform", "darwin")
@@ -214,6 +338,7 @@ async def test_macos_binding_is_saved_only_after_notification(
     await source.start()
 
     binding = store.load_imu(
+        sensor_sn=source.settings.sensor_sn,
         expected_name="CW12EU-T",
         notify_uuid=source.settings.notify_uuid,
     )

@@ -1,6 +1,10 @@
 data_root: "~/IMUData"
 activity_taxonomy_path: "configs/activities.yaml"
 calibration_evidence_path: "configs/calibration-evidence.yaml"
+device_registry_path: "configs/imu-devices.yaml"
+device_registry_auto_refresh: true
+default_sensor_sn: null
+require_explicit_sensor_selection: true
 server_host: "127.0.0.1"
 server_port: 8765
 minimum_free_gib: 20
@@ -45,25 +49,6 @@ storage:
   backend: "local"
   bucket: null
   project: null
-
-imu:
-  name: "CW12EU-T"
-  address: "83:FC:90:14:1E:A4"
-  notify_uuid: "00002ae1-0000-1000-8000-00805f9b34fb"
-  expected_rate_hz: 25.0
-  expected_rate_status: "short_probe_observed_2026-08-25_pending_long_run"
-  frame_size_bytes: 16
-  # 仅适用于地址 83:FC:90:14:1E:A4 的当前设备；原始计数始终另外保留。
-  calibration_profile_id: "cw12eu_t_83fc90141ea4_v1_20260827"
-  calibration_verified: true
-  accel_counts_per_g: 4096.0
-  gyro_counts_per_dps: 32.8
-  accel_bias_counts: [30.0, 48.0, -40.0]
-  gyro_bias_counts: [-17.0, 0.0, 10.0]
-  raw_axis_order: [0, 1, 2]
-  axis_signs: [1, -1, 1]
-  calibration_method: "six_face_static_and_multi_axis_360deg_engineering_v1"
-  calibration_evidence_sha256: null
 
 video:
   device: null

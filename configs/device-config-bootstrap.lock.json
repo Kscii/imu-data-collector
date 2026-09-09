@@ -1,0 +1,239 @@
+{
+  "lock_sha256": "709e34a042ab1bd7d140dffe2518ae670631fe9a7897617c52073edf1d93430f",
+  "object_schema": "imu_device_configuration_bootstrap_lock_v2",
+  "snapshot": {
+    "base_snapshot_id": null,
+    "client_build": "v1-registry-migration",
+    "content": {
+      "devices": [
+        {
+          "allowed_data_tiers": [
+            "test",
+            "prod"
+          ],
+          "audit_document": "../docs/device-facts.md",
+          "display_name": "CW12EU-T",
+          "expected_rate_hz": 25.0,
+          "expected_rate_status": "short_probe_observed_2026-08-25_pending_long_run",
+          "firmware": {
+            "artifact_sha256": null,
+            "evidence_status": "unknown",
+            "version": "unknown"
+          },
+          "hardware_asset_id": "IMU-0001",
+          "identity": {
+            "address_type": "public",
+            "advertised_name": "CW12EU-T",
+            "advertised_service_uuid": null,
+            "gatt_fingerprint_sha256": null,
+            "public_address": "83:FC:90:14:1E:A4"
+          },
+          "lifecycle": "active",
+          "protocol_id": "cw12eu_v1",
+          "revision": 1,
+          "sensor_sn": "IMU-0001-R01",
+          "si_profile": {
+            "accel_bias_counts": [
+              30.0,
+              48.0,
+              -40.0
+            ],
+            "accel_counts_per_g": 4096.0,
+            "axis_signs": [
+              1,
+              -1,
+              1
+            ],
+            "coordinate_system": {
+              "handedness": "right_handed",
+              "x_positive_en": "wearer's right; opposite the device interface face",
+              "x_positive_zh": "佩戴者右侧；设备接口面的反面",
+              "y_positive_en": "toward the head; pendant/lanyard end",
+              "y_positive_zh": "头部方向；吊坠/挂绳端",
+              "z_positive_en": "away from the body; button face",
+              "z_positive_zh": "身体外侧；按键面"
+            },
+            "evidence": [
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T143249.420984Z_xfan0282",
+                "summary_en": "Raw g3 is dominant; integration at 32.8 counts/(°/s) gives approximately 358.0°.",
+                "summary_zh": "原始 g3 为主轴；按 32.8 counts/(°/s) 积分约 358.0°。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T143451.763656Z_xfan0282",
+                "summary_en": "Raw g3 is dominant; integration gives approximately 360.6°.",
+                "summary_zh": "原始 g3 为主轴；积分约 360.6°。"
+              },
+              {
+                "kind": "accel_static_face",
+                "recording_id": "20260826T143553.112844Z_xfan0282",
+                "summary_en": "The median raw a3 value is approximately +4048 counts.",
+                "summary_zh": "原始 a3 中位数约 +4048 counts。"
+              },
+              {
+                "kind": "accel_static_face",
+                "recording_id": "20260826T143715.290019Z_xfan0282",
+                "summary_en": "The median raw a3 value is approximately -4124 counts.",
+                "summary_zh": "原始 a3 中位数约 -4124 counts。"
+              },
+              {
+                "kind": "accel_static_face",
+                "recording_id": "20260826T144030.144852Z_xfan0282",
+                "summary_en": "The median raw a1 value is approximately +4119 counts.",
+                "summary_zh": "原始 a1 中位数约 +4119 counts。"
+              },
+              {
+                "kind": "accel_static_face",
+                "recording_id": "20260826T144127.783098Z_xfan0282",
+                "summary_en": "The median raw a1 value is approximately -4059 counts.",
+                "summary_zh": "原始 a1 中位数约 -4059 counts。"
+              },
+              {
+                "kind": "accel_static_face",
+                "recording_id": "20260826T144352.550677Z_xfan0282",
+                "summary_en": "The median raw a2 value is approximately -4042 counts.",
+                "summary_zh": "原始 a2 中位数约 -4042 counts。"
+              },
+              {
+                "kind": "accel_static_face",
+                "recording_id": "20260826T144454.002771Z_xfan0282",
+                "summary_en": "The median raw a2 value is approximately +4137 counts.",
+                "summary_zh": "原始 a2 中位数约 +4137 counts。"
+              },
+              {
+                "kind": "dynamic_sanity",
+                "recording_id": "20260826T144614.183656Z_xfan0282",
+                "summary_en": "The minimum is approximately 439 counts (0.107g), followed by a peak of about 16606 counts (4.05g).",
+                "summary_zh": "最低约 439 counts（0.107g），随后峰值约 16606 counts（4.05g）。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T154758.057276Z_xfan0282",
+                "summary_en": "Raw gx is predominantly negative; the absolute integrated angle is approximately 357.7°.",
+                "summary_zh": "原始 gx 负向为主；积分绝对值约 357.7°。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T154943.739216Z_xfan0282",
+                "summary_en": "Raw gx is predominantly positive; the integrated angle is approximately 354.5°.",
+                "summary_zh": "原始 gx 正向为主；积分约 354.5°。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T155132.366440Z_xfan0282",
+                "summary_en": "Raw gz is predominantly negative; the absolute integrated angle is approximately 365.2°.",
+                "summary_zh": "原始 gz 负向为主；积分绝对值约 365.2°。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T161802.637311Z_xfan0282",
+                "summary_en": "Raw gz is predominantly positive; the integrated angle is approximately 363.7°.",
+                "summary_zh": "原始 gz 正向为主；积分约 363.7°。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T161857.507603Z_xfan0282",
+                "summary_en": "Raw gy is predominantly positive; the absolute integrated target-Y angle is approximately 361.8°.",
+                "summary_zh": "原始 gy 正向为主；目标 Y 方向积分绝对值约 361.8°。"
+              },
+              {
+                "kind": "gyro_rotation",
+                "recording_id": "20260826T162007.901513Z_xfan0282",
+                "summary_en": "Raw gy is predominantly negative; the integrated target-Y angle is approximately 370.6°.",
+                "summary_zh": "原始 gy 负向为主；目标 Y 方向积分约 370.6°。"
+              }
+            ],
+            "evidence_sha256": "d869b9a056157da34ffe05f17eb4bb941e2a6676d643437bab427de92f80fb28",
+            "gyro_bias_counts": [
+              -17.0,
+              0.0,
+              10.0
+            ],
+            "gyro_counts_per_dps": 32.8,
+            "method": "six_face_static_and_multi_axis_360deg_engineering_v1",
+            "profile_id": "si-fc6dbff855fbaa0634b6afc0",
+            "raw_axis_order": [
+              0,
+              1,
+              2
+            ],
+            "verified": true
+          },
+          "supersedes_sn": null
+        },
+        {
+          "allowed_data_tiers": [
+            "test"
+          ],
+          "audit_document": "../docs/device-audits/IMU-0002-R01-2026-09-08.md",
+          "display_name": "acce&gyro_C18A0F78",
+          "expected_rate_hz": 50.0,
+          "expected_rate_status": "observed_abf2_device_clock_2026-09-08",
+          "firmware": {
+            "artifact_sha256": null,
+            "evidence_status": "user_confirmed_not_v0.0.4",
+            "version": "stock-unknown"
+          },
+          "hardware_asset_id": "IMU-0002",
+          "identity": {
+            "address_type": "public",
+            "advertised_name": "acce&gyro_C18A0F78",
+            "advertised_service_uuid": "0000abf0-0000-1000-8000-00805f9b34fb",
+            "gatt_fingerprint_sha256": "d9d38ad67a7299f9f1c08f123c4a715fc350d43f3b2ec93aa43dd99fda93e285",
+            "public_address": "E8:3D:C1:8A:0F:7A"
+          },
+          "lifecycle": "active",
+          "protocol_id": "acce_gyro_abf0_v1",
+          "revision": 1,
+          "sensor_sn": "IMU-0002-R01",
+          "si_profile": {
+            "accel_bias_counts": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "accel_counts_per_g": 16384.0,
+            "axis_signs": [
+              1,
+              1,
+              1
+            ],
+            "coordinate_system": {},
+            "evidence": [],
+            "evidence_sha256": null,
+            "gyro_bias_counts": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "gyro_counts_per_dps": null,
+            "method": "single_stationary_orientation_hypothesis",
+            "profile_id": "si-318e8c8ac1455aa6c0ac910a",
+            "raw_axis_order": [
+              0,
+              1,
+              2
+            ],
+            "verified": false
+          },
+          "supersedes_sn": null
+        }
+      ],
+      "schema_version": "2.0"
+    },
+    "content_sha256": "31adad371f3b1a19680d1aaad72039087676139d4b7d1bd1f1dfeade0e3ca0c2",
+    "description": "Automatically migrated v1 bootstrap; no cloud mutation performed.",
+    "name": "Bundled registry revision 1",
+    "object_schema": "imu_device_configuration_snapshot_v2",
+    "published_at_utc": "2026-09-08T17:18:00.567425Z",
+    "publisher": "bootstrap",
+    "snapshot_id": "local-cfg-31adad371f3b1a19680d1aaa",
+    "snapshot_sha256": "829b5cb3a9c0e00244c46534c3ce51918bfa30be856eb9ea8135eba9b27dd0dc"
+  },
+  "source_files": {
+    "calibration-evidence.yaml": "d869b9a056157da34ffe05f17eb4bb941e2a6676d643437bab427de92f80fb28",
+    "imu-devices.yaml": "b24e55ca25ca66a4dbb928ce175dab056e5601308502b11e05b6196808ee2185"
+  }
+}

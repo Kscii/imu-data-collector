@@ -19,16 +19,24 @@ from imu_data_collector.ble import BleOperationError, CW12EUBleSource
 from imu_data_collector.broker_client import (
     publish_recording_via_broker,
     read_index_receipt_via_broker,
+    refresh_device_registry_via_broker,
 )
-from imu_data_collector.catalog import RecordingCatalog
+from imu_data_collector.catalog import LEGACY_PACKET_RESIDUAL_ISSUE, RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
 from imu_data_collector.cw12eu import (
     NotificationKind,
+    calibrate_counts,
     classify_notification,
     parse_notification,
 )
 from imu_data_collector.desktop_auth import DesktopOAuthManager, OAuthLoginRequired
+from imu_data_collector.device_registry import (
+    canonical_json_bytes,
+    load_device_registry,
+    registry_cache_metadata_path,
+    sha256_bytes,
+)
 from imu_data_collector.finalization import (
     cleanup_partial_inputs,
     finalize_recording,
@@ -80,12 +88,12 @@ class RecordingCoordinator:
         # 首次安装的 Windows/macOS 用户尚没有数据目录；健康接口需要在录制前
         # 就能统计磁盘空间，因此由应用启动负责创建，而不是等第一条录制。
         self.settings.data_root.mkdir(parents=True, exist_ok=True)
-        identity_migration = auto_migrate_local_identity(self.settings.data_root)
-        self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         self.catalog = RecordingCatalog(settings.catalog_path)
+        identity_migration = auto_migrate_local_identity(
+            self.settings.data_root, self.catalog
+        )
+        self.taxonomy = load_activity_taxonomy(settings.activity_taxonomy_path)
         if identity_migration is not None:
-            for item in identity_migration["plan"]["captures"]:
-                self.catalog.delete(item["old_recording_id"])
             rebuild_catalog(self.settings.data_root, self.catalog)
         self.remote = RcloneRemoteStore(settings.upload)
         self.object_store = create_object_store(
@@ -108,6 +116,7 @@ class RecordingCoordinator:
         self._stop_consumer = asyncio.Event()
         self.latest_raw = np.zeros(6, dtype=np.int16)
         self.latest_packet_samples = 0
+        self.latest_device_time_ms: int | None = None
         self.packet_count = 0
         self.sample_count = 0
         self.observed_rate_hz = 0.0
@@ -140,6 +149,11 @@ class RecordingCoordinator:
         self._active_job: dict[str, str] | None = None
         self._camera_cache: list[dict[str, Any]] = []
         self._camera_cache_lock = asyncio.Lock()
+        self._registry_refresh_lock = asyncio.Lock()
+        self._registry_last_checked_at_utc: str | None = None
+        self._registry_last_updated_at_utc: str | None = None
+        self._registry_last_error: str | None = None
+        self._registry_snapshot_sha256: str | None = None
 
     @property
     def publish_target(self) -> PublishTarget:
@@ -216,13 +230,138 @@ class RecordingCoordinator:
                 f"the configured {self.settings.minimum_free_gib} GiB minimum"
             )
 
+    def device_registry_status(self) -> dict[str, Any]:
+        document = load_device_registry(self.settings.device_registry_path)
+        pointer: dict[str, Any] = {}
+        metadata_path = registry_cache_metadata_path(
+            self.settings.device_registry_cache_path
+        )
+        if metadata_path.is_file():
+            try:
+                value = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    pointer = value
+            except (OSError, ValueError, json.JSONDecodeError):
+                pointer = {}
+        bootstrap_revision: int | None = None
+        bootstrap = self.settings.device_registry_bootstrap_path
+        if bootstrap and bootstrap.is_file():
+            try:
+                bootstrap_revision = load_device_registry(bootstrap).registry_revision
+            except (OSError, ValueError):
+                bootstrap_revision = None
+        return {
+            "schema_version": document.schema_version,
+            "registry_revision": document.registry_revision,
+            "registry_document_sha256": sha256_bytes(
+                canonical_json_bytes(document.model_dump(mode="json"))
+            ),
+            "snapshot_sha256": (
+                self._registry_snapshot_sha256
+                or pointer.get("snapshot_sha256")
+            ),
+            "published_at_utc": pointer.get("published_at_utc"),
+            "source": self.settings.device_registry_source,
+            "bootstrap_revision": bootstrap_revision,
+            "auto_refresh": self.settings.device_registry_auto_refresh,
+            "configured": bool(
+                self.settings.device_registry_auto_refresh
+                and self.cloud_auth.configured
+            ),
+            "last_checked_at_utc": self._registry_last_checked_at_utc,
+            "last_updated_at_utc": self._registry_last_updated_at_utc,
+            "last_error": self._registry_last_error,
+        }
+
+    async def refresh_device_registry(self) -> dict[str, Any]:
+        if not self.settings.device_registry_auto_refresh:
+            raise RuntimeError("设备注册表自动更新未启用")
+        if not self.cloud_auth.configured:
+            raise RuntimeError("设备注册表更新需要已配置的上传代理")
+        async with self._registry_refresh_lock:
+            if (
+                self.state != RecordingState.IDLE
+                or self.current is not None
+                or self._monitoring_requested
+                or self.ble is not None
+                or self._active_job is not None
+            ):
+                raise RuntimeError("录制、预览或后台任务进行中，暂不切换设备配置")
+            self._registry_last_checked_at_utc = datetime.now(UTC).isoformat()
+            try:
+                document, pointer = await refresh_device_registry_via_broker(
+                    self.settings,
+                    self.cloud_auth,
+                )
+            except Exception as error:
+                self._registry_last_error = self._error_message(
+                    error, "设备配置更新失败"
+                )
+                raise
+            self._registry_snapshot_sha256 = str(
+                pointer.get("snapshot_sha256") or ""
+            ) or None
+            self._registry_last_updated_at_utc = datetime.now(UTC).isoformat()
+            self._registry_last_error = None
+            if self.settings.default_sensor_sn:
+                self.settings.imu = self.settings.resolve_imu(
+                    self.settings.default_sensor_sn
+                )
+            return {
+                **self.device_registry_status(),
+                "device_count": len(document.devices),
+            }
+
     def _reset_live_imu_metrics(self) -> None:
         self.packet_count = 0
         self.sample_count = 0
         self.observed_rate_hz = 0.0
         self.latest_raw[:] = 0
+        self.latest_device_time_ms = None
         self.preview_parse_errors = 0
         self._first_packet_ns = None
+
+    def _select_session_imu(
+        self,
+        sensor_sn: str | None,
+        local_device_id: str | None = None,
+        configuration_snapshot_id: str | None = None,
+    ) -> None:
+        """Freeze an SN profile before opening BLE or writing capture data."""
+
+        manager = self.settings.configuration_manager
+        if manager is not None and configuration_snapshot_id is not None:
+            selected = manager.selected_snapshot_id()
+            if selected != configuration_snapshot_id:
+                raise ValueError(
+                    "页面选择的配置 Snapshot 已变化；请刷新状态后重新开始"
+                )
+
+        if sensor_sn is None:
+            if self.settings.require_explicit_sensor_selection:
+                raise ValueError("开始预览或录制前必须选择 IMU SN")
+            if local_device_id:
+                self.settings.imu = replace(
+                    self.settings.imu,
+                    local_device_id=local_device_id,
+                )
+            return
+        target_sn = sensor_sn
+        if self.ble and self.ble.connected:
+            connected_sn = self.ble.settings.sensor_sn
+            if target_sn != connected_sn:
+                raise ValueError(
+                    f"当前连接的是 {connected_sn}；请先释放预览设备，再切换到 {target_sn}"
+                )
+            self.settings.imu = self.ble.settings
+            return
+        try:
+            self.settings.imu = self.settings.resolve_imu(
+                target_sn,
+                local_device_id=local_device_id,
+            )
+        except KeyError as error:
+            raise ValueError(f"未知或不可用的 IMU SN：{target_sn}") from error
 
     @staticmethod
     def _error_message(error: BaseException, fallback: str) -> str:
@@ -581,6 +720,11 @@ class RecordingCoordinator:
         """连接 IMU 与摄像头，只在内存中提供实时预览，不创建采集文件。"""
 
         async with self._lock:
+            self._select_session_imu(
+                request.sensor_sn,
+                request.imu_local_device_id,
+                request.configuration_snapshot_id,
+            )
             if self._preview_open_in_flight:
                 raise RuntimeError("已有设备连接操作正在进行，请等待其完成或清理")
             if self.device_state in {
@@ -1124,6 +1268,7 @@ class RecordingCoordinator:
                 "index_state": "not_requested",
                 "index_message": "已保存到本机对象目录，尚未上传团队云端",
                 "manifest_generation": manifest_generation,
+                "publication_recording_id": recording_id,
             }
         else:
             update = {
@@ -1132,6 +1277,7 @@ class RecordingCoordinator:
                 "index_state": "pending",
                 "index_message": "团队云端已接收，等待标注端扫描并回执",
                 "manifest_generation": manifest_generation,
+                "publication_recording_id": recording_id,
             }
         updated = summary.model_copy(update=update)
         self.catalog.upsert(updated)
@@ -1177,6 +1323,12 @@ class RecordingCoordinator:
         await self._consume_imu()
 
     async def start(self, request: RecordingStartRequest) -> RecordingSummary:
+        self._select_session_imu(
+            request.sensor_sn,
+            configuration_snapshot_id=request.configuration_snapshot_id,
+        )
+        if request.data_tier == DataTier.PROD and not self.settings.imu.prod_capture_enabled:
+            raise ValueError("当前临时 IMU 尚未完成校准，只允许录制 test 数据")
         async with self._lock:
             if self._preview_open_in_flight:
                 raise RuntimeError("预览设备仍在连接或清理，暂不能开始录制")
@@ -1443,7 +1595,9 @@ class RecordingCoordinator:
             ):
                 writer.append_notification(packet.payload, packet.receive_time_ns)
             packet_kind = classify_notification(
-                packet.payload, self.settings.imu.frame_size_bytes
+                packet.payload,
+                self.settings.imu.frame_size_bytes,
+                self.settings.imu.protocol,
             )
             if packet_kind == NotificationKind.AUXILIARY_STATUS:
                 continue
@@ -1452,7 +1606,9 @@ class RecordingCoordinator:
                 continue
             try:
                 parsed = parse_notification(
-                    packet.payload, self.settings.imu.frame_size_bytes
+                    packet.payload,
+                    self.settings.imu.frame_size_bytes,
+                    self.settings.imu.protocol,
                 )
             except ValueError:
                 self.preview_parse_errors += 1
@@ -1461,6 +1617,8 @@ class RecordingCoordinator:
             self.sample_count += parsed.sample_count
             if parsed.sample_count:
                 self.latest_raw = parsed.raw_counts[-1].copy()
+                if parsed.device_time_ms is not None:
+                    self.latest_device_time_ms = int(parsed.device_time_ms[-1])
 
     async def _fail_running_session_on_disconnect(
         self,
@@ -1681,6 +1839,7 @@ class RecordingCoordinator:
             self._monitoring_requested = True
             self._preview_camera_id = previous_camera_id
         async with self._lock:
+            self._select_session_imu(request.sensor_sn)
             if self.state not in {
                 RecordingState.IDLE,
                 RecordingState.READY,
@@ -1740,6 +1899,7 @@ class RecordingCoordinator:
                 self.writer.append_connection_event(
                     "ble_connected", time.monotonic_ns()
                 )
+                self._recording_accepts_imu = True
                 self._consumer = asyncio.create_task(self._consume_imu())
             except Exception as error:
                 await self._abort_start(error)
@@ -1823,6 +1983,7 @@ class RecordingCoordinator:
                     await asyncio.gather(self._consumer, return_exceptions=True)
                 finally:
                     self._consumer = None
+            self._recording_accepts_imu = False
             partial_h5 = Path(self.current.h5_path or "")
             final_h5 = partial_h5.with_name(
                 partial_h5.name.replace(".partial.h5", ".h5")
@@ -1944,6 +2105,15 @@ class RecordingCoordinator:
             if ble and ble.last_packet_ns and self._first_packet_ns
             else 0.0
         )
+        candidate_si = calibrate_counts(
+            self.latest_raw.reshape(1, 6),
+            self.settings.imu.candidate_accel_counts_per_g,
+            self.settings.imu.candidate_gyro_counts_per_dps,
+            accel_bias_counts=self.settings.imu.candidate_accel_bias_counts,
+            gyro_bias_counts=self.settings.imu.candidate_gyro_bias_counts,
+            raw_axis_order=self.settings.imu.candidate_raw_axis_order,
+            axis_signs=self.settings.imu.candidate_axis_signs,
+        )[0]
         free_gib = shutil.disk_usage(self.settings.data_root).free / 1024**3
         return {
             "state": self.state.value,
@@ -1968,11 +2138,27 @@ class RecordingCoordinator:
             },
             "recording": self.current.model_dump(mode="json") if self.current else None,
             "imu": {
+                "sensor_sn": self.settings.imu.sensor_sn,
+                "device_name": self.settings.imu.name,
+                "protocol": self.settings.imu.protocol,
+                "profile_sha256": self.settings.imu.device_profile_sha256,
+                "prod_capture_enabled": self.settings.imu.prod_capture_enabled,
                 "connected": bool(ble and ble.connected),
                 "session_state": self._imu_state,
                 "notifying": bool(ble and getattr(ble, "notifying", ble.connected)),
                 "reconnect_attempt": self._imu_reconnect_attempt,
                 "raw": self.latest_raw.astype(int).tolist(),
+                "device_time_ms": self.latest_device_time_ms,
+                "candidate_si": [
+                    float(value) if np.isfinite(value) else None
+                    for value in candidate_si
+                ],
+                "candidate_si_diagnostic_only": bool(
+                    self.settings.imu.candidate_accel_counts_per_g
+                    or self.settings.imu.candidate_gyro_counts_per_dps
+                ),
+                "candidate_conversion_sha256": self.settings.imu.candidate_conversion_sha256,
+                "candidate_conversion_source": self.settings.imu.candidate_conversion_source,
                 "packet_count": self.packet_count,
                 "sample_count": self.sample_count,
                 "last_packet_ns": ble.last_packet_ns if ble else None,
@@ -2192,7 +2378,11 @@ class RecordingCoordinator:
         """读取标注端回执，严格区分上传成功与实际进入标注索引。"""
 
         summary = self._required_summary(recording_id)
-        if summary.upload_state not in {"uploaded", "published"}:
+        if summary.upload_state not in {
+            "uploaded",
+            "published",
+            "legacy_published",
+        }:
             return summary
         if summary.publish_target not in {
             PublishTarget.BROKER,
@@ -2208,11 +2398,14 @@ class RecordingCoordinator:
             )
             self.catalog.upsert(updated)
             return updated
-        key = f"index-receipts/{recording_id}.json"
+        publication_recording_id = (
+            summary.publication_recording_id or recording_id
+        )
+        key = f"index-receipts/{publication_recording_id}.json"
         try:
             if summary.publish_target == PublishTarget.BROKER:
                 payload = await read_index_receipt_via_broker(
-                    recording_id,
+                    publication_recording_id,
                     self.settings,
                     self.cloud_auth,
                 )
@@ -2292,7 +2485,16 @@ class RecordingCoordinator:
         for summary in self.catalog.list():
             if summary.state != RecordingState.NEEDS_ATTENTION:
                 continue
-            if summary.upload_state in {"uploaded", "published"}:
+            # 该启动迁移只负责把旧版 0.2 秒阻断规则重分类为质量警告。
+            # 其他历史结论必须保留，不能用今天的 schema/taxonomy 策略静默覆盖。
+            if LEGACY_PACKET_RESIDUAL_ISSUE not in summary.validation_issues:
+                result["skipped"] += 1
+                continue
+            if summary.upload_state in {
+                "uploaded",
+                "published",
+                "legacy_published",
+            }:
                 result["skipped"] += 1
                 continue
             result["scanned"] += 1

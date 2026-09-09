@@ -62,6 +62,8 @@ class PublishState(StrEnum):
     VERIFYING = "verifying"
     UPLOADED = "uploaded"
     PUBLISHED = "published"
+    LEGACY_PUBLISHED = "legacy_published"
+    REMOTE_MISSING = "remote_missing"
     RETRY_WAIT = "retry_wait"
     VERIFIED = "verified"
     FAILED = "failed"
@@ -125,6 +127,14 @@ class RecordingStartRequest(BaseModel):
     body_location: str = "chest"
     protocol_id: str = "fall_binary_v1"
     camera_id: str | None = Field(default=None, max_length=512)
+    sensor_sn: str | None = Field(
+        default=None,
+        pattern=r"^IMU-[0-9]{4}-R[0-9]{2}$",
+    )
+    configuration_snapshot_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:local-)?cfg-[0-9a-f]{24}$",
+    )
 
     @model_validator(mode="after")
     def validate_capture_contract(self) -> RecordingStartRequest:
@@ -135,7 +145,15 @@ class RecordingStartRequest(BaseModel):
 
 class PreviewStartRequest(BaseModel):
     camera_id: str | None = Field(default=None, max_length=512)
+    sensor_sn: str | None = Field(
+        default=None,
+        pattern=r"^IMU-[0-9]{4}-R[0-9]{2}$",
+    )
     imu_local_device_id: str | None = Field(default=None, max_length=128)
+    configuration_snapshot_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:local-)?cfg-[0-9a-f]{24}$",
+    )
 
 
 class ActivitySegment(BaseModel):
@@ -633,6 +651,10 @@ class CharacterizationStage(StrEnum):
 class CharacterizationStartRequest(BaseModel):
     operator_id: str
     notes: str = Field(default="", max_length=2000)
+    sensor_sn: str | None = Field(
+        default=None,
+        pattern=r"^IMU-[0-9]{4}-R[0-9]{2}$",
+    )
 
     @model_validator(mode="after")
     def validate_operator(self) -> CharacterizationStartRequest:
@@ -685,6 +707,9 @@ class RecordingSummary(BaseModel):
     )
     index_message: str = ""
     manifest_generation: int | None = None
+    # 身份迁移后，校准证据仍可能由旧 recording_id 的不可变云端对象承载。
+    # None 表示尚无可核验的远端发布引用。
+    publication_recording_id: str | None = None
     finalization_job: BackgroundJobStatus | None = None
     upload_job: BackgroundJobStatus | None = None
 
@@ -727,10 +752,32 @@ class CalibrationProfile(BaseModel):
         return self
 
 
+class SensorReference(BaseModel):
+    """Manifest reference to the immutable per-SN capture profile."""
+
+    sensor_sn: str = Field(pattern=r"^IMU-[0-9]{4}-R[0-9]{2}$")
+    device_profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    protocol_id: Literal["cw12eu_v1", "acce_gyro_abf0_v1"]
+    firmware_version: str = Field(min_length=1, max_length=128)
+    firmware_evidence_status: str = Field(min_length=1, max_length=160)
+
+
+class DeviceConfigurationReference(BaseModel):
+    """Exact immutable configuration authority observed at capture start."""
+
+    snapshot_id: str = Field(pattern=r"^(?:local-)?cfg-[0-9a-f]{24}$")
+    snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: Literal["bootstrap", "current", "approved", "candidate", "local"]
+    approval_state_at_capture: Literal["approved", "candidate", "local", "revoked"]
+    checked_at_utc: str | None = None
+    si_profile_id: str = Field(pattern=r"^si-[0-9a-f]{24}$")
+
+
 class CaptureManifestV2(BaseModel):
     """采集端与标注端之间唯一稳定的公开交接合同。"""
 
-    schema_version: Literal["2.0.0", "2.1.0", "3.0.0"] = "3.0.0"
+    schema_version: Literal["2.0.0", "2.1.0", "3.0.0", "3.1.0", "3.2.0"] = "3.0.0"
     recording_id: str
     collection_id: str
     participant_id: str | None = None
@@ -744,6 +791,8 @@ class CaptureManifestV2(BaseModel):
     source_h5_schema_version: str
     software_revision: str
     calibration: CalibrationProfile = Field(default_factory=CalibrationProfile)
+    sensor: SensorReference | None = None
+    configuration: DeviceConfigurationReference | None = None
     artifacts: list[ArtifactDescriptor]
 
     @model_validator(mode="before")
@@ -760,13 +809,21 @@ class CaptureManifestV2(BaseModel):
 
     @model_validator(mode="after")
     def validate_artifacts(self) -> CaptureManifestV2:
-        if self.schema_version == "3.0.0":
+        if self.schema_version in {"3.0.0", "3.1.0", "3.2.0"}:
             if self.participant_id is not None:
-                raise ValueError("manifest 3.0 禁止包含 participant_id")
+                raise ValueError("manifest 3.x 禁止包含 participant_id")
             if self.identity_mode != "annotation_required":
-                raise ValueError("manifest 3.0 必须由标注端确认参与者")
+                raise ValueError("manifest 3.x 必须由标注端确认参与者")
         elif not self.participant_id:
             raise ValueError("legacy manifest requires participant_id")
+        if self.schema_version in {"3.1.0", "3.2.0"} and self.sensor is None:
+            raise ValueError("manifest 3.1+ 必须引用冻结的传感器 SN 档案")
+        if self.schema_version not in {"3.1.0", "3.2.0"} and self.sensor is not None:
+            raise ValueError("只有 manifest 3.1+ 可以包含 sensor 引用")
+        if self.schema_version == "3.2.0" and self.configuration is None:
+            raise ValueError("manifest 3.2 必须引用冻结的配置 Snapshot")
+        if self.schema_version != "3.2.0" and self.configuration is not None:
+            raise ValueError("只有 manifest 3.2 可以包含 configuration 引用")
         roles = [item.role for item in self.artifacts]
         required = {"capture_h5", "video_mkv", "preview_mp4"}
         if set(roles) != required or len(roles) != len(required):

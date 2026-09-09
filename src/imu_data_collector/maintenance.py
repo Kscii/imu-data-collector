@@ -79,32 +79,48 @@ def rebuild_catalog(data_root: Path, catalog: RecordingCatalog) -> dict[str, int
                     continue
                 recording_id = str(handle.attrs["recording_id"])
                 mkv_path = h5_path.with_name(f"{recording_id}.mkv")
-                issues: list[str] = []
+                existing = catalog.get(recording_id)
+                issues = [
+                    issue
+                    for issue in (existing.issues if existing is not None else [])
+                    if issue != "video file is missing"
+                ]
                 if not mkv_path.is_file():
                     issues.append("video file is missing")
-                summary = RecordingSummary(
-                    recording_id=recording_id,
-                    collection_id=str(handle.attrs["collection_id"]),
-                    participant_id=(
+                disk_fields = {
+                    "collection_id": str(handle.attrs["collection_id"]),
+                    "participant_id": (
                         str(handle.attrs["participant_id"])
                         if "participant_id" in handle.attrs
                         else None
                     ),
                     # 旧本地文件缺少用途字段时只允许回收到安全的 test 档，
                     # 绝不因目录重建而获得训练资格。
-                    data_tier=str(handle.attrs.get("data_tier", "test")),
-                    state=(
-                        RecordingState.READY
-                        if not issues
-                        else RecordingState.NEEDS_ATTENTION
-                    ),
-                    started_at_utc=str(handle.attrs.get("started_at_utc", "")),
-                    ended_at_utc=str(handle.attrs.get("ended_at_utc", "")) or None,
-                    duration_ns=int(handle.attrs.get("duration_ns", 0)) or None,
-                    h5_path=str(h5_path),
-                    mkv_path=str(mkv_path),
-                    issues=issues,
-                )
+                    "data_tier": str(handle.attrs.get("data_tier", "test")),
+                    "started_at_utc": str(handle.attrs.get("started_at_utc", "")),
+                    "ended_at_utc": str(handle.attrs.get("ended_at_utc", "")) or None,
+                    "duration_ns": int(handle.attrs.get("duration_ns", 0)) or None,
+                    "h5_path": str(h5_path),
+                    "mkv_path": str(mkv_path),
+                    "issues": issues,
+                }
+                if existing is None:
+                    summary = RecordingSummary(
+                        recording_id=recording_id,
+                        state=(
+                            RecordingState.READY
+                            if not issues
+                            else RecordingState.NEEDS_ATTENTION
+                        ),
+                        **disk_fields,
+                    )
+                else:
+                    state = existing.state
+                    if issues or existing.validation_issues:
+                        state = RecordingState.NEEDS_ATTENTION
+                    summary = existing.model_copy(
+                        update={**disk_fields, "state": state}
+                    )
             catalog.upsert(summary)
             imported += 1
         except (OSError, KeyError, TypeError, ValueError):

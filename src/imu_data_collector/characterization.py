@@ -64,7 +64,18 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
             handle["imu/samples/recording_time_ns"], dtype=np.int64
         )
         raw = np.asarray(handle["imu/samples/raw_counts"], dtype=np.int16)
-        trailer = np.asarray(handle["imu/samples/trailer"], dtype=np.uint8)
+        trailer_dataset = handle.get("imu/samples/trailer")
+        trailer = (
+            np.asarray(trailer_dataset, dtype=np.uint8)
+            if trailer_dataset is not None
+            else np.empty((len(raw), 0), dtype=np.uint8)
+        )
+        device_time_dataset = handle.get("imu/samples/device_time_ms")
+        device_time_ms = (
+            np.asarray(device_time_dataset, dtype=np.uint64)
+            if device_time_dataset is not None
+            else None
+        )
         stages = handle["experiment/stages"]
         stage_rows = [
             {
@@ -190,8 +201,23 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
             if len(trailer) > 1
             else 0,
         }
-        for index in range(4)
+        for index in range(trailer.shape[1])
     }
+    device_clock_metrics = None
+    if device_time_ms is not None:
+        device_deltas = np.diff(device_time_ms.astype(np.int64))
+        device_clock_metrics = {
+            "storage": "uint64_little_endian_milliseconds",
+            "world_time": False,
+            "first_ms": int(device_time_ms[0]) if len(device_time_ms) else None,
+            "last_ms": int(device_time_ms[-1]) if len(device_time_ms) else None,
+            "delta_histogram_ms": {
+                str(int(value)): int(count)
+                for value, count in zip(
+                    *np.unique(device_deltas, return_counts=True), strict=True
+                )
+            },
+        }
     interval_ms = np.diff(sample_times) / 1e6
     report: dict[str, Any] = {
         "report_schema": "cw12eu_characterization_report_v1",
@@ -250,12 +276,17 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
         "stage_metrics": stage_metrics,
         "accel_calibration_candidates": candidates,
         "trailer_metrics": trailer_metrics,
+        "device_clock_metrics": device_clock_metrics,
         "verified_conclusions": [],
         "unverified_items": [
             "六轴物理顺序与正负号",
             "完整三轴 counts/g",
             "三轴 counts/(deg/s)",
-            "4 字节尾部语义",
+            (
+                "设备时钟的上电复位和长期漂移行为"
+                if device_time_ms is not None
+                else "4 字节尾部语义"
+            ),
         ],
     }
     return report

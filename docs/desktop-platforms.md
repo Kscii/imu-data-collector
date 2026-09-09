@@ -19,18 +19,18 @@ Windows 10 与 Windows 11 共用 WinRT、DirectShow 和 x64 安装包代码路�
 
 各平台只替换设备接入层，不改变数据语义：
 
-- Bleak 回调进入进程时立即读取 Python `monotonic_ns()`；原始通知、约 25 Hz 样本和接收时间不重采样。
+- Bleak 回调进入进程时立即读取 Python `monotonic_ns()`；原始通知、设备原始采样和接收时间不重采样。CW12EU-T 当前约 25 Hz，`acce&gyro` 新设备当前实测约 50 Hz。
 - 视频保留 FFmpeg 报告的真实逐帧 PTS；Windows/macOS 把第一帧源 PTS 映射到本次 FFmpeg 启动时的主机单调时钟，Linux 继续保存 V4L2 的单调 PTS。
 - 严格 25 Hz 只在同步、标注完成后的 `aligned.h5` 中派生，不能覆盖原始 H5。
-- 一次录制仍是同名 H5/MKV 原子文件对，不因操作系统改变目录层级或 manifest 2.1 合同。
+- 一次录制仍是同名 H5/MKV 原子文件对，不因操作系统改变目录层级或 manifest 3.1 合同。
 
-capture H5 schema 1.6 新增或冻结以下运行时事实：
+capture H5 schema 1.8 延续并新增以下运行时事实：
 
 - 根属性：`host_os`、`host_os_version`、`host_architecture`、`monotonic_implementation`、`clock_domain`；
-- `imu` 属性：`ble_backend`、`local_device_id`；
+- `imu` 属性：`ble_backend`、`local_device_id`、`sensor_sn`、协议/设备档案摘要、设备注册表 revision/快照摘要，以及明确标记为非正式的本机候选换算元数据；
 - `video` 属性：`video_backend`、`timestamp_mapping`、`camera_control_policy`。
 
-标注端同时接受 1.5 与 1.6。1.5 是只读兼容输入；新采集必须写 1.6，不能把旧文件静默改版本。
+新协议的 22-byte ABF2 通知按“一条通知一个样本”保存六轴原始计数、设备本地毫秒计数器和原始后缀。该计数器不是世界时间；跨设备/视频对齐仍以主机单调时钟为基础。旧 schema 只作为只读历史输入，新采集必须写 1.8，不能把旧文件静默改版本。
 
 ## 摄像头策略
 
@@ -89,8 +89,7 @@ GitHub Actions 在 `macos-15` 原生 arm64 Runner 和 `macos-15-intel` 原生 x8
 SHA-256、架构、编码器、动态链接、Info.plist、ad-hoc 签名和 DMG 挂载作为自动门禁。应用最低
 系统版本为 macOS 13，不启用 App Sandbox，不申请麦克风权限，也不随登录自启或自动更新。
 
-CoreBluetooth 不公开 MAC 地址。首次连接按精确名称扫描；同名设备唯一时，只有成功订阅
-`0x2AE1` 并收到通知后才保存该 Mac 的 CoreBluetooth UUID。发现多个同名设备时必须人工选择；
+CoreBluetooth 不公开 MAC 地址。操作者先显式选择项目 SN，首次连接再按该档案的精确名称扫描；同名设备唯一时，只有成功订阅该协议的通知特征并收到可解析通知后才保存该 SN 在本机的 CoreBluetooth UUID。发现多个同名设备时必须人工选择；
 后续优先按保存 UUID 连接，失效则退回扫描。WebUI 可忘记绑定，绑定文件位于 Application
 Support，不写入 H5 的物理设备校准身份。详细安装与真机清单见
 [macOS 桌面测试版](macos-desktop.md)。
@@ -123,14 +122,13 @@ Support，不写入 H5 的物理设备校准身份。详细安装与真机清单
 
 ## BLE 实机验收顺序
 
-CW12EU-T 是单连接设备。Windows 测试前必须先在手机与 Arch 上停止通知并断开设备，然后：
+当前两台样机均按单连接设备处理。Windows/macOS 测试前必须先在手机与 Arch 上停止通知并断开设备，然后：
 
 1. 关闭手机自动重连，停止 Arch 预览，把当前固定样机重新上电并进入匹配状态；
-2. 在 WebUI 连接设备；正式连接会绕过 WinRT 扫描，直接使用固定 public address；
-3. 检查 GATT 服务发现、`0x2AE1` 通知与约 25 Hz 样本；主动扫描结果仅供诊断，不能作为
-   Windows 是否可连接当前样机的门禁；
+2. 在 WebUI 显式选择 SN 后连接；Windows 有已知 public address 时可直连，扫描仍用于发现和人工诊断；
+3. 按所选档案检查通知特征与频率：`IMU-0001-R01` 为 `0x2AE1`/约 25 Hz，`IMU-0002-R01` 为 `0xABF2`/当前约 50 Hz；
 4. 若 WinRT 明确报告认证或访问拒绝，再在 Windows 蓝牙设置完成一次系统配对；
-5. 录制 test 数据，检查 H5 的 WinRT 后端、主机时钟属性、原始包、视频 PTS 与收尾；
+5. 两个 SN 分别录制 test 数据，检查 H5 的 SN/档案摘要、WinRT/CoreBluetooth 后端、主机时钟、原始包、视频 PTS 与收尾；新设备未经正式校准时 `values_si` 必须保持 NaN；
 6. 断电、超距、后端强制退出各做一次，确认不会产生两个并行 BLE 客户端。
 
 不能让 Arch、手机和 Windows 同时抢连来测试“稳定性”，否则得到的是单连接冲突而非平台故障。

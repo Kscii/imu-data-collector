@@ -12,8 +12,10 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 
 from imu_data_collector.config import ImuSettings
+from imu_data_collector.cw12eu import NotificationKind, classify_notification
 from imu_data_collector.device_binding import DeviceBindingStore
 from imu_data_collector.host import platform_id
+from imu_data_collector.imu_protocols import PROTOCOLS
 
 if sys.platform.startswith("linux"):
     from dbus_fast import Variant
@@ -340,14 +342,20 @@ class CW12EUBleSource:
 
         def detection_callback(found: Any, advertisement: Any) -> None:
             nonlocal device
+            name_matches = (
+                found.name == self.settings.name
+                or advertisement.local_name == self.settings.name
+            )
             if (
-                found.address.upper() == self.settings.address.upper()
+                (
+                    self.settings.address
+                    and found.address.upper() == self.settings.address.upper()
+                )
                 or (
                     self.settings.local_device_id
                     and found.address == self.settings.local_device_id
                 )
-                or found.name == self.settings.name
-                or advertisement.local_name == self.settings.name
+                or ((is_macos or not self.settings.address) and name_matches)
             ):
                 device = found
                 found_event.set()
@@ -379,7 +387,7 @@ class CW12EUBleSource:
                         ),
                     ) from error
                 if device is None:
-                    raise RuntimeError("扫描回调没有返回 CW12EU-T 设备对象")
+                    raise RuntimeError(f"扫描回调没有返回 {self.settings.name} 设备对象")
             finally:
                 await scanner.stop()
 
@@ -396,7 +404,7 @@ class CW12EUBleSource:
             **client_options,
         )
         self.device_identifier = str(device.address)
-        if is_linux:
+        if is_linux and self.settings.force_le_bearer:
             device_path = device.details.get("path")
             if not isinstance(device_path, str):
                 raise RuntimeError("BlueZ 设备对象缺少 D-Bus 路径")
@@ -418,6 +426,7 @@ class CW12EUBleSource:
         self._stopping = False
 
     async def start(self, timeout: float = 15.0) -> None:
+        self._verified_packet.clear()
         await self.connect(timeout)
         assert self.client is not None
         try:
@@ -430,26 +439,32 @@ class CW12EUBleSource:
                 f"已连接 IMU，但无法订阅通知特征 {self.settings.notify_uuid}："
                 f"{str(error).strip() or type(error).__name__}",
                 phase="notify",
-                hint="确认当前样机固件仍提供 0x2AE1 通知特征，然后重新连接",
+                hint=(
+                    f"确认 {self.settings.name} 仍提供配置的通知特征 "
+                    f"{self.settings.notify_uuid}，然后重新连接"
+                ),
             ) from error
-        if platform_id() == "macos":
-            try:
-                await asyncio.wait_for(self._verified_packet.wait(), timeout=3.0)
-            except TimeoutError as error:
-                await self.stop()
-                raise BleOperationError(
-                    "imu_notification_timeout",
-                    "已订阅 IMU 通知特征，但三秒内没有收到数据",
-                    phase="notify",
-                    hint="确认选择的是 CW12EU-T 传感器且设备未被其他电脑或手机占用",
-                ) from error
-            if self.binding_store is not None and self.device_identifier:
-                self.binding_store.save_imu(
-                    device_name=self.settings.name,
-                    local_device_id=self.device_identifier,
-                    notify_uuid=self.settings.notify_uuid,
-                )
-                self.settings.local_device_id = self.device_identifier
+        try:
+            await asyncio.wait_for(self._verified_packet.wait(), timeout=3.0)
+        except TimeoutError as error:
+            await self.stop()
+            raise BleOperationError(
+                "imu_notification_timeout",
+                "已订阅 IMU 通知特征，但三秒内没有收到符合所选协议的数据",
+                phase="verify",
+                hint=(
+                    f"确认选择的是 {self.settings.name}，其 SN/协议档案正确，"
+                    "且设备未被其他电脑或手机占用"
+                ),
+            ) from error
+        if self.binding_store is not None and self.device_identifier:
+            self.binding_store.save_imu(
+                sensor_sn=self.settings.sensor_sn,
+                device_name=self.settings.name,
+                local_device_id=self.device_identifier,
+                notify_uuid=self.settings.notify_uuid,
+            )
+            self.settings.local_device_id = self.device_identifier
 
     async def stop(self) -> None:
         client = self.client
@@ -471,7 +486,15 @@ class CW12EUBleSource:
         received = time.monotonic_ns()
         self.last_packet_ns = received
         packet = NotificationPacket(bytes(payload), received)
-        self._verified_packet.set()
+        if (
+            classify_notification(
+                packet.payload,
+                self.settings.frame_size_bytes,
+                self.settings.protocol,
+            )
+            == NotificationKind.IMU_SAMPLES
+        ):
+            self._verified_packet.set()
         try:
             self.queue.put_nowait(packet)
         except asyncio.QueueFull:
@@ -488,23 +511,54 @@ class CW12EUBleSource:
     async def discover(
         timeout: float = 5.0,
         settings: ImuSettings | None = None,
+        profiles: list[ImuSettings] | None = None,
     ) -> list[dict[str, Any]]:
         devices = await BleakScanner.discover(timeout=timeout, return_adv=True)
+        targets = profiles or ([settings] if settings is not None else [])
+        supported_services = {
+            spec.advertised_service_uuid.lower()
+            for spec in PROTOCOLS.values()
+            if spec.advertised_service_uuid
+        }
         output: list[dict[str, Any]] = []
+        is_macos = platform_id() == "macos"
         for address, (device, advertisement) in devices.items():
             name = device.name or advertisement.local_name
-            if settings and not (
-                address.upper() == settings.address.upper()
-                or (settings.local_device_id and address == settings.local_device_id)
-                or name == settings.name
-            ):
+            advertised_services = {
+                str(item).lower() for item in (advertisement.service_uuids or [])
+            }
+            matched = [
+                target.sensor_sn
+                for target in targets
+                if (
+                    (
+                        target.local_device_id
+                        and address == target.local_device_id
+                    )
+                    or (
+                        not is_macos
+                        and target.address
+                        and address.upper() == target.address.upper()
+                    )
+                    or ((is_macos or not target.address) and name == target.name)
+                )
+            ]
+            looks_supported = bool(
+                matched
+                or advertised_services.intersection(supported_services)
+                or (name and (name.startswith("acce&gyro") or name.startswith("CW12EU")))
+            )
+            if targets and not looks_supported:
                 continue
             output.append(
                 {
                     "address": address,
+                    "local_device_id": address,
                     "name": name,
                     "rssi": advertisement.rssi,
                     "service_uuids": advertisement.service_uuids,
+                    "matched_sensor_sns": sorted(set(matched)),
+                    "registration_state": "registered" if matched else "unregistered",
                 }
             )
         return sorted(output, key=lambda item: (item["name"] or "", item["address"]))
@@ -513,23 +567,36 @@ class CW12EUBleSource:
     async def discover_with_diagnostics(
         timeout: float = 5.0,
         settings: ImuSettings | None = None,
+        profiles: list[ImuSettings] | None = None,
     ) -> dict[str, Any]:
         """主动扫描固定目标，并返回足以区分适配器与广播问题的摘要。"""
 
         started = time.monotonic()
         try:
-            devices = await CW12EUBleSource.discover(timeout=timeout, settings=settings)
+            devices = await CW12EUBleSource.discover(
+                timeout=timeout,
+                settings=settings,
+                profiles=profiles,
+            )
         except BleOperationError:
             raise
         except Exception as error:
             raise _scanner_error(error) from error
         elapsed_ms = (time.monotonic() - started) * 1000.0
+        target_found = (
+            any(
+                settings.sensor_sn in item["matched_sensor_sns"]
+                for item in devices
+            )
+            if settings is not None
+            else bool(devices)
+        )
         return {
             "requested": True,
             "adapter_state": "available",
             "target_name": settings.name if settings else None,
             "target_address": settings.address if settings else None,
-            "target_found": bool(devices),
+            "target_found": target_found,
             "elapsed_ms": elapsed_ms,
             "devices": devices,
             "error": None,

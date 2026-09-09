@@ -43,12 +43,12 @@ WebUI 只显示上述准确路径，不自动跳转系统设置。修改权限�
 
 ### BLE
 
-CW12EU-T 只允许一个中心设备持有连接。测试前先停止 Arch、Windows 和手机 nRF Connect 的
-会话。macOS 不使用配置中的 BLE MAC 地址直连，因为 CoreBluetooth 不公开 MAC：
+当前 IMU 均按只允许一个中心设备持有连接处理。测试前先停止 Arch、Windows 和手机 nRF
+Connect 的会话。macOS 不使用配置中的 BLE MAC 地址直连，因为 CoreBluetooth 不公开 MAC：
 
-1. 首次按精确名称 `CW12EU-T` 扫描；
+1. 操作者先显式选择项目 SN，再按该 SN 档案的精确广播名扫描；
 2. 多个同名候选必须在 WebUI 选择本机 UUID；
-3. 成功订阅 `0x2AE1` 且收到真实通知后才持久绑定；
+3. 成功订阅所选协议的通知特征且收到可解析通知后，才把 CoreBluetooth UUID 绑定到该 SN；
 4. 后续优先按绑定 UUID 连接，UUID 失效则自动回到精确名称扫描；
 5. “忘记已绑定 IMU”只清除本机连接提示，不修改设备校准档案或既有录制。
 
@@ -67,15 +67,14 @@ macOS 没有使用 Linux 的 UVC 固定曝光命令，因此 `camera_control_pol
 
 ## Intel 真机首轮验收
 
-使用与 Linux/Windows 相同的 CW12EU-T 和罗技 USB 摄像头，时长由测试者现场决定：
+使用与 Linux/Windows 相同的两台 IMU 和罗技 USB 摄像头，时长由测试者现场决定：
 
 1. 安装、右键首次打开、菜单栏和单实例；再次打开应用只打开同一 WebUI。
 2. 首次相机/蓝牙权限允许；分别拒绝一次，确认只显示准确的系统设置路径，恢复权限后可用。
 3. 外接摄像头默认优先，页面显示真实模式；预览输入接近 30 FPS、浏览器预览接近 10 FPS。
-4. 首次 BLE 扫描、通知和约 25 Hz 曲线；退出重开后按已验证 UUID 快速连接。
+4. 分别显式选择 `IMU-0001-R01`（`0x2AE1`、约 25 Hz）与 `IMU-0002-R01`（`0xABF2`、当前约 50 Hz），检查扫描、通知、曲线和按 SN 隔离的绑定；退出重开后按已验证 UUID 快速连接。
 5. 预览开始录制时 BLE 不重连；停止后后台收尾且预览恢复，不产生第二 BLE client。
-6. 录一条 `test`，检查原始 H5/MKV、主机时钟、CoreBluetooth UUID、AVFoundation backend、
-   VideoToolbox 或 x264 实际编码器、逐帧 PTS、收尾和本地下载。
+6. 每个 SN 至少录一条 `test`，检查原始 H5/MKV、设备档案摘要、主机时钟、CoreBluetooth UUID、AVFoundation backend、VideoToolbox 或 x264 实际编码器、逐帧 PTS、收尾和本地下载；新设备的正式 SI 未验证前必须为 NaN。
 7. 完成 Google 登录、重启应用后复用 Keychain token，并把 test 数据上传到既有代理。
 8. 断电、超距和强制退出各测一次；确认错误可恢复、损坏部分不被当作 ready。
 9. 录制中从菜单退出被拒绝；空闲退出后 BLE、摄像头和 8765 端口均释放。

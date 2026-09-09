@@ -109,6 +109,11 @@ jobs:
           tests/test_ble.py
           tests/test_cli.py
           tests/test_desktop_cloud.py
+          tests/test_device_configuration.py
+          tests/test_device_registry.py
+          tests/test_api.py
+          tests/test_hdf5_store.py
+          tests/test_preflight.py
           tests/test_host.py
           tests/test_tray.py
           tests/test_video.py
@@ -118,7 +123,7 @@ jobs:
           if ($env:GITHUB_REF -like "refs/tags/desktop-v*") {
             $version = $env:GITHUB_REF_NAME -replace '^desktop-v', ''
           } else {
-            $version = "0.2.0-dev.$env:GITHUB_RUN_NUMBER"
+            $version = "0.3.0-dev.$env:GITHUB_RUN_NUMBER"
           }
           if ($version -notmatch '^\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?$') {
             throw "无效的桌面版本：$version"
@@ -192,8 +197,8 @@ jobs:
             version="${GITHUB_REF_NAME#desktop-v}"
             bundle_version="${version%%-*}"
           else
-            version="0.2.0-dev.${GITHUB_RUN_NUMBER}"
-            bundle_version="0.2.${GITHUB_RUN_NUMBER}"
+            version="0.3.0-dev.${GITHUB_RUN_NUMBER}"
+            bundle_version="0.3.${GITHUB_RUN_NUMBER}"
           fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
           [[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -211,6 +216,11 @@ jobs:
           tests/test_ble.py
           tests/test_cli.py
           tests/test_desktop_cloud.py
+          tests/test_device_configuration.py
+          tests/test_device_registry.py
+          tests/test_api.py
+          tests/test_hdf5_store.py
+          tests/test_preflight.py
           tests/test_host.py
           tests/test_tray.py
           tests/test_video.py
