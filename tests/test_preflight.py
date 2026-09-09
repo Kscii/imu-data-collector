@@ -14,6 +14,7 @@ from imu_data_collector.cw12eu import pack_test_frame
 from imu_data_collector.hdf5_store import CaptureH5Writer
 from imu_data_collector.models import (
     BackgroundJobKind,
+    CharacterizationStartRequest,
     DataTier,
     DeviceSessionState,
     PreviewStartRequest,
@@ -76,6 +77,83 @@ def _coordinator(tmp_path: Path) -> RecordingCoordinator:
             minimum_free_gib=0,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_unverified_temporary_imu_rejects_prod_before_opening_devices(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    coordinator.settings.imu.prod_capture_enabled = False
+
+    with pytest.raises(ValueError, match="只允许录制 test 数据"):
+        await coordinator.start(RecordingStartRequest(collection_id="forbidden-prod"))
+
+    assert coordinator.mode is None
+    assert list(coordinator.settings.data_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_selected_commissioning_sn_rejects_prod_before_hardware_access(
+    tmp_path: Path,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    coordinator.settings.device_registry_path = Path("configs/imu-devices.yaml").resolve()
+    coordinator.settings.device_drafts_path = tmp_path / "drafts.json"
+
+    with pytest.raises(ValueError, match="只允许录制 test 数据"):
+        await coordinator.start(
+            RecordingStartRequest(
+                collection_id="forbidden-new-device",
+                sensor_sn="IMU-0002-R01",
+            )
+        )
+
+    assert coordinator.settings.imu.sensor_sn == "IMU-0002-R01"
+    assert coordinator.settings.imu.protocol == "acce_gyro_abf0_v1"
+    assert coordinator.mode is None
+
+
+@pytest.mark.asyncio
+async def test_characterization_notification_pump_writes_verified_start_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+
+    class PacketBle(_FakeBle):
+        def __init__(self, settings) -> None:
+            super().__init__()
+            self.settings = settings
+            self.notifying = True
+
+        async def start(self) -> None:
+            await super().start()
+            self.last_packet_ns = time.monotonic_ns()
+            await self.queue.put(
+                NotificationPacket(
+                    pack_test_frame((1, 2, 3, 4, 5, 6), b"\x00\x00\x00\x00"),
+                    self.last_packet_ns,
+                )
+            )
+
+    monkeypatch.setattr("imu_data_collector.coordinator.CW12EUBleSource", PacketBle)
+    await coordinator.start_characterization(
+        CharacterizationStartRequest(operator_id="xfan0282")
+    )
+    for _ in range(10):
+        if coordinator.sample_count:
+            break
+        await asyncio.sleep(0)
+
+    assert coordinator._recording_accepts_imu
+    assert coordinator.sample_count == 1
+    assert coordinator.writer is not None
+    assert len(coordinator.writer.handle["imu/samples/raw_counts"]) == 1
+
+    result = await coordinator.stop_characterization()
+    assert Path(result["h5_path"]).is_file()
+    assert not coordinator._recording_accepts_imu
 
 
 def test_startup_revalidation_allows_warning_and_preserves_operational_issue(

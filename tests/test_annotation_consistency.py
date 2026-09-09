@@ -21,6 +21,14 @@ from imu_data_collector.config import (
     load_settings,
 )
 from imu_data_collector.constants import CAPTURE_SCHEMA_VERSION
+from imu_data_collector.device_configuration import (
+    ConfigurationDeviceV2,
+    ConfigurationSnapshotSubmission,
+    ConfigurationSnapshotV2,
+    DeviceConfigurationStore,
+    bootstrap_snapshot_from_registry,
+)
+from imu_data_collector.device_registry import canonical_json_bytes, sha256_bytes
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
     ActivitySegment,
@@ -37,7 +45,9 @@ from imu_data_collector.models import (
     CalibrationProfile,
     CaptureManifestV2,
     DataTier,
+    DeviceConfigurationReference,
     ReviewWorkflowState,
+    SensorReference,
     SyncAnchor,
     SyncDocument,
 )
@@ -77,12 +87,13 @@ class CountingDownloadStore(LocalFilesystemStore):
 
 def _settings(tmp_path: Path) -> Settings:
     reference = load_settings()
+    calibrated_imu = reference.resolve_imu("IMU-0001-R01")
     return Settings(
         data_root=tmp_path / "data",
         catalog_path=tmp_path / "capture.sqlite3",
         activity_taxonomy_path=reference.activity_taxonomy_path,
         calibration_evidence_path=reference.calibration_evidence_path,
-        imu=reference.imu,
+        imu=calibrated_imu,
         storage=StorageSettings(
             backend="local",
             root=tmp_path / "objects",
@@ -95,8 +106,56 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+def test_device_configuration_review_api_exposes_snapshot_and_enforces_revisions(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    app = create_annotation_app(settings, store)
+    configuration_store = app.state.device_configuration_store
+    bootstrap = bootstrap_snapshot_from_registry(Path("configs/imu-devices.yaml"))
+    submission = ConfigurationSnapshotSubmission(
+        name="review API contract",
+        description="immutable device configuration candidate",
+        client_build="pytest",
+        content=bootstrap.content,
+    )
+    snapshot, review = configuration_store.submit(submission, actor="xfan0282")
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/device-config/snapshots")
+        detail = client.get(f"/api/v1/device-config/snapshots/{snapshot.snapshot_id}")
+        approved = client.post(
+            f"/api/v1/device-config/snapshots/{snapshot.snapshot_id}/approve",
+            json={"expected_revision": review.revision},
+        )
+        stale = client.post(
+            f"/api/v1/device-config/snapshots/{snapshot.snapshot_id}/revoke",
+            json={"expected_revision": review.revision},
+        )
+        current = client.post(
+            "/api/v1/device-config/current",
+            json={"snapshot_id": snapshot.snapshot_id, "expected_revision": 0},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json()["snapshots"][0]["state"] == "candidate"
+    assert detail.status_code == 200
+    assert detail.json()["snapshot"]["snapshot_sha256"] == snapshot.snapshot_sha256
+    assert approved.status_code == 200
+    assert approved.json()["state"] == "approved"
+    assert stale.status_code == 409
+    assert current.status_code == 200
+    assert current.json()["snapshot_id"] == snapshot.snapshot_id
+
+
 def _publish_calibrated_recording(
-    settings: Settings, store: LocalFilesystemStore, tmp_path: Path
+    settings: Settings,
+    store: LocalFilesystemStore,
+    tmp_path: Path,
+    configuration: tuple[ConfigurationSnapshotV2, ConfigurationDeviceV2] | None = None,
 ) -> str:
     recording_id = "calibrated_001"
     started_at = "2026-08-27T00:00:00+00:00"
@@ -126,6 +185,26 @@ def _publish_calibrated_recording(
                 "calibration_profile_id": settings.imu.calibration_profile_id,
             }
         )
+        if configuration is not None:
+            snapshot, device = configuration
+            del handle.attrs["participant_id"]
+            device_sha256 = sha256_bytes(
+                canonical_json_bytes(device.model_dump(mode="json"))
+            )
+            handle.attrs.update(
+                {
+                    "sensor_sn": device.sensor_sn,
+                    "device_profile_sha256": device_sha256,
+                    "configuration_snapshot_id": snapshot.snapshot_id,
+                    "configuration_snapshot_sha256": snapshot.snapshot_sha256,
+                    "configuration_content_sha256": snapshot.content_sha256,
+                    "configuration_source": "approved",
+                    "configuration_approval_state": "approved",
+                    "configuration_checked_at_utc": "2026-08-26T23:59:00+00:00",
+                    "si_profile_id": device.si_profile.profile_id,
+                    "calibration_profile_id": device.si_profile.profile_id,
+                }
+            )
         imu = handle.create_group("imu")
         imu.attrs.update(
             {
@@ -143,6 +222,31 @@ def _publish_calibrated_recording(
                 "axis_signs_json": json.dumps(settings.imu.axis_signs),
             }
         )
+        if configuration is not None:
+            _snapshot, device = configuration
+            imu.attrs.update(
+                {
+                    "sensor_sn": device.sensor_sn,
+                    "device_profile_sha256": device_sha256,
+                    "protocol": device.protocol_id,
+                    "firmware_version": device.firmware.version,
+                    "firmware_evidence_status": device.firmware.evidence_status,
+                    "si_profile_id": device.si_profile.profile_id,
+                    "calibration_profile_id": device.si_profile.profile_id,
+                    "calibration_method": device.si_profile.method,
+                    "calibration_evidence_sha256": device.si_profile.evidence_sha256,
+                    "accel_counts_per_g": device.si_profile.accel_counts_per_g,
+                    "gyro_counts_per_dps": device.si_profile.gyro_counts_per_dps,
+                    "accel_bias_counts_json": json.dumps(
+                        device.si_profile.accel_bias_counts
+                    ),
+                    "gyro_bias_counts_json": json.dumps(
+                        device.si_profile.gyro_bias_counts
+                    ),
+                    "raw_axis_order_json": json.dumps(device.si_profile.raw_axis_order),
+                    "axis_signs_json": json.dumps(device.si_profile.axis_signs),
+                }
+            )
         samples = imu.create_group("samples")
         times = np.arange(50, dtype=np.int64) * 40_000_000
         raw = np.column_stack(
@@ -207,16 +311,51 @@ def _publish_calibrated_recording(
         method=settings.imu.calibration_method,
         evidence_sha256=evidence_sha,
     )
+    sensor = None
+    configuration_reference = None
+    if configuration is not None:
+        snapshot, device = configuration
+        calibration = CalibrationProfile(
+            profile_id=device.si_profile.profile_id,
+            verified=device.si_profile.verified,
+            accel_counts_per_g=device.si_profile.accel_counts_per_g,
+            gyro_counts_per_dps=device.si_profile.gyro_counts_per_dps,
+            accel_bias_counts=device.si_profile.accel_bias_counts,
+            gyro_bias_counts=device.si_profile.gyro_bias_counts,
+            raw_axis_order=device.si_profile.raw_axis_order,
+            axis_signs=device.si_profile.axis_signs,
+            method=device.si_profile.method,
+            evidence_sha256=device.si_profile.evidence_sha256,
+        )
+        sensor = SensorReference(
+            sensor_sn=device.sensor_sn,
+            device_profile_sha256=device_sha256,
+            protocol_id=device.protocol_id,
+            firmware_version=device.firmware.version,
+            firmware_evidence_status=device.firmware.evidence_status,
+        )
+        configuration_reference = DeviceConfigurationReference(
+            snapshot_id=snapshot.snapshot_id,
+            snapshot_sha256=snapshot.snapshot_sha256,
+            content_sha256=snapshot.content_sha256,
+            source="approved",
+            approval_state_at_capture="approved",
+            checked_at_utc="2026-08-26T23:59:00+00:00",
+            si_profile_id=device.si_profile.profile_id,
+        )
     manifest = CaptureManifestV2(
+        schema_version="3.2.0" if configuration is not None else "2.1.0",
         recording_id=recording_id,
         collection_id="pilot",
-        participant_id="xfan0282",
+        participant_id=None if configuration is not None else "xfan0282",
         data_tier=DataTier.PROD,
         captured_at_utc=started_at,
         duration_ns=2_000_000_000,
         source_h5_schema_version=CAPTURE_SCHEMA_VERSION,
         software_revision="test",
         calibration=calibration,
+        sensor=sensor,
+        configuration=configuration_reference,
         artifacts=descriptors,
     )
     store.write_json(
@@ -516,6 +655,83 @@ def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None
             ),
             "xfan0282",
         )
+
+
+def test_manifest_device_and_si_ids_must_match_configuration_snapshot(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    configurations = DeviceConfigurationStore(store)
+    bootstrap = bootstrap_snapshot_from_registry(settings.device_registry_path)
+    snapshot, review = configurations.submit(
+        ConfigurationSnapshotSubmission(
+            name="annotation trust-chain test",
+            description="approved before capture",
+            client_build="pytest",
+            content=bootstrap.content,
+        ),
+        actor="member",
+        now=datetime(2026, 8, 26, 23, 50, tzinfo=UTC),
+    )
+    configurations.transition(
+        snapshot.snapshot_id,
+        "approved",
+        actor="admin",
+        expected_revision=review.revision,
+        now=datetime(2026, 8, 26, 23, 55, tzinfo=UTC),
+    )
+    device = next(
+        item for item in snapshot.content.devices if item.sensor_sn == "IMU-0001-R01"
+    )
+    recording_id = _publish_calibrated_recording(
+        settings,
+        store,
+        tmp_path,
+        configuration=(snapshot, device),
+    )
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    manifest = service.required_manifest(recording_id)
+    assert manifest.configuration is not None
+    service._verify_export_source(manifest, tmp_path / "source" / "capture.h5")
+
+    tampered = manifest.model_copy(
+        update={
+            "configuration": manifest.configuration.model_copy(
+                update={"si_profile_id": "si-" + "0" * 24}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="manifest SI Profile ID"):
+        service._verify_export_source(tampered, tmp_path / "source" / "capture.h5")
+
+
+def test_exact_code_reviewed_bootstrap_remains_valid_offline_authority(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    bootstrap = bootstrap_snapshot_from_registry(settings.device_registry_path)
+    device = next(
+        item for item in bootstrap.content.devices if item.sensor_sn == "IMU-0001-R01"
+    )
+    recording_id = _publish_calibrated_recording(
+        settings,
+        store,
+        tmp_path,
+        configuration=(bootstrap, device),
+    )
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    manifest = service.required_manifest(recording_id)
+
+    profile = service._verify_export_source(
+        manifest,
+        tmp_path / "source" / "capture.h5",
+    )
+
+    assert profile.profile_id == device.si_profile.profile_id
 
 
 def test_legacy_taxonomy_entry_without_name_uses_code_for_display() -> None:

@@ -1,0 +1,52 @@
+schema_version: "1.0.0"
+registry_revision: 1
+devices:
+  - sensor_sn: "IMU-0001-R01"
+    hardware_asset_id: "IMU-0001"
+    revision: 1
+    lifecycle: "verified"
+    supersedes_sn: null
+    display_name: "CW12EU-T"
+    identity:
+      advertised_name: "CW12EU-T"
+      public_address: "83:FC:90:14:1E:A4"
+      address_type: "public"
+      advertised_service_uuid: null
+      gatt_fingerprint_sha256: null
+    firmware:
+      version: "unknown"
+      evidence_status: "unknown"
+      artifact_sha256: null
+    protocol_id: "cw12eu_v1"
+    expected_rate_hz: 25.0
+    expected_rate_status: "short_probe_observed_2026-08-25_pending_long_run"
+    calibration_evidence_path: "calibration-evidence.yaml"
+    prod_capture_enabled: true
+    audit_document: "../docs/device-facts.md"
+
+  - sensor_sn: "IMU-0002-R01"
+    hardware_asset_id: "IMU-0002"
+    revision: 1
+    lifecycle: "commissioning"
+    supersedes_sn: null
+    display_name: "acce&gyro_C18A0F78"
+    identity:
+      advertised_name: "acce&gyro_C18A0F78"
+      public_address: "E8:3D:C1:8A:0F:7A"
+      address_type: "public"
+      advertised_service_uuid: "0000abf0-0000-1000-8000-00805f9b34fb"
+      gatt_fingerprint_sha256: "d9d38ad67a7299f9f1c08f123c4a715fc350d43f3b2ec93aa43dd99fda93e285"
+    firmware:
+      version: "stock-unknown"
+      evidence_status: "user_confirmed_not_v0.0.4"
+      artifact_sha256: null
+    protocol_id: "acce_gyro_abf0_v1"
+    expected_rate_hz: 50.0
+    expected_rate_status: "observed_abf2_device_clock_2026-09-08"
+    calibration_evidence_path: null
+    candidate_conversion:
+      accel_counts_per_g: 16384.0
+      gyro_counts_per_dps: null
+      evidence_status: "single_stationary_orientation_hypothesis"
+    prod_capture_enabled: false
+    audit_document: "../docs/device-audits/IMU-0002-R01-2026-09-08.md"

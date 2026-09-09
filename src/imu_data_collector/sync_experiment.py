@@ -436,7 +436,18 @@ def read_sync_window(
             - recording_start
         )
         raw_counts = np.asarray(handle["imu/samples/raw_counts"], dtype=np.int16)
-        trailer = np.asarray(handle["imu/samples/trailer"], dtype=np.uint8)
+        trailer_dataset = handle.get("imu/samples/trailer")
+        trailer = (
+            np.asarray(trailer_dataset, dtype=np.uint8)
+            if trailer_dataset is not None
+            else np.empty((len(raw_counts), 0), dtype=np.uint8)
+        )
+        device_time_dataset = handle.get("imu/samples/device_time_ms")
+        device_time_ms = (
+            np.asarray(device_time_dataset, dtype=np.uint64)
+            if device_time_dataset is not None
+            else None
+        )
         packet_index = np.asarray(handle["imu/samples/packet_index"], dtype=np.int64)
         sample_in_packet = np.asarray(
             handle["imu/samples/sample_in_packet"], dtype=np.uint16
@@ -463,6 +474,11 @@ def read_sync_window(
         "time_s": (imu_time[left:right] / 1e9).tolist(),
         "raw_counts": values.tolist(),
         "trailer": trailer[left:right].tolist(),
+        "device_time_ms": (
+            device_time_ms[left:right].astype(np.uint64).tolist()
+            if device_time_ms is not None
+            else []
+        ),
         "packet_index": packet_index[left:right].tolist(),
         "sample_in_packet": sample_in_packet[left:right].tolist(),
         "candidate_sample_index": [item["sample_index"] for item in candidate_peaks],
@@ -638,7 +654,20 @@ def _trailer_report(sources: list[SyncExperimentSource]) -> dict[str, Any]:
     candidate_votes: Counter[str] = Counter()
     for source in sources:
         with h5py.File(source.h5_path, "r") as handle:
-            trailer = np.asarray(handle["imu/samples/trailer"], dtype=np.uint8)
+            trailer_dataset = handle.get("imu/samples/trailer")
+            if trailer_dataset is None:
+                device_time_dataset = handle.get("imu/samples/device_time_ms")
+                device_time = (
+                    np.asarray(device_time_dataset, dtype=np.uint64)
+                    if device_time_dataset is not None
+                    else np.empty(0, dtype=np.uint64)
+                )
+                recordings[source.recording_id] = {
+                    "not_applicable": True,
+                    "device_time_ms_sample_count": len(device_time),
+                }
+                continue
+            trailer = np.asarray(trailer_dataset, dtype=np.uint8)
         if trailer.ndim != 2 or trailer.shape[1] != 4:
             recordings[source.recording_id] = {"error": "trailer 不是 N×4"}
             continue

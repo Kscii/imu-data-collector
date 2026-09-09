@@ -25,6 +25,7 @@ from imu_data_collector.cw12eu import (
     calibrate_counts,
     classify_notification,
     parse_notification,
+    reconstruct_device_clock_times,
     reconstruct_sample_times,
 )
 from imu_data_collector.host import host_runtime
@@ -141,6 +142,25 @@ class CaptureH5Writer:
                 "feature_columns": json.dumps(FEATURE_COLUMNS),
                 "feature_units": json.dumps(FEATURE_UNITS),
                 "calibration_profile_id": self.imu_settings.calibration_profile_id,
+                "sensor_sn": self.imu_settings.sensor_sn,
+                "device_profile_sha256": self.imu_settings.device_profile_sha256 or "legacy",
+                "device_registry_revision": self.imu_settings.device_registry_revision
+                or 0,
+                "configuration_snapshot_id": self.imu_settings.configuration_snapshot_id
+                or "legacy",
+                "configuration_snapshot_sha256": (
+                    self.imu_settings.configuration_snapshot_sha256 or "legacy"
+                ),
+                "configuration_content_sha256": (
+                    self.imu_settings.configuration_content_sha256 or "legacy"
+                ),
+                "configuration_source": self.imu_settings.configuration_source
+                or "legacy",
+                "configuration_approval_state": (
+                    self.imu_settings.configuration_approval_state or "legacy"
+                ),
+                "si_profile_id": self.imu_settings.si_profile_id
+                or self.imu_settings.calibration_profile_id,
                 "calibration_verified": bool(
                     self.imu_settings.calibration_verified
                     and self.imu_settings.accel_counts_per_g
@@ -154,27 +174,58 @@ class CaptureH5Writer:
         )
         if self.operator_id is not None:
             handle.attrs["operator_id"] = self.operator_id
+        if self.imu_settings.configuration_checked_at_utc:
+            handle.attrs["configuration_checked_at_utc"] = (
+                self.imu_settings.configuration_checked_at_utc
+            )
         imu = handle.create_group("imu")
         imu.attrs.update(
             {
                 "device_name": self.imu_settings.name,
                 "device_address": self.imu_settings.address,
+                "sensor_sn": self.imu_settings.sensor_sn,
+                "device_profile_sha256": self.imu_settings.device_profile_sha256 or "legacy",
+                "device_registry_revision": self.imu_settings.device_registry_revision
+                or 0,
                 "notify_uuid": self.imu_settings.notify_uuid,
+                "protocol": self.imu_settings.protocol,
                 "expected_rate_hz": self.imu_settings.expected_rate_hz,
                 "expected_rate_status": self.imu_settings.expected_rate_status,
                 "frame_size_bytes": self.imu_settings.frame_size_bytes,
                 "callback_drops": 0,
                 "byte_order": (
-                    "big_endian_verified_current_device"
-                    if self.imu_settings.calibration_verified
-                    else "big_endian_hypothesis"
+                    "little_endian_observed_abf2"
+                    if self.imu_settings.protocol == "acce_gyro_abf0_v1"
+                    else (
+                        "big_endian_verified_current_device"
+                        if self.imu_settings.calibration_verified
+                        else "big_endian_hypothesis"
+                    )
                 ),
                 "frame_layout_status": (
-                    "six_axis_int16_verified_trailer_unknown"
-                    if self.imu_settings.calibration_verified
-                    else "hypothesis_pending_characterization"
+                    "six_axis_int16_candidate_counter_tail_crlf_observed"
+                    if self.imu_settings.protocol == "acce_gyro_abf0_v1"
+                    else (
+                        "six_axis_int16_verified_trailer_unknown"
+                        if self.imu_settings.calibration_verified
+                        else "hypothesis_pending_characterization"
+                    )
                 ),
+                "trailer_storage": (
+                    "not_applicable_device_time_ms_full_notification_retained_in_packets"
+                    if self.imu_settings.protocol == "acce_gyro_abf0_v1"
+                    else "payload_bytes_12_15"
+                ),
+                "device_clock": (
+                    "uint64_little_endian_milliseconds"
+                    if self.imu_settings.protocol == "acce_gyro_abf0_v1"
+                    else "none"
+                ),
+                "firmware_version": self.imu_settings.firmware_version,
+                "firmware_evidence_status": self.imu_settings.firmware_evidence_status,
                 "calibration_profile_id": self.imu_settings.calibration_profile_id,
+                "si_profile_id": self.imu_settings.si_profile_id
+                or self.imu_settings.calibration_profile_id,
                 "calibration_method": self.imu_settings.calibration_method,
                 "accel_bias_counts_json": json.dumps(
                     self.imu_settings.accel_bias_counts
@@ -196,6 +247,38 @@ class CaptureH5Writer:
         if self.imu_settings.calibration_evidence_sha256:
             imu.attrs["calibration_evidence_sha256"] = (
                 self.imu_settings.calibration_evidence_sha256
+            )
+        if self.imu_settings.device_registry_snapshot_sha256:
+            handle.attrs["device_registry_snapshot_sha256"] = (
+                self.imu_settings.device_registry_snapshot_sha256
+            )
+            imu.attrs["device_registry_snapshot_sha256"] = (
+                self.imu_settings.device_registry_snapshot_sha256
+            )
+        if self.imu_settings.candidate_conversion_sha256:
+            imu.attrs.update(
+                {
+                    "candidate_conversion_sha256": self.imu_settings.candidate_conversion_sha256,
+                    "candidate_conversion_source": self.imu_settings.candidate_conversion_source
+                    or "unknown",
+                    "candidate_accel_counts_per_g": self.imu_settings.candidate_accel_counts_per_g
+                    or float("nan"),
+                    "candidate_gyro_counts_per_dps": self.imu_settings.candidate_gyro_counts_per_dps
+                    or float("nan"),
+                    "candidate_accel_bias_counts_json": json.dumps(
+                        self.imu_settings.candidate_accel_bias_counts
+                    ),
+                    "candidate_gyro_bias_counts_json": json.dumps(
+                        self.imu_settings.candidate_gyro_bias_counts
+                    ),
+                    "candidate_raw_axis_order_json": json.dumps(
+                        self.imu_settings.candidate_raw_axis_order
+                    ),
+                    "candidate_axis_signs_json": json.dumps(
+                        self.imu_settings.candidate_axis_signs
+                    ),
+                    "candidate_conversion_authoritative": False,
+                }
             )
         if self.imu_settings.accel_counts_per_g:
             imu.attrs["accel_counts_per_g"] = self.imu_settings.accel_counts_per_g
@@ -252,17 +335,48 @@ class CaptureH5Writer:
             shuffle=True,
             fletcher32=True,
         )
-        samples.create_dataset(
-            "trailer",
-            shape=(0, 4),
-            maxshape=(None, 4),
-            dtype="u1",
-            chunks=(SAMPLE_CHUNK_ROWS, 4),
-            compression="gzip",
-            compression_opts=4,
-            shuffle=True,
-            fletcher32=True,
-        )
+        if self.imu_settings.protocol == "acce_gyro_abf0_v1":
+            samples.create_dataset(
+                "device_time_ms",
+                shape=(0,),
+                maxshape=(None,),
+                dtype="u8",
+                chunks=(SAMPLE_CHUNK_ROWS,),
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+                fletcher32=True,
+            )
+            samples.create_dataset(
+                "device_clock_epoch",
+                shape=(0,),
+                maxshape=(None,),
+                dtype="u4",
+                chunks=(SAMPLE_CHUNK_ROWS,),
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+                fletcher32=True,
+            )
+            samples["device_time_ms"].attrs.update(
+                {
+                    "unit": "ms",
+                    "origin": "device_local_unknown_epoch",
+                    "world_time": False,
+                }
+            )
+        else:
+            samples.create_dataset(
+                "trailer",
+                shape=(0, 4),
+                maxshape=(None, 4),
+                dtype="u1",
+                chunks=(SAMPLE_CHUNK_ROWS, 4),
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+                fletcher32=True,
+            )
         samples.create_dataset(
             "values_si",
             shape=(0, 6),
@@ -447,7 +561,11 @@ class CaptureH5Writer:
         )
         _resize_append(packets["fit_residual_ns"], np.asarray([0], dtype=np.int64))
 
-        kind = classify_notification(payload, self.imu_settings.frame_size_bytes)
+        kind = classify_notification(
+            payload,
+            self.imu_settings.frame_size_bytes,
+            self.imu_settings.protocol,
+        )
         _resize_append(
             packets["packet_kind"], np.asarray([int(kind)], dtype=np.uint8)
         )
@@ -474,7 +592,11 @@ class CaptureH5Writer:
             return 0
 
         try:
-            parsed = parse_notification(payload, self.imu_settings.frame_size_bytes)
+            parsed = parse_notification(
+                payload,
+                self.imu_settings.frame_size_bytes,
+                self.imu_settings.protocol,
+            )
         except ValueError as error:
             _resize_append(packets["sample_count"], np.asarray([0], dtype=np.uint16))
             _resize_append(packets["parse_valid"], np.asarray([False], dtype=np.bool_))
@@ -492,7 +614,14 @@ class CaptureH5Writer:
         _resize_append(packets["parse_valid"], np.asarray([True], dtype=np.bool_))
         samples = self.handle["imu/samples"]
         _resize_append(samples["raw_counts"], parsed.raw_counts)
-        _resize_append(samples["trailer"], parsed.trailer)
+        if parsed.trailer is not None:
+            _resize_append(samples["trailer"], parsed.trailer)
+        if parsed.device_time_ms is not None:
+            _resize_append(samples["device_time_ms"], parsed.device_time_ms)
+            _resize_append(
+                samples["device_clock_epoch"],
+                np.zeros(parsed.sample_count, dtype=np.uint32),
+            )
         _resize_append(
             samples["values_si"],
             calibrate_counts(
@@ -551,14 +680,33 @@ class CaptureH5Writer:
         valid = np.asarray(packets["parse_valid"], dtype=np.bool_)
         receive = np.asarray(packets["receive_time_ns"], dtype=np.int64)[valid]
         counts = np.asarray(packets["sample_count"], dtype=np.int64)[valid]
-        times, rate, residual = reconstruct_sample_times(
-            receive, counts, self.imu_settings.expected_rate_hz
-        )
+        samples = self.handle["imu/samples"]
+        if "device_time_ms" in samples:
+            all_receive = np.asarray(packets["receive_time_ns"], dtype=np.int64)
+            packet_indices = np.asarray(samples["packet_index"], dtype=np.int64)
+            times, epochs, rate, residual, mappings = reconstruct_device_clock_times(
+                np.asarray(samples["device_time_ms"], dtype=np.uint64),
+                packet_indices,
+                all_receive,
+            )
+            samples["device_clock_epoch"][:] = epochs
+            samples["time_quality"][:] = 3
+            self.handle["imu"].attrs.update(
+                {
+                    "device_clock_mapping": "affine_per_monotonic_epoch",
+                    "device_clock_mapping_json": json.dumps(mappings, sort_keys=True),
+                    "device_clock_reset_count": int(epochs[-1]) if len(epochs) else 0,
+                }
+            )
+        else:
+            times, rate, residual = reconstruct_sample_times(
+                receive, counts, self.imu_settings.expected_rate_hz
+            )
+            samples["time_quality"][:] = 2
         dataset = self.handle["imu/samples/time_monotonic_ns"]
         if len(times) != len(dataset):
             raise ValueError("reconstructed sample count does not match parsed samples")
         dataset[:] = times
-        self.handle["imu/samples/time_quality"][:] = 2
         relative = times - self.recording_start_monotonic_ns
         self.handle["imu/samples/recording_time_ns"][:] = relative
         self.handle["imu/samples/aligned_video_time_ns"][:] = relative

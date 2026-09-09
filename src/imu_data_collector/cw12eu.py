@@ -26,10 +26,21 @@ CW12EU_AUXILIARY_PREFIX = bytes.fromhex("aa1a0200f0f0f0f0")
 
 
 def classify_notification(
-    payload: bytes, frame_size: int = CW12EU_FRAME_BYTES
+    payload: bytes,
+    frame_size: int = CW12EU_FRAME_BYTES,
+    protocol: str = "cw12eu_v1",
 ) -> NotificationKind:
     """先区分样本包、已知辅助包和未知无效包。"""
 
+    if protocol == "acce_gyro_abf0_v1":
+        if frame_size != 22 or len(payload) != frame_size:
+            return NotificationKind.UNKNOWN_INVALID
+        frame = np.frombuffer(payload, dtype=np.uint8)
+        if np.array_equal(frame[-2:], np.asarray([0x0D, 0x0A], dtype=np.uint8)):
+            return NotificationKind.IMU_SAMPLES
+        return NotificationKind.UNKNOWN_INVALID
+    if protocol != "cw12eu_v1":
+        return NotificationKind.UNKNOWN_INVALID
     if len(payload) == 10 and payload.startswith(CW12EU_AUXILIARY_PREFIX):
         return NotificationKind.AUXILIARY_STATUS
     if payload and frame_size == CW12EU_FRAME_BYTES and len(payload) % frame_size == 0:
@@ -40,17 +51,41 @@ def classify_notification(
 @dataclass(frozen=True, slots=True)
 class ParsedNotification:
     raw_counts: np.ndarray
-    trailer: np.ndarray
+    trailer: np.ndarray | None = None
+    device_time_ms: np.ndarray | None = None
 
     @property
     def sample_count(self) -> int:
         return len(self.raw_counts)
 
 
-def parse_notification(payload: bytes, frame_size: int = CW12EU_FRAME_BYTES) -> ParsedNotification:
+def parse_notification(
+    payload: bytes,
+    frame_size: int = CW12EU_FRAME_BYTES,
+    protocol: str = "cw12eu_v1",
+) -> ParsedNotification:
     if not payload:
-        raise ValueError("empty CW12EU-T notification")
-    if frame_size != 16:
+        raise ValueError("empty IMU notification")
+    if protocol == "acce_gyro_abf0_v1":
+        if frame_size != 22:
+            raise ValueError(f"unsupported frame size for {protocol}: {frame_size}")
+        if len(payload) != frame_size:
+            raise ValueError(
+                f"{protocol} requires exactly one {frame_size}-byte frame per notification"
+            )
+        frames = np.frombuffer(payload, dtype=np.uint8).reshape(1, frame_size)
+        if not np.all(frames[:, -2:] == np.asarray([0x0D, 0x0A], dtype=np.uint8)):
+            raise ValueError("acce&gyro notification is missing the CRLF frame suffix")
+        raw = np.frombuffer(
+            frames[:, :12].copy().tobytes(), dtype="<i2"
+        ).astype(np.int16)
+        device_time_ms = np.frombuffer(
+            frames[:, 12:20].copy().tobytes(), dtype="<u8"
+        ).astype(np.uint64)
+        return ParsedNotification(raw.reshape(-1, 6), device_time_ms=device_time_ms)
+    if protocol != "cw12eu_v1":
+        raise ValueError(f"unsupported IMU protocol: {protocol}")
+    if frame_size != CW12EU_FRAME_BYTES:
         raise ValueError(f"unsupported frame size: {frame_size}")
     if len(payload) % frame_size:
         raise ValueError(
@@ -59,6 +94,78 @@ def parse_notification(payload: bytes, frame_size: int = CW12EU_FRAME_BYTES) -> 
     frames = np.frombuffer(payload, dtype=np.uint8).reshape(-1, frame_size)
     raw = np.frombuffer(frames[:, :12].copy().tobytes(), dtype=">i2").astype(np.int16)
     return ParsedNotification(raw.reshape(-1, 6), frames[:, 12:16].copy())
+
+
+def reconstruct_device_clock_times(
+    device_time_ms: np.ndarray,
+    sample_packet_indices: np.ndarray,
+    packet_receive_ns: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float, float, list[dict[str, float | int]]]:
+    """Map device-local milliseconds to host monotonic time per clock epoch.
+
+    A non-increasing device tick starts a new epoch. Test captures retain all epochs;
+    production validation rejects resets. The affine slope is constrained to a
+    conservative ±1% clock-drift envelope and falls back to one when the fit is not
+    credible.
+    """
+
+    ticks = np.asarray(device_time_ms, dtype=np.uint64)
+    packet_indices = np.asarray(sample_packet_indices, dtype=np.int64)
+    receive = np.asarray(packet_receive_ns, dtype=np.int64)
+    if ticks.ndim != 1 or packet_indices.shape != ticks.shape:
+        raise ValueError("device ticks and packet indices must be equal one-dimensional arrays")
+    if len(ticks) == 0:
+        return (
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.uint32),
+            0.0,
+            0.0,
+            [],
+        )
+    if np.any(packet_indices < 0) or np.any(packet_indices >= len(receive)):
+        raise ValueError("sample packet index is outside packet receive timestamps")
+
+    epochs = np.zeros(len(ticks), dtype=np.uint32)
+    if len(ticks) > 1:
+        resets = ticks[1:] <= ticks[:-1]
+        epochs[1:] = np.cumsum(resets, dtype=np.uint32)
+    mapped = np.empty(len(ticks), dtype=np.int64)
+    mappings: list[dict[str, float | int]] = []
+    squared_residuals: list[np.ndarray] = []
+    for epoch in range(int(epochs[-1]) + 1):
+        indices = np.flatnonzero(epochs == epoch)
+        epoch_ticks = ticks[indices].astype(np.float64)
+        x = (epoch_ticks - epoch_ticks[0]) * 1e6
+        y = receive[packet_indices[indices]].astype(np.float64)
+        if len(indices) >= 3 and x[-1] > x[0]:
+            slope, intercept = np.polyfit(x, y, 1)
+            if not math.isfinite(slope) or not 0.99 <= slope <= 1.01:
+                slope = 1.0
+                intercept = float(np.median(y - x))
+        else:
+            slope = 1.0
+            intercept = float(np.median(y - x))
+        fitted = intercept + slope * x
+        mapped[indices] = np.rint(fitted).astype(np.int64)
+        residual = y - fitted
+        squared_residuals.append(residual * residual)
+        mappings.append(
+            {
+                "epoch": epoch,
+                "first_device_time_ms": int(ticks[indices[0]]),
+                "last_device_time_ms": int(ticks[indices[-1]]),
+                "scale": float(slope),
+                "offset_ns": int(round(intercept)),
+                "sample_count": len(indices),
+            }
+        )
+    if len(mapped) > 1 and np.any(np.diff(mapped) <= 0):
+        raise ValueError("mapped device timestamps are not strictly increasing")
+    span_ms = int(ticks[-1]) - int(ticks[0]) if epochs[-1] == 0 else 0
+    rate = (len(ticks) - 1) * 1000.0 / span_ms if span_ms > 0 else 0.0
+    residuals = np.concatenate(squared_residuals)
+    rms = float(math.sqrt(float(np.mean(residuals)))) if len(residuals) else 0.0
+    return mapped, epochs, rate, rms, mappings
 
 
 def calibrate_counts(

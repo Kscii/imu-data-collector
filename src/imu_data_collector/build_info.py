@@ -5,7 +5,19 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-_CAPTURE_API_SOURCES = ("capture_api.py", "coordinator.py", "models.py")
+_CAPTURE_API_SOURCES = (
+    "capture_api.py",
+    "coordinator.py",
+    "models.py",
+    "config.py",
+    "broker_client.py",
+    "device_configuration.py",
+    "device_registry.py",
+    "device_binding.py",
+    "imu_protocols.py",
+    "ble.py",
+    "cw12eu.py",
+)
 _ANNOTATION_API_SOURCES = (
     "annotation_api.py",
     "annotation_service.py",
@@ -13,6 +25,10 @@ _ANNOTATION_API_SOURCES = (
     "model_catalog.py",
     "taxonomy_store.py",
     "models.py",
+    "config.py",
+    "device_configuration.py",
+    "device_registry.py",
+    "imu_protocols.py",
 )
 
 

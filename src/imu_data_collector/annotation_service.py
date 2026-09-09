@@ -51,6 +51,12 @@ from imu_data_collector.config import (
 from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
 from imu_data_collector.cw12eu import calibrate_counts
 from imu_data_collector.dataset_catalog import DATASET_HANDOFF_VERSION
+from imu_data_collector.device_configuration import (
+    ConfigurationSnapshotV2,
+    DeviceConfigurationStore,
+    bootstrap_snapshot_from_registry,
+)
+from imu_data_collector.device_registry import canonical_json_bytes, sha256_bytes
 from imu_data_collector.file_lock import exclusive_file_lock
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.models import (
@@ -91,7 +97,13 @@ from imu_data_collector.validation import validate_annotations
 
 logger = logging.getLogger(__name__)
 
-ACCEPTED_MANIFEST_SCHEMA_VERSIONS = ("2.0.0", "2.1.0", "3.0.0")
+ACCEPTED_MANIFEST_SCHEMA_VERSIONS = (
+    "2.0.0",
+    "2.1.0",
+    "3.0.0",
+    "3.1.0",
+    "3.2.0",
+)
 TRAINING_SNAPSHOT_SCHEMA_VERSION = "4.0.0"
 CLIENT_DELIVERY_JOB_SCHEMA_VERSION = "cw12eu_client_hdf5_job_v1"
 CLIENT_DELIVERY_SIGNED_URL_TTL = timedelta(minutes=15)
@@ -146,6 +158,7 @@ class AnnotationService:
         self.cache_root = settings.storage.cache_root
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.reviews = AnnotationReviewStore(store, self.taxonomy)
+        self.device_configurations = DeviceConfigurationStore(store)
         self._release_delete_lock = threading.RLock()
         self._delivery_job_lock = threading.RLock()
         self._delivery_jobs: dict[str, dict[str, Any]] = {}
@@ -837,6 +850,14 @@ class AnnotationService:
                 if trailer_dataset is not None
                 else np.empty((len(raw_counts), 0), dtype=np.uint8)
             )
+            device_time_dataset = handle.get("imu/samples/device_time_ms")
+            device_time_ms = (
+                np.asarray(device_time_dataset, dtype=np.uint64)
+                if device_time_dataset is not None
+                else None
+            )
+            sensor_sn = str(handle.attrs.get("sensor_sn", ""))
+            protocol = str(handle["imu"].attrs.get("protocol", "cw12eu_v1"))
             frame_recording_ns = np.asarray(
                 handle["video/frames/recording_time_ns"], dtype=np.int64
             )
@@ -851,7 +872,9 @@ class AnnotationService:
         conversion_error: str | None = None
         calibration: CalibrationProfile | None = None
         try:
-            calibration = self._authoritative_calibration()
+            calibration = self._authoritative_calibration(
+                sensor_sn if sensor_sn.startswith("IMU-") else None
+            )
             si_values = calibrate_counts(
                 raw_counts,
                 calibration.accel_counts_per_g,
@@ -861,15 +884,20 @@ class AnnotationService:
                 raw_axis_order=calibration.raw_axis_order,
                 axis_signs=calibration.axis_signs,
             )
-        except (OSError, ValueError) as error:
+        except (KeyError, OSError, ValueError) as error:
             conversion_error = str(error)
 
-        frame_hex = [
-            " ".join(
-                f"{byte:02X}" for byte in (row.astype(">i2").tobytes() + trailer[index].tobytes())
-            )
-            for index, row in enumerate(raw_counts)
-        ]
+        frame_hex: list[str] = []
+        for index, row in enumerate(raw_counts):
+            if protocol == "acce_gyro_abf0_v1" and device_time_ms is not None:
+                frame = (
+                    row.astype("<i2").tobytes()
+                    + int(device_time_ms[index]).to_bytes(8, "little")
+                    + b"\r\n"
+                )
+            else:
+                frame = row.astype(">i2").tobytes() + trailer[index].tobytes()
+            frame_hex.append(" ".join(f"{byte:02X}" for byte in frame))
         return {
             "recording_id": recording_id,
             "video": {
@@ -884,6 +912,9 @@ class AnnotationService:
                 "raw_counts": raw_counts.tolist(),
                 "values_si": si_values.tolist() if si_values is not None else [],
                 "trailer": trailer.tolist(),
+                "device_time_ms": (
+                    device_time_ms.tolist() if device_time_ms is not None else []
+                ),
                 "frame_hex": frame_hex,
             },
             "conversion": {
@@ -1547,22 +1578,67 @@ class AnnotationService:
 
         return self.reviews.mutate(manifest, request.expected_revision, update)
 
-    def _authoritative_calibration(self) -> CalibrationProfile:
+    def _authoritative_calibration(
+        self,
+        sensor_sn: str | None = None,
+        configuration_snapshot_id: str | None = None,
+    ) -> CalibrationProfile:
         """从服务器私有配置和版本化证据文件构造唯一可信校准档案。"""
 
+        if configuration_snapshot_id is not None:
+            snapshot = self._device_configuration_snapshot(configuration_snapshot_id)
+            device = next(
+                (
+                    item
+                    for item in snapshot.content.devices
+                    if item.sensor_sn == sensor_sn
+                ),
+                None,
+            )
+            if device is None:
+                raise ValueError("配置 Snapshot 不包含 manifest 的 sensor_sn")
+            si = device.si_profile
+            if not si.verified:
+                raise ValueError("录制引用的 SI Profile 未达到正式校准状态")
+            return CalibrationProfile(
+                profile_id=si.profile_id,
+                verified=si.verified,
+                accel_counts_per_g=si.accel_counts_per_g,
+                gyro_counts_per_dps=si.gyro_counts_per_dps,
+                accel_bias_counts=si.accel_bias_counts,
+                gyro_bias_counts=si.gyro_bias_counts,
+                raw_axis_order=si.raw_axis_order,
+                axis_signs=si.axis_signs,
+                method=si.method,
+                evidence_sha256=si.evidence_sha256,
+            )
+
+        if sensor_sn is not None:
+            from imu_data_collector.device_registry import resolve_imu_settings
+
+            imu_settings = resolve_imu_settings(
+                self.settings.device_registry_path,
+                sensor_sn,
+            )
+        else:
+            imu_settings = self.settings.imu
         configured = CalibrationProfile(
-            profile_id=self.settings.imu.calibration_profile_id,
-            verified=self.settings.imu.calibration_verified,
-            accel_counts_per_g=self.settings.imu.accel_counts_per_g,
-            gyro_counts_per_dps=self.settings.imu.gyro_counts_per_dps,
-            accel_bias_counts=self.settings.imu.accel_bias_counts,
-            gyro_bias_counts=self.settings.imu.gyro_bias_counts,
-            raw_axis_order=self.settings.imu.raw_axis_order,
-            axis_signs=self.settings.imu.axis_signs,
-            method=self.settings.imu.calibration_method,
-            evidence_sha256=self.settings.imu.calibration_evidence_sha256,
+            profile_id=imu_settings.calibration_profile_id,
+            verified=imu_settings.calibration_verified,
+            accel_counts_per_g=imu_settings.accel_counts_per_g,
+            gyro_counts_per_dps=imu_settings.gyro_counts_per_dps,
+            accel_bias_counts=imu_settings.accel_bias_counts,
+            gyro_bias_counts=imu_settings.gyro_bias_counts,
+            raw_axis_order=imu_settings.raw_axis_order,
+            axis_signs=imu_settings.axis_signs,
+            method=imu_settings.calibration_method,
+            evidence_sha256=imu_settings.calibration_evidence_sha256,
         )
-        evidence = self.calibration_evidence
+        evidence_path = (
+            imu_settings.calibration_evidence_path
+            or self.settings.calibration_evidence_path
+        )
+        evidence = load_calibration_evidence(evidence_path)
         calibration = evidence.get("calibration", {})
         if not configured.verified or calibration.get("status") != "engineering_verified":
             raise ValueError("服务器校准档案尚未达到 engineering_verified")
@@ -1570,7 +1646,7 @@ class AnnotationService:
             raise ValueError("服务器配置与校准证据的 profile_id 不一致")
         if configured.evidence_sha256 is None:
             raise ValueError("服务器校准证据缺少 SHA-256")
-        actual_evidence_sha256 = sha256_file(self.settings.calibration_evidence_path)
+        actual_evidence_sha256 = sha256_file(evidence_path)
         if configured.evidence_sha256 != actual_evidence_sha256:
             raise ValueError("服务器配置的校准证据 SHA-256 与实际证据文件不一致")
         evidence_fields = {
@@ -1593,6 +1669,33 @@ class AnnotationService:
             if evidence_fields[name] != expected:
                 raise ValueError(f"服务器配置与校准证据的 {name} 不一致")
         return configured
+
+    def _device_configuration_snapshot(
+        self, snapshot_id: str
+    ) -> ConfigurationSnapshotV2:
+        """Resolve a team snapshot or the one exact code-reviewed bootstrap lock."""
+
+        if not snapshot_id.startswith("local-cfg-"):
+            return self.device_configurations.get_snapshot(snapshot_id)
+        bootstrap = bootstrap_snapshot_from_registry(self.settings.device_registry_path)
+        if bootstrap.snapshot_id != snapshot_id:
+            raise ValueError("本机配置 Snapshot 不是服务器已审查的 bootstrap lock")
+        return bootstrap
+
+    def _device_configuration_approval_at(
+        self, snapshot_id: str, captured_at_utc: str
+    ) -> dict[str, Any]:
+        if snapshot_id.startswith("local-cfg-"):
+            self._device_configuration_snapshot(snapshot_id)
+            return {
+                "snapshot_id": snapshot_id,
+                "captured_at_utc": captured_at_utc,
+                "state_at_capture": "approved",
+                "approved_at_capture": True,
+                "evaluated_events": 0,
+                "authority": "code_reviewed_bootstrap_lock",
+            }
+        return self.device_configurations.approval_at(snapshot_id, captured_at_utc)
 
     @staticmethod
     def _calibration_mismatch(
@@ -1627,7 +1730,59 @@ class AnnotationService:
         """交叉核对对象、manifest、服务器档案和 H5 冻结属性。"""
 
         self._verify_manifest_objects(manifest)
-        authoritative = self._authoritative_calibration()
+        authoritative = self._authoritative_calibration(
+            manifest.sensor.sensor_sn if manifest.sensor is not None else None,
+            (
+                manifest.configuration.snapshot_id
+                if manifest.configuration is not None
+                else None
+            ),
+        )
+        if manifest.configuration is not None:
+            snapshot = self._device_configuration_snapshot(
+                manifest.configuration.snapshot_id
+            )
+            if snapshot.snapshot_sha256 != manifest.configuration.snapshot_sha256:
+                raise ValueError("manifest 配置 Snapshot SHA-256 不一致")
+            if snapshot.content_sha256 != manifest.configuration.content_sha256:
+                raise ValueError("manifest 配置 content SHA-256 不一致")
+            if manifest.sensor is None:
+                raise ValueError("manifest 配置引用缺少 sensor")
+            device = next(
+                (
+                    item
+                    for item in snapshot.content.devices
+                    if item.sensor_sn == manifest.sensor.sensor_sn
+                ),
+                None,
+            )
+            if device is None:
+                raise ValueError("配置 Snapshot 不包含 manifest 的 sensor_sn")
+            expected_device_sha256 = sha256_bytes(
+                canonical_json_bytes(device.model_dump(mode="json"))
+            )
+            sensor_fields = {
+                "device_profile_sha256": expected_device_sha256,
+                "protocol_id": device.protocol_id,
+                "firmware_version": device.firmware.version,
+                "firmware_evidence_status": device.firmware.evidence_status,
+            }
+            for name, expected in sensor_fields.items():
+                if getattr(manifest.sensor, name) != expected:
+                    raise ValueError(f"manifest sensor 与配置 Snapshot 的 {name} 不一致")
+            if manifest.configuration.si_profile_id != device.si_profile.profile_id:
+                raise ValueError("manifest SI Profile ID 与配置 Snapshot 不一致")
+            approval = self._device_configuration_approval_at(
+                manifest.configuration.snapshot_id,
+                manifest.captured_at_utc,
+            )
+            if (
+                manifest.configuration.approval_state_at_capture
+                != approval["state_at_capture"]
+            ):
+                raise ValueError("manifest 采集时审批状态与审计事件不一致")
+            if not approval["approved_at_capture"]:
+                raise ValueError("configuration_not_approved_at_capture")
         mismatch = self._calibration_mismatch(manifest.calibration, authoritative)
         if mismatch:
             raise ValueError(f"manifest 校准参数与服务器档案不一致：{mismatch}")
@@ -1644,8 +1799,32 @@ class AnnotationService:
                 "capture_schema_version": manifest.source_h5_schema_version,
                 "started_at_utc": manifest.captured_at_utc,
             }
-            if manifest.schema_version != "3.0.0":
+            if manifest.schema_version not in {"3.0.0", "3.1.0", "3.2.0"}:
                 root_expected["participant_id"] = manifest.participant_id
+            if manifest.sensor is not None:
+                root_expected.update(
+                    {
+                        "sensor_sn": manifest.sensor.sensor_sn,
+                        "device_profile_sha256": (
+                            manifest.sensor.device_profile_sha256
+                        ),
+                    }
+                )
+            if manifest.configuration is not None:
+                root_expected.update(
+                    {
+                        "configuration_snapshot_id": (
+                            manifest.configuration.snapshot_id
+                        ),
+                        "configuration_snapshot_sha256": (
+                            manifest.configuration.snapshot_sha256
+                        ),
+                        "configuration_content_sha256": (
+                            manifest.configuration.content_sha256
+                        ),
+                        "si_profile_id": manifest.configuration.si_profile_id,
+                    }
+                )
             for name, expected in root_expected.items():
                 if text(handle.attrs.get(name, "")) != str(expected):
                     raise ValueError(f"H5 与 manifest 的 {name} 不一致")
@@ -1656,6 +1835,19 @@ class AnnotationService:
             if text(handle.attrs.get("calibration_profile_id", "")) != authoritative.profile_id:
                 raise ValueError("H5 根属性 calibration_profile_id 不一致")
             imu = handle["imu"].attrs
+            if manifest.sensor is not None:
+                sensor_expected = {
+                    "sensor_sn": manifest.sensor.sensor_sn,
+                    "device_profile_sha256": manifest.sensor.device_profile_sha256,
+                    "protocol": manifest.sensor.protocol_id,
+                    "firmware_version": manifest.sensor.firmware_version,
+                    "firmware_evidence_status": (
+                        manifest.sensor.firmware_evidence_status
+                    ),
+                }
+                for name, expected in sensor_expected.items():
+                    if text(imu.get(name, "")) != str(expected):
+                        raise ValueError(f"H5 与 manifest sensor 的 {name} 不一致")
             h5_profile = CalibrationProfile(
                 profile_id=text(imu.get("calibration_profile_id", "unverified")),
                 verified=bool(handle.attrs.get("calibration_verified", False)),
@@ -1697,7 +1889,11 @@ class AnnotationService:
         if participant_id is None:
             raise ValueError("已确认身份缺少 participant_id")
         subject_id = self.settings.identity.subject_ids.get(participant_id)
-        if subject_id is None and manifest.schema_version != "3.0.0":
+        if subject_id is None and manifest.schema_version not in {
+            "3.0.0",
+            "3.1.0",
+            "3.2.0",
+        }:
             subject_id = f"cw12eu:{participant_id}"
         if subject_id is None:
             raise ValueError("该参与者尚未配置私有匿名 subject_id，禁止导出")
@@ -2315,7 +2511,11 @@ class AnnotationService:
                 ):
                     raise ValueError(f"已完成录制缺少已确认参与者身份：{manifest.recording_id}")
                 subject_id = self.settings.identity.subject_ids.get(participant_id)
-                if subject_id is None and manifest.schema_version != "3.0.0":
+                if subject_id is None and manifest.schema_version not in {
+                    "3.0.0",
+                    "3.1.0",
+                    "3.2.0",
+                }:
                     subject_id = f"cw12eu:{participant_id}"
                 if subject_id is None:
                     raise ValueError(f"参与者缺少匿名 subject_id：{manifest.recording_id}")

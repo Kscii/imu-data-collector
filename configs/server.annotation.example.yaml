@@ -1,6 +1,9 @@
 # 云端标注服务结构化配置示例；部署时复制到 /etc/imu-annotation/config.yaml。
 activity_taxonomy_path: "/opt/imu-annotation/current/configs/activities.yaml"
 calibration_evidence_path: "/opt/imu-annotation/current/configs/calibration-evidence.yaml"
+device_registry_path: "/opt/imu-annotation/current/configs/imu-devices.yaml"
+device_registry_auto_refresh: false
+default_sensor_sn: "IMU-0001-R01"
 
 identity:
   allowed_unikeys:

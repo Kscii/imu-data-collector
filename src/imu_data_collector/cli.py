@@ -43,6 +43,15 @@ from imu_data_collector.cw12eu import (
     classify_notification,
     parse_notification,
 )
+from imu_data_collector.device_configuration import (
+    MIGRATION_CONFIRMATION,
+    apply_migration_lock,
+    migration_preview,
+)
+from imu_data_collector.device_registry import (
+    publish_device_registry,
+    refresh_device_registry_cache,
+)
 from imu_data_collector.host import find_executable, platform_id
 from imu_data_collector.identity_migration import apply_local_plan, build_local_plan
 from imu_data_collector.models import (
@@ -134,6 +143,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     probe_imu = subparsers.add_parser("probe-imu", help="短时连接并统计 IMU 通知")
     probe_imu.add_argument("--seconds", type=float, default=15.0)
+    probe_imu.add_argument("--sensor-sn")
     probe_gatt = subparsers.add_parser(
         "probe-gatt", help="连接 IMU 并枚举实际 GATT 服务树"
     )
@@ -143,6 +153,7 @@ def _parser() -> argparse.ArgumentParser:
         default=0.0,
         help="返回前保持连接的诊断时长",
     )
+    probe_gatt.add_argument("--sensor-sn")
     probe_video = subparsers.add_parser(
         "probe-video", help="短时录制到临时目录并统计视频 PTS"
     )
@@ -161,6 +172,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     characterize.add_argument("--seconds", type=float, default=30.0)
     characterize.add_argument("--notes", default="")
+    characterize.add_argument("--sensor-sn")
     migrate_identity = subparsers.add_parser(
         "migrate-participant-identity",
         help="把本地普通录制迁移为身份中立命名；默认只输出计划",
@@ -177,6 +189,23 @@ def _parser() -> argparse.ArgumentParser:
     repair_catalog.add_argument("--apply", action="store_true")
     repair_catalog.add_argument("--plan-token")
     repair_catalog.add_argument("--confirmation")
+    subparsers.add_parser(
+        "publish-device-registry",
+        help="发布不可变设备注册表快照并原子更新 current 指针",
+    )
+    refresh_registry = subparsers.add_parser(
+        "refresh-device-registry",
+        help="校验远端设备注册表并原子更新本机 last-known-good 缓存",
+    )
+    refresh_registry.add_argument("--output", type=Path)
+    migrate_configuration = subparsers.add_parser(
+        "migrate-device-configuration-v2",
+        help="把 v1 设备注册和 SI 证据转换成 v2 bootstrap lock；默认只输出计划",
+    )
+    migrate_configuration.add_argument("--output", type=Path)
+    migrate_configuration.add_argument("--apply", action="store_true")
+    migrate_configuration.add_argument("--plan-token")
+    migrate_configuration.add_argument("--confirmation")
     return parser
 
 
@@ -208,6 +237,7 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
     source = CW12EUBleSource(settings.imu)
     packet_lengths: Counter[int] = Counter()
     packet_times: list[int] = []
+    device_times_ms: list[int] = []
     parsed_samples = 0
     auxiliary_notifications = 0
     parse_errors: list[str] = []
@@ -229,7 +259,9 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
             packet_lengths[len(packet.payload)] += 1
             packet_times.append(packet.receive_time_ns)
             kind = classify_notification(
-                packet.payload, settings.imu.frame_size_bytes
+                packet.payload,
+                settings.imu.frame_size_bytes,
+                settings.imu.protocol,
             )
             if kind == NotificationKind.AUXILIARY_STATUS:
                 auxiliary_notifications += 1
@@ -241,9 +273,14 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
                 )
                 continue
             try:
-                parsed_samples += parse_notification(
-                    packet.payload, settings.imu.frame_size_bytes
-                ).sample_count
+                parsed = parse_notification(
+                    packet.payload,
+                    settings.imu.frame_size_bytes,
+                    settings.imu.protocol,
+                )
+                parsed_samples += parsed.sample_count
+                if parsed.device_time_ms is not None:
+                    device_times_ms.extend(int(item) for item in parsed.device_time_ms)
             except ValueError as error:
                 parse_errors.append(str(error))
     finally:
@@ -258,6 +295,18 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
     coverage_seconds, estimated_rate_hz = _estimate_batched_sample_rate(
         parsed_samples, packet_times
     )
+    device_deltas_ms = [
+        right - left
+        for left, right in zip(device_times_ms, device_times_ms[1:], strict=False)
+    ]
+    device_clock_reset_count = (
+        sum(delta <= 0 for delta in device_deltas_ms) if device_times_ms else None
+    )
+    device_clock_rate_hz = None
+    if device_times_ms and device_clock_reset_count == 0:
+        device_span_ms = device_times_ms[-1] - device_times_ms[0]
+        if device_span_ms > 0:
+            device_clock_rate_hz = (len(device_times_ms) - 1) * 1000 / device_span_ms
 
     def percentile(values: list[float], fraction: float) -> float | None:
         if not values:
@@ -265,9 +314,11 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
         return values[min(len(values) - 1, round((len(values) - 1) * fraction))]
 
     return {
+        "sensor_sn": settings.imu.sensor_sn,
         "device_name": settings.imu.name,
         "device_address": settings.imu.address,
         "notify_uuid": settings.imu.notify_uuid,
+        "protocol": settings.imu.protocol,
         "elapsed_seconds": elapsed_seconds,
         "packet_count": len(packet_times),
         "packet_length_histogram": dict(sorted(packet_lengths.items())),
@@ -275,6 +326,10 @@ async def _probe_imu(settings, duration_seconds: float) -> dict:
         "auxiliary_notifications": auxiliary_notifications,
         "estimated_sample_coverage_seconds": coverage_seconds,
         "candidate_sample_rate_hz": estimated_rate_hz,
+        "device_clock_first_ms": device_times_ms[0] if device_times_ms else None,
+        "device_clock_last_ms": device_times_ms[-1] if device_times_ms else None,
+        "device_clock_reset_count": device_clock_reset_count,
+        "device_clock_rate_hz": device_clock_rate_hz,
         "packet_interval_median_ms": percentile(intervals_ms, 0.5),
         "packet_interval_p95_ms": percentile(intervals_ms, 0.95),
         "callback_drops": source.dropped_callback_packets,
@@ -430,7 +485,12 @@ async def _characterize_imu(
 
 def main() -> None:
     args = _parser().parse_args()
-    settings = load_settings(args.config)
+    settings = load_settings(
+        args.config,
+        resolve_default_imu=args.command != "refresh-device-registry",
+    )
+    if sensor_sn := getattr(args, "sensor_sn", None):
+        settings.imu = settings.resolve_imu(sensor_sn)
     if args.command in {"serve", "start"}:
         webui_url = f"http://{settings.server_host}:{settings.server_port}"
         print(f"本机 WebUI：{webui_url}")
@@ -662,6 +722,40 @@ def main() -> None:
                 catalog=catalog,
                 migration_plan_path=args.migration_plan,
                 plan=plan,
+                plan_token=args.plan_token,
+                confirmation=args.confirmation,
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command in {"publish-device-registry", "refresh-device-registry"}:
+        store = create_object_store(
+            settings.storage.backend,
+            settings.storage.root,
+            settings.storage.bucket,
+            settings.storage.project,
+        )
+        if args.command == "publish-device-registry":
+            result = publish_device_registry(store, settings.device_registry_path)
+        else:
+            output = args.output or settings.device_registry_cache_path
+            document = refresh_device_registry_cache(store, output)
+            result = {
+                "cache_path": str(output),
+                "device_count": len(document.devices),
+                "sensor_sns": [item.sensor_sn for item in document.devices],
+            }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command == "migrate-device-configuration-v2":
+        if not args.apply:
+            result = migration_preview(settings.device_registry_path)
+        else:
+            if not args.plan_token or not args.confirmation:
+                raise SystemExit(
+                    "--apply 需要 --plan-token 和 --confirmation；"
+                    f"确认文本为 {MIGRATION_CONFIRMATION}"
+                )
+            result = apply_migration_lock(
+                settings.device_registry_path,
+                output=args.output,
                 plan_token=args.plan_token,
                 confirmation=args.confirmation,
             )

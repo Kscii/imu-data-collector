@@ -32,6 +32,11 @@ from imu_data_collector.broker_models import ModelPublicationRestoreRequest
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.dataset_catalog import DatasetCatalog
+from imu_data_collector.device_configuration import (
+    ConfigurationCurrentAction,
+    ConfigurationReviewAction,
+    DeviceConfigurationStore,
+)
 from imu_data_collector.host import resource_path
 from imu_data_collector.http_download import object_download_response
 from imu_data_collector.model_catalog import ModelCatalog
@@ -74,6 +79,7 @@ def create_annotation_app(
     service = AnnotationService(active, object_store)
     dataset_catalog = DatasetCatalog(object_store)
     model_catalog = ModelCatalog(object_store)
+    configuration_store = DeviceConfigurationStore(object_store)
     authenticator = Authenticator(active, token_verifier)
     refresh_stop = threading.Event()
 
@@ -108,11 +114,12 @@ def create_annotation_app(
             if refresh_thread is not None:
                 refresh_thread.join(timeout=2.0)
 
-    app = FastAPI(title="IMU 标注平台", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="IMU 标注平台", version="0.3.0", lifespan=lifespan)
     app.add_exception_handler(HTTPException, structured_http_error_handler)
     app.state.annotation_service = service
     app.state.authenticator = authenticator
     app.state.model_catalog = model_catalog
+    app.state.device_configuration_store = configuration_store
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next):
@@ -181,12 +188,125 @@ def create_annotation_app(
             "auth_mode": active.auth.mode,
             "current_unikey": actor.unikey,
             "can_view_models": actor.unikey in MODEL_VIEWERS,
+            "can_manage_device_configuration": actor.is_admin,
             "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "storage": {
                 "backend": active.storage.backend,
                 "bucket": active.storage.bucket,
             },
         }
+
+    @app.get("/api/v1/device-config/snapshots")
+    def device_configuration_snapshots(request: Request) -> dict[str, Any]:
+        current_actor(request)
+        try:
+            current, current_generation = configuration_store.current()
+        except FileNotFoundError:
+            current, current_generation = None, 0
+        values = []
+        for snapshot, review in configuration_store.list_snapshots():
+            values.append(
+                {
+                    "snapshot_id": snapshot.snapshot_id,
+                    "snapshot_sha256": snapshot.snapshot_sha256,
+                    "content_sha256": snapshot.content_sha256,
+                    "name": snapshot.name,
+                    "description": snapshot.description,
+                    "publisher": snapshot.publisher,
+                    "published_at_utc": snapshot.published_at_utc,
+                    "device_count": len(snapshot.content.devices),
+                    "state": review.state,
+                    "review_revision": review.revision,
+                    "current": bool(current and current.snapshot_id == snapshot.snapshot_id),
+                }
+            )
+        return {
+            "snapshots": values,
+            "current": current.model_dump(mode="json") if current else None,
+            "current_generation": current_generation,
+            "current_revision": current.revision if current else 0,
+        }
+
+    @app.get("/api/v1/device-config/snapshots/{snapshot_id}")
+    def device_configuration_snapshot(snapshot_id: str, request: Request) -> dict[str, Any]:
+        current_actor(request)
+        try:
+            snapshot = configuration_store.get_snapshot(snapshot_id)
+            review, review_generation = configuration_store.get_review(snapshot_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="找不到配置 Snapshot") from error
+        events = configuration_store.events(snapshot_id)
+        linked_recordings = [
+            item.recording_id
+            for item in service.catalog.list()
+            if getattr(getattr(item, "configuration", None), "snapshot_id", None)
+            == snapshot_id
+        ]
+        return {
+            "snapshot": snapshot.model_dump(mode="json"),
+            "review": review.model_dump(mode="json"),
+            "review_generation": review_generation,
+            "events": events,
+            "linked_recordings": linked_recordings,
+        }
+
+    @app.post("/api/v1/device-config/snapshots/{snapshot_id}/approve")
+    def approve_device_configuration(
+        snapshot_id: str,
+        body: ConfigurationReviewAction,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = admin_actor(request)
+        try:
+            review = configuration_store.transition(
+                snapshot_id,
+                "approved",
+                actor=actor.unikey,
+                expected_revision=body.expected_revision,
+            )
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return review.model_dump(mode="json")
+
+    @app.post("/api/v1/device-config/snapshots/{snapshot_id}/revoke")
+    def revoke_device_configuration(
+        snapshot_id: str,
+        body: ConfigurationReviewAction,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = admin_actor(request)
+        try:
+            review = configuration_store.transition(
+                snapshot_id,
+                "revoked",
+                actor=actor.unikey,
+                expected_revision=body.expected_revision,
+            )
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return review.model_dump(mode="json")
+
+    @app.post("/api/v1/device-config/current")
+    def set_current_device_configuration(
+        body: ConfigurationCurrentAction,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = admin_actor(request)
+        try:
+            current = configuration_store.set_current(
+                body.snapshot_id,
+                actor=actor.unikey,
+                expected_revision=body.expected_revision,
+            )
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return current.model_dump(mode="json")
 
     @app.get("/api/v1/session")
     def session(request: Request) -> dict[str, Any]:
@@ -215,10 +335,11 @@ def create_annotation_app(
             },
         )
 
-    @app.api_route(
+    @app.head(
         "/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download",
-        methods=["GET", "HEAD"],
+        include_in_schema=False,
     )
+    @app.get("/api/v1/dataset-catalog/{kind}/{snapshot_id}/{dataset_id}/download")
     def dataset_catalog_h5_download(
         kind: Literal["base", "team"],
         snapshot_id: str,
@@ -795,10 +916,11 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.api_route(
+    @app.head(
         "/api/v1/training-snapshots/{snapshot_id}/download",
-        methods=["GET", "HEAD"],
+        include_in_schema=False,
     )
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/download")
     def training_snapshot_download(
         snapshot_id: str,
         request: Request,
@@ -835,10 +957,11 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.api_route(
+    @app.head(
         "/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download",
-        methods=["GET", "HEAD"],
+        include_in_schema=False,
     )
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/benchmark-h5/download")
     def benchmark_snapshot_download(
         snapshot_id: str,
         request: Request,
@@ -880,10 +1003,11 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.api_route(
+    @app.head(
         "/api/v1/training-snapshots/{snapshot_id}/delivery/download",
-        methods=["GET", "HEAD"],
+        include_in_schema=False,
     )
+    @app.get("/api/v1/training-snapshots/{snapshot_id}/delivery/download")
     def client_delivery_download(
         snapshot_id: str,
         request: Request,

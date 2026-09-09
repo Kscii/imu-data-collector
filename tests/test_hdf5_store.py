@@ -1,5 +1,6 @@
 import json
 import os
+import struct
 from pathlib import Path
 
 import h5py
@@ -63,6 +64,45 @@ def test_capture_h5_file_descriptor_is_not_inheritable(tmp_path: Path) -> None:
         if not isinstance(descriptor, int):
             pytest.skip("当前 HDF5 VFD 不暴露普通 POSIX 文件描述符")
         assert not os.get_inheritable(descriptor)
+    finally:
+        writer.abort_close()
+
+
+def test_capture_h5_freezes_exact_device_configuration_reference(tmp_path: Path) -> None:
+    settings = ImuSettings(
+        sensor_sn="IMU-0002-R01",
+        device_profile_sha256="a" * 64,
+        protocol="acce_gyro_abf0_v1",
+        configuration_snapshot_id="cfg-" + "b" * 24,
+        configuration_snapshot_sha256="c" * 64,
+        configuration_content_sha256="d" * 64,
+        configuration_source="approved",
+        configuration_approval_state="approved",
+        configuration_checked_at_utc="2026-09-09T01:02:03+00:00",
+        si_profile_id="si-" + "e" * 24,
+    )
+    writer = CaptureH5Writer(
+        tmp_path / "configuration-reference.h5",
+        RecordingStartRequest(
+            collection_id="configuration-reference",
+            configuration_snapshot_id=settings.configuration_snapshot_id,
+        ),
+        "configuration-reference-recording",
+        1_000_000_000,
+        settings,
+        taxonomy(),
+    )
+    try:
+        attrs = writer.handle.attrs
+        assert attrs["capture_schema_version"] == "1.9.0"
+        assert attrs["configuration_snapshot_id"] == settings.configuration_snapshot_id
+        assert attrs["configuration_snapshot_sha256"] == "c" * 64
+        assert attrs["configuration_content_sha256"] == "d" * 64
+        assert attrs["configuration_source"] == "approved"
+        assert attrs["configuration_approval_state"] == "approved"
+        assert attrs["configuration_checked_at_utc"] == "2026-09-09T01:02:03+00:00"
+        assert attrs["si_profile_id"] == "si-" + "e" * 24
+        assert writer.handle["imu"].attrs["si_profile_id"] == "si-" + "e" * 24
     finally:
         writer.abort_close()
 
@@ -491,6 +531,78 @@ def test_verified_calibration_is_frozen_and_values_si_use_target_axes(
     assert values[2] == pytest.approx(9.80665)
     assert values[4] == pytest.approx(-np.deg2rad(10.0))
     writer.abort_close()
+
+
+def test_acce_gyro_abf0_capture_preserves_raw_notification_and_marks_unverified(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "acce-gyro.h5"
+    settings = ImuSettings(
+        sensor_sn="IMU-0002-R01",
+        device_profile_sha256="b" * 64,
+        name="acce&gyro_C18A101C",
+        address="E8:3D:C1:8A:10:1E",
+        notify_uuid="0000abf2-0000-1000-8000-00805f9b34fb",
+        protocol="acce_gyro_abf0_v1",
+        force_le_bearer=False,
+        expected_rate_hz=50.0,
+        frame_size_bytes=22,
+        device_registry_revision=1,
+        candidate_accel_counts_per_g=16384.0,
+        candidate_conversion_sha256="c" * 64,
+        candidate_conversion_source="local_override",
+    )
+    payload = struct.pack("<6hQ", 1, -2, 3, -4, 5, -6, 20) + b"\r\n"
+    writer = CaptureH5Writer(
+        path,
+        RecordingStartRequest(collection_id="temporary", data_tier=DataTier.TEST),
+        "acce-gyro",
+        1_000_000_000,
+        settings,
+        taxonomy(),
+    )
+
+    assert writer.append_notification(payload, 1_020_000_000) == 1
+    assert writer.append_notification(
+        struct.pack("<6hQ", 2, -3, 4, -5, 6, -7, 40) + b"\r\n",
+        1_040_000_000,
+    ) == 1
+    assert writer.append_notification(
+        struct.pack("<6hQ", 3, -4, 5, -6, 7, -8, 60) + b"\r\n",
+        1_060_000_000,
+    ) == 1
+    rate, residual = writer.reconstruct_times()
+    assert rate == pytest.approx(50.0)
+    assert residual < 1.0
+    writer.write_sync([])
+    writer.finish()
+
+    with h5py.File(path, "r") as handle:
+        assert handle.attrs["sensor_sn"] == "IMU-0002-R01"
+        assert handle["imu"].attrs["protocol"] == "acce_gyro_abf0_v1"
+        assert handle["imu"].attrs["byte_order"] == "little_endian_observed_abf2"
+        assert "trailer" not in handle["imu/samples"]
+        assert handle["imu/samples/device_time_ms"][:].tolist() == [20, 40, 60]
+        assert handle["imu/samples/device_clock_epoch"][:].tolist() == [0, 0, 0]
+        np.testing.assert_array_equal(
+            handle["imu/samples/raw_counts"][:],
+            [
+                [1, -2, 3, -4, 5, -6],
+                [2, -3, 4, -5, 6, -7],
+                [3, -4, 5, -6, 7, -8],
+            ],
+        )
+        assert np.isnan(handle["imu/samples/values_si"][:]).all()
+        assert handle.attrs["device_registry_revision"] == 1
+        assert handle["imu"].attrs["candidate_conversion_sha256"] == "c" * 64
+        assert not bool(
+            handle["imu"].attrs["candidate_conversion_authoritative"]
+        )
+        assert bytes(handle["imu/packets/payload_values"][:22]) == payload
+
+    report = validate_capture_h5(path, taxonomy(), require_video=False)
+    assert report.ready, report.issues
+    assert report.metrics["device_clock_reset_count"] == 0
 
 
 def test_prod_tier_is_default_but_explicit_test_can_never_be_training_eligible(

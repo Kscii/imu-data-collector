@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
+import {
+  type BleScanSummary,
+  CaptureSettingsPage,
+  DeviceConfigurationAdminPage,
+  type ConfigurationStatus,
+  type RuntimeConfiguration,
+} from "./DeviceConfigurationPages";
 import { resolveAnnotationShortcut } from "./annotationShortcuts";
 import { intervalFollowAnchorIndex, intervalsAtTime } from "./annotationTimeline";
+import { requireCurrentDeviceList } from "./captureContract";
 import {
   firstNonEmptyRecordingQueue,
   groupRecordingQueues,
@@ -20,9 +28,9 @@ import {
 
 document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
-  : tr("IMU 数采平台", "IMU Data Collector");
+  : tr("IMU 数据采集", "IMU Data Capture");
 
-type AppTab = "capture" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
+type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -63,8 +71,8 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
-    : { capture: "capture", records: "library", diagnostics: "characterize" };
+    ? { annotate: "annotate", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
+    : { capture: "capture", records: "library", settings: "settings", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
 
@@ -80,6 +88,7 @@ function readCaptureForm() {
       collection?: string;
       dataTier?: "test" | "prod";
       cameraId?: string;
+      sensorSn?: string;
     };
   } catch {
     return {};
@@ -281,6 +290,7 @@ type AppConfig = {
   operator_unikeys?: string[];
   admin_unikeys?: string[];
   can_view_models?: boolean;
+  can_manage_device_configuration?: boolean;
   data_tiers?: ("test" | "prod")[];
   default_data_tier?: "test" | "prod";
   data_root?: string;
@@ -293,6 +303,8 @@ type AppConfig = {
     bucket?: string | null;
     cloud_configured?: boolean;
   };
+  configuration?: ConfigurationStatus;
+  runtime_configuration?: RuntimeConfiguration;
 };
 
 type CloudStatus = {
@@ -578,19 +590,59 @@ type Camera = {
 type ImuCandidate = {
   local_device_id: string;
   name: string | null;
+  address: string;
+  rssi: number;
+  service_uuids: string[];
+  matched_sensor_sns: string[];
+  registration_state: "registered" | "unregistered";
 };
 
 type ImuBinding = {
   state: "bound" | "unbound";
+  sensor_sn: string;
   device_name: string;
   local_device_id: string | null;
   verified_at_utc: string | null;
+};
+
+type ImuProfile = {
+  sensor_sn: string;
+  display_name: string;
+  advertised_name: string;
+  public_address: string | null;
+  protocol_id: string;
+  expected_rate_hz: number;
+  lifecycle: "active" | "retired" | "commissioning" | "verified";
+  source: string;
+  selectable: boolean;
+  prod_capture_enabled: boolean;
+  candidate_conversion: {
+    accel_counts_per_g: number | null;
+    gyro_counts_per_dps: number | null;
+    accel_bias_counts: [number, number, number];
+    gyro_bias_counts: [number, number, number];
+    raw_axis_order: [number, number, number];
+    axis_signs: [number, number, number];
+    evidence_status: string;
+  } | null;
+  candidate_conversion_source: "registry" | "local_override" | null;
+  si_profile_id?: string;
+  si_verified?: boolean;
+  protocol_supported?: boolean;
+  unsupported_reason?: string | null;
+  binding: ImuBinding;
 };
 
 type DeviceList = {
   cameras: Camera[];
   platform: string;
   imu_binding: ImuBinding;
+  ble: ImuCandidate[];
+  ble_scan: BleScanSummary;
+  selected_sensor_sn: string | null;
+  default_sensor_sn: string | null;
+  imu_profiles: ImuProfile[];
+  configuration: ConfigurationStatus;
 };
 
 type SyncAnchor = {
@@ -920,11 +972,12 @@ export default function App() {
   useDocumentLocalization();
   const annotationApplication = __APP_KIND__ === "annotation";
   const ownsCaptureTab = useCaptureTabLease(!annotationApplication);
-  const diagnosticsVisible = new URLSearchParams(location.search).has("diagnostics")
-    || new URLSearchParams(location.search).get("view") === "diagnostics";
   const [captureForm] = useState(readCaptureForm);
   const [tab, setTab] = useState<AppTab>(() => initialTab(annotationApplication));
   const [live, setLive] = useState<any>({ state: "idle", imu: {}, video: {} });
+  const [liveReceivedAt, setLiveReceivedAt] = useState(0);
+  const [liveTransport, setLiveTransport] = useState<"connecting" | "live" | "reconnecting">("connecting");
+  const [clock, setClock] = useState(() => Date.now());
   const [collection, setCollection] = useState(
     captureForm.collection && /^\d{8}_session_\d{2}$/.test(captureForm.collection)
       ? captureForm.collection
@@ -941,18 +994,35 @@ export default function App() {
   const [cameraId, setCameraId] = useState(captureForm.cameraId ?? "");
   const [imuBinding, setImuBinding] = useState<ImuBinding | null>(null);
   const [imuCandidates, setImuCandidates] = useState<ImuCandidate[]>([]);
+  const [bleScan, setBleScan] = useState<BleScanSummary | null>(null);
   const [imuLocalDeviceId, setImuLocalDeviceId] = useState("");
+  const [imuProfiles, setImuProfiles] = useState<ImuProfile[]>([]);
+  const [sensorSn, setSensorSn] = useState(captureForm.sensorSn ?? "");
+  const [configurationStatus, setConfigurationStatus] = useState<ConfigurationStatus | null>(null);
   const liveRef = useRef<{ t: number[]; values: number[][] }>({ t: [], values: [] });
   const [, redraw] = useState(0);
   const versionMismatch = !annotationApplication
     && config !== null
     && config.build_id !== __CAPTURE_API_BUILD_ID__;
   const captureInteractionBlocked = !ownsCaptureTab || versionMismatch;
+  const liveAgeMs = liveReceivedAt > 0 ? Math.max(0, clock - liveReceivedAt) : Number.POSITIVE_INFINITY;
+  const liveFresh = liveTransport === "live" && liveAgeMs < 2_500;
 
   const selectTab = (next: AppTab) => {
     setTab(next);
     const url = new URL(location.href);
     url.searchParams.set("view", tabView(next));
+    history.pushState({}, "", url);
+  };
+
+  const openCaptureSettings = (section?: "devices" | "runtime", device?: string) => {
+    setTab("settings");
+    const url = new URL(location.href);
+    url.searchParams.set("view", "settings");
+    if (section) url.searchParams.set("section", section);
+    else url.searchParams.delete("section");
+    if (device) url.searchParams.set("device", device);
+    else url.searchParams.delete("device");
     history.pushState({}, "", url);
   };
 
@@ -979,9 +1049,15 @@ export default function App() {
     if (annotationApplication) return;
     sessionStorage.setItem(
       CAPTURE_FORM_KEY,
-      JSON.stringify({ collection, dataTier, cameraId })
+      JSON.stringify({ collection, dataTier, cameraId, sensorSn })
     );
-  }, [annotationApplication, collection, dataTier, cameraId]);
+  }, [annotationApplication, collection, dataTier, cameraId, sensorSn]);
+
+  useEffect(() => {
+    if (annotationApplication) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [annotationApplication]);
 
   const refreshRecordings = async () => {
     try {
@@ -993,13 +1069,35 @@ export default function App() {
       return [];
     }
   };
-  const refreshCameras = (force = false) =>
-    api<DeviceList>(`/api/v1/devices${force ? "?refresh_cameras=true" : ""}`).then((value) => {
+  const refreshCameras = (force = false, scanBle = false) => {
+    const query = new URLSearchParams();
+    if (force) query.set("refresh_cameras", "true");
+    if (scanBle) query.set("scan_ble", "true");
+    return api<unknown>(`/api/v1/devices${query.size ? `?${query}` : ""}`).then((payload) => {
+      const value = requireCurrentDeviceList<DeviceList>(payload);
       setCameras(value.cameras);
-      setImuBinding(value.imu_binding);
-      if (value.imu_binding.local_device_id) {
-        setImuLocalDeviceId(value.imu_binding.local_device_id);
+      setImuProfiles(value.imu_profiles);
+      setConfigurationStatus(value.configuration);
+      if (scanBle) {
+        setImuCandidates(value.ble);
+        setBleScan(value.ble_scan);
       }
+      setSensorSn((current) => {
+        const selected = value.imu_profiles.find(
+          (item) => item.selectable && item.sensor_sn === current
+        )
+          ?? value.imu_profiles.find(
+            (item) => item.selectable && item.sensor_sn === value.selected_sensor_sn
+          );
+        if (selected) {
+          setImuBinding(selected.binding);
+          setImuLocalDeviceId(selected.binding.local_device_id ?? "");
+          if (!selected.prod_capture_enabled) {
+            setDataTier((currentTier) => currentTier === "prod" ? "test" : currentTier);
+          }
+        }
+        return selected?.sensor_sn ?? "";
+      });
       setCameraId((current) => {
         if (value.cameras.some((item) => item.camera_id === current)) return current;
         const compatible = value.cameras.filter((item) => item.supports_default_profile && item.color_capture);
@@ -1008,6 +1106,15 @@ export default function App() {
           ?? "";
       });
     }).catch((e) => setCaptureError(e.message));
+  };
+
+  const selectSensor = (nextSensorSn: string) => {
+    const profile = imuProfiles.find((item) => item.sensor_sn === nextSensorSn);
+    setSensorSn(nextSensorSn);
+    setImuBinding(profile?.binding ?? null);
+    setImuLocalDeviceId(profile?.binding.local_device_id ?? "");
+    if (profile && !profile.prod_capture_enabled && dataTier === "prod") setDataTier("test");
+  };
 
   const acceptPreviewError = (value: unknown) => {
     const error = value as ApiRequestError;
@@ -1029,7 +1136,10 @@ export default function App() {
   const forgetImuBinding = async () => {
     if (captureInteractionBlocked || captureOperation) return;
     try {
-      const binding = await api<ImuBinding>("/api/v1/devices/imu-binding", { method: "DELETE" });
+      const binding = await api<ImuBinding>(
+        `/api/v1/devices/imu-binding?sensor_sn=${encodeURIComponent(sensorSn)}`,
+        { method: "DELETE" },
+      );
       setImuBinding(binding);
       setImuLocalDeviceId("");
       setImuCandidates([]);
@@ -1062,6 +1172,10 @@ export default function App() {
     let reconnectTimer: number | null = null;
     const acceptLive = (payload: any) => {
       setLive(payload);
+      const receivedAt = Date.now();
+      setLiveReceivedAt(receivedAt);
+      setClock(receivedAt);
+      setLiveTransport("live");
       if (payload.imu?.connected && payload.imu?.raw) {
         const data = liveRef.current;
         const nowSeconds = performance.now() / 1000;
@@ -1078,10 +1192,14 @@ export default function App() {
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const connect = () => {
       if (disposed) return;
+      setLiveTransport("connecting");
       socket = new WebSocket(`${protocol}://${location.host}/api/v1/live`);
       socket.onmessage = (message) => acceptLive(JSON.parse(message.data));
       socket.onclose = () => {
-        if (!disposed) reconnectTimer = window.setTimeout(connect, 1000);
+        if (!disposed) {
+          setLiveTransport("reconnecting");
+          reconnectTimer = window.setTimeout(connect, 1000);
+        }
       };
     };
     api<any>("/api/v1/health").then(acceptLive).catch(() => undefined);
@@ -1109,7 +1227,9 @@ export default function App() {
           data_tier: dataTier,
           body_location: "chest",
           protocol_id: taxonomy?.taxonomy_id ?? "fall_binary_v1",
-          camera_id: cameraId || null
+          camera_id: cameraId || null,
+          sensor_sn: sensorSn || null,
+          configuration_snapshot_id: configurationStatus?.selected_snapshot_id ?? null,
         })
       });
     } catch (e) {
@@ -1143,7 +1263,9 @@ export default function App() {
         method: "POST",
         body: active ? undefined : JSON.stringify({
           camera_id: cameraId || null,
+          sensor_sn: sensorSn || null,
           imu_local_device_id: imuLocalDeviceId || null,
+          configuration_snapshot_id: configurationStatus?.selected_snapshot_id ?? null,
         })
       });
       setLive(snapshot);
@@ -1164,7 +1286,9 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({
           camera_id: cameraId || null,
+          sensor_sn: sensorSn || null,
           imu_local_device_id: imuLocalDeviceId || null,
+          configuration_snapshot_id: configurationStatus?.selected_snapshot_id ?? null,
         })
       });
       setLive(snapshot);
@@ -1201,20 +1325,20 @@ export default function App() {
     <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
       <header className={annotationApplication && tab === "annotate" ? "workbench-header" : ""}>
         <div>
-          <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("CW12EU-T · 本机采集", "CW12EU-T · Local capture")}</span>
-          <h1>{annotationApplication ? tr("IMU 数据标注平台", "IMU Annotation Platform") : tr("IMU 数采平台", "IMU Data Collector")}</h1>
+          <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("多设备 IMU · 本机采集", "Multi-device IMU · Local capture")}</span>
+          <h1>{annotationApplication ? tr("IMU 数据标注平台", "IMU Annotation Platform") : tr("IMU 数据采集", "IMU Data Capture")}</h1>
         </div>
-        <div className={`state state-${live.state}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
+        <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
-          {diagnosticsVisible && <button className={tab === "characterize" ? "active" : ""} onClick={() => selectTab("characterize")}>{tr("IMU 诊断", "IMU diagnostics")}</button>}
+          <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
         </>}
       </nav>
       {annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
-      {tab === "capture" && captureError && <div className="error-banner">{captureError}</div>}
+      {!annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
       {!annotationApplication && versionMismatch && <div className="error-banner">采集页面与后端 API 版本不一致：页面 {__CAPTURE_API_BUILD_ID__}，后端 {config?.build_id ?? "旧版未报告"}。源码更新后请在项目根目录运行 <code>./scripts/update-local-capture.sh</code>；普通的 systemctl 重启不会重新构建页面。</div>}
       {!annotationApplication && !ownsCaptureTab && <div className="warning-banner">另一个标签页正在控制本机采集设备。本页保持只读；关闭另一个页面后最多等待 6 秒即可接管。</div>}
       {tab === "capture" && (
@@ -1233,28 +1357,50 @@ export default function App() {
           refreshCameras={refreshCameras}
           toggleImuPreview={toggleImuPreview}
           retryPreview={retryPreview}
+          imuProfiles={imuProfiles}
+          sensorSn={sensorSn}
+          selectSensor={selectSensor}
+          scanImu={() => refreshCameras(false, true)}
           imuBinding={imuBinding}
           imuCandidates={imuCandidates}
+          bleScan={bleScan}
           imuLocalDeviceId={imuLocalDeviceId}
           setImuLocalDeviceId={setImuLocalDeviceId}
           forgetImuBinding={forgetImuBinding}
           captureOperation={captureOperation}
           interactionBlocked={captureInteractionBlocked}
           ownsCaptureTab={ownsCaptureTab}
+          configurationStatus={configurationStatus}
+          liveFresh={liveFresh}
+          liveAgeMs={liveAgeMs}
+          liveTransport={liveTransport}
+          openSettings={openCaptureSettings}
         />
       )}
+      {!annotationApplication && tab === "settings" && <CaptureSettingsPage
+        interactionBlocked={captureInteractionBlocked || live.state !== "idle" || Boolean(live.monitoring_requested)}
+        runtimeConfiguration={config?.runtime_configuration}
+        imuProfiles={imuProfiles}
+        bleCandidates={imuCandidates}
+        bleScan={bleScan}
+        onScanBle={() => refreshCameras(false, true)}
+        onConfigurationChanged={() => refreshCameras()}
+        onOpenPublishing={() => selectTab("library")}
+      />}
       {tab === "characterize" && (
         <CharacterizationPage
           live={live}
           allowedUnikeys={config?.operator_unikeys ?? []}
           chart={liveRef.current}
           interactionBlocked={captureInteractionBlocked}
+          sensorSn={sensorSn}
         />
       )}
       {annotationApplication && tab === "annotate" && taxonomy && session && (
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
+      {annotationApplication && tab === "deviceConfig" && <DeviceConfigurationAdminPage canManage={Boolean(config?.can_manage_device_configuration)} />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {annotationApplication && tab === "delivery" && <SnapshotDeliveryViewer />}
@@ -1405,16 +1551,49 @@ function CapturePage(props: any) {
     live, collection, setCollection, start, stop, chart,
     dataTier, setDataTier, cameras, cameraId, changeCamera, refreshCameras,
     toggleImuPreview, retryPreview, imuBinding, imuCandidates, imuLocalDeviceId,
-    setImuLocalDeviceId, forgetImuBinding, captureOperation, interactionBlocked, ownsCaptureTab
+    setImuLocalDeviceId, forgetImuBinding, captureOperation, interactionBlocked,
+    ownsCaptureTab, imuProfiles, sensorSn, selectSensor, scanImu,
+    configurationStatus, bleScan,
+    liveFresh, liveAgeMs, liveTransport, openSettings,
   } = props;
   const [previewRetry, setPreviewRetry] = useState(0);
+  const [focusCamera, setFocusCamera] = useState(false);
   const active = live.state === "recording" && live.session_type === "capture";
   const devicesPreview = live.session_type === "devices_preview";
   const monitoringRequested = Boolean(live.monitoring_requested);
   const previewStreamId = live.video?.stream_id ?? 0;
   useEffect(() => setPreviewRetry(0), [previewStreamId]);
+  useEffect(() => {
+    if (!focusCamera) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFocusCamera(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [focusCamera]);
   const busy = ["arming", "finalizing"].includes(live.state) || Boolean(captureOperation);
   const anotherSession = live.state === "recording" && live.session_type !== "capture";
+  const selectedProfile = imuProfiles.find((item: ImuProfile) => item.sensor_sn === sensorSn);
+  const activeImu = active || devicesPreview || monitoringRequested ? live.imu : null;
+  const telemetry = liveFresh ? live : { ...live, imu: {}, video: {} };
+  const issueCount = [
+    ...(live.recording?.issues ?? []),
+    ...(live.recording?.validation_issues ?? []),
+  ].length;
+  const tierAuthorized = dataTier !== "prod" || Boolean(selectedProfile?.prod_capture_enabled);
+  const ready = Boolean(
+    cameraId
+    && sensorSn
+    && selectedProfile?.protocol_supported !== false
+    && tierAuthorized,
+  );
+  const readinessLabel = !cameraId || !sensorSn
+    ? "还需选择设备"
+    : selectedProfile?.protocol_supported === false
+      ? "协议不受支持"
+      : !tierAuthorized
+        ? "正式采集未获授权"
+        : "基础配置完整";
   const previewButtonLabel = captureOperation === "releasing_preview"
     ? "正在释放…"
     : captureOperation === "connecting_preview"
@@ -1423,52 +1602,94 @@ function CapturePage(props: any) {
         ? "释放预览设备"
         : "连接预览设备";
   return (
-    <main>
-      <section className="controls panel">
-        <label>采集场次 ID（自动）<input value={collection} readOnly disabled={interactionBlocked || active || busy} /></label>
-        <button disabled={interactionBlocked || active || busy} onClick={() => setCollection(nextCollectionId(collection))}>下一个采集场次</button>
-        <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">测试数据（不进入训练）</option><option value="prod">正式数据（需通过质量门禁）</option></select></label>
-        <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product} · {item.device}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
-        <button disabled={interactionBlocked || active || busy} onClick={() => refreshCameras(true)}>重新扫描摄像头</button>
-        {imuCandidates.length > 1 && <label>IMU 设备<select value={imuLocalDeviceId} onChange={(e) => setImuLocalDeviceId(e.target.value)} disabled={interactionBlocked || active || busy}>{imuCandidates.map((item: ImuCandidate) => <option key={item.local_device_id} value={item.local_device_id}>{item.name || "CW12EU-T"} · {item.local_device_id}</option>)}</select></label>}
-        {imuBinding?.state === "bound" && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={forgetImuBinding}>忘记已绑定 IMU</button>}
-        <button disabled={interactionBlocked || active || busy || anotherSession || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{previewButtonLabel}</button>
-        {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>重试失败设备</button>}
-        {!active ? <button className="primary" disabled={interactionBlocked || busy || anotherSession || !cameraId} onClick={start}>{captureOperation === "starting_recording" ? "正在准备…" : "开始录制"}</button> : <button className="danger" disabled={interactionBlocked || busy} onClick={stop}>{captureOperation === "stopping_recording" ? "正在结束…" : "结束录制"}</button>}
+    <main className="capture-workbench">
+      {!liveFresh && <div className="error-banner live-stale-banner"><strong>实时状态不可用</strong><span>{liveTransport === "reconnecting" ? "WebSocket 已断开，正在自动重连。" : "正在建立实时连接。"} 上次更新：{Number.isFinite(liveAgeMs) ? `${(liveAgeMs / 1000).toFixed(1)} 秒前` : "尚未收到"}。下方实时值显示为“—”，不会用旧值冒充当前状态。</span></div>}
+      <section className="panel capture-setup-card">
+        <div className="capture-setup-heading"><div><span className="step-kicker">STEP 1 · 本次采集</span><div className="panel-title">确认场次与数据级别</div></div><span className={`readiness ${ready ? "ready" : "not-ready"}`}>{readinessLabel}</span></div>
+        <div className="capture-setup-grid">
+          <label>采集场次 ID<input value={collection} readOnly disabled={interactionBlocked || active || busy} /></label>
+          <button className="field-action" disabled={interactionBlocked || active || busy} onClick={() => setCollection(nextCollectionId(collection))}>下一个场次</button>
+          <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">测试 · 不进入训练</option><option value="prod" disabled={selectedProfile && !selectedProfile.prod_capture_enabled}>正式 · 需权威配置</option></select></label>
+          <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
+          <button className="field-action" disabled={interactionBlocked || active || busy} onClick={() => refreshCameras(true)}>扫描摄像头</button>
+          <label>IMU 设备<select value={sensorSn} onChange={(e) => selectSensor(e.target.value)} disabled={interactionBlocked || active || busy || devicesPreview}><option value="">请选择固定 SN…</option>{imuProfiles.filter((item: ImuProfile) => item.selectable).map((item: ImuProfile) => <option key={item.sensor_sn} value={item.sensor_sn}>{item.sensor_sn} · {item.display_name}</option>)}</select></label>
+          <button className="field-action" disabled={interactionBlocked || active || busy || devicesPreview} onClick={scanImu}>查找附近 IMU</button>
+        </div>
+        <div className="capture-config-line">
+          <span>配置 Snapshot</span><code>{configurationStatus?.selected_snapshot_id ?? "正在读取…"}</code><span className={`config-pill config-pill-${configurationStatus?.selected_state ?? "loading"}`}>{configurationStatus?.selected_state ?? "loading"}</span>{configurationStatus?.manually_pinned && <span className="config-pill">人工固定</span>}<button onClick={() => openSettings()}>查看或切换</button>
+        </div>
+        {bleScan?.requested && <div className="ble-scan-summary">
+          <strong>最近一次附近设备发现</strong>
+          <span>{bleScan.error
+            ? `失败 · ${bleScan.adapter_state}`
+            : `发现 ${imuCandidates.length} 台符合条件的 IMU · ${(bleScan.elapsed_ms / 1000).toFixed(1)} 秒`}</span>
+          <small>仅扫描广播；尚未连接、订阅数据或修改设备登记。完整结果在“设备与设置 → 诊断与运行环境”。</small>
+        </div>}
+        {imuCandidates.length > 1 && <label className="local-ble-choice">检测到多个 BLE 设备，请选择本机标识<select value={imuLocalDeviceId} onChange={(e) => setImuLocalDeviceId(e.target.value)} disabled={interactionBlocked || active || busy}>{imuCandidates.filter((item: ImuCandidate) => !item.matched_sensor_sns.length || item.matched_sensor_sns.includes(sensorSn)).map((item: ImuCandidate) => <option key={item.local_device_id} value={item.local_device_id}>{item.name || "IMU"} · {item.local_device_id}</option>)}</select></label>}
+        {imuCandidates.some((item: ImuCandidate) => item.registration_state === "unregistered") && <div className="warning-banner">扫描发现未登记设备。请到“设备与设置”先永久保留 SN 并写入配置 Snapshot，避免临时编号污染采集证据。 <button onClick={() => openSettings("devices")}>打开设备设置</button></div>}
       </section>
-      <section className="metrics">
-        <Metric label="摄像头输入实时 FPS" value={(live.video?.source_fps ?? live.video?.fps ?? 0).toFixed(1)} warn={(live.video?.source_fps ?? live.video?.fps ?? 0) > 0 && (live.video?.source_fps ?? live.video?.fps ?? 0) < 29} />
-        <Metric label={`浏览器预览实时 FPS（上限 ${live.video?.preview_fps_limit ?? 10}）`} value={(live.video?.preview_fps ?? 0).toFixed(1)} />
-        <Metric label="视频帧" value={live.video?.frame ?? 0} />
-        <Metric label="IMU 通知包" value={live.imu?.packet_count ?? 0} />
-        <Metric label="IMU 样本" value={live.imu?.sample_count ?? 0} />
-        <Metric label="IMU 估算频率" value={`${(live.imu?.estimated_sample_rate_hz ?? 0).toFixed(2)} Hz`} />
-        <Metric label="最后一包" value={live.imu?.last_packet_age_ms == null ? "—" : `${live.imu.last_packet_age_ms.toFixed(0)} ms 前`} warn={live.imu?.connected && (live.imu?.last_packet_age_ms ?? 0) > 2000} />
-        <Metric label="BLE 连接" value={live.imu?.connected ? "已连接" : "未连接"} warn={!live.imu?.connected} />
-        <Metric label="设备状态" value={stateLabel(live.device?.state ?? "—")} warn={["error", "reconnecting"].includes(live.device?.state)} />
-        <Metric label="解析/回调丢弃" value={`${live.imu?.parse_errors ?? 0} / ${live.imu?.callback_drops ?? 0}`} warn={(live.imu?.parse_errors ?? 0) > 0 || (live.imu?.callback_drops ?? 0) > 0} />
-        <Metric label="剩余磁盘" value={`${(live.free_disk_gib ?? 0).toFixed(1)} GiB`} />
+
+      <section className="capture-health-strip" aria-label="采集健康状态">
+        <Metric label="实时通道" value={liveFresh ? "正常" : "不可用"} warn={!liveFresh} />
+        <Metric label="摄像头输入" value={liveFresh && monitoringRequested ? `${(telemetry.video?.source_fps ?? telemetry.video?.fps ?? 0).toFixed(1)} FPS` : "—"} warn={liveFresh && monitoringRequested && (telemetry.video?.source_fps ?? telemetry.video?.fps ?? 0) < 29} />
+        <Metric label="BLE" value={liveFresh && monitoringRequested ? telemetry.imu?.connected ? "已连接" : "未连接" : "—"} warn={liveFresh && monitoringRequested && !telemetry.imu?.connected} />
+        <Metric label="IMU 频率" value={liveFresh && telemetry.imu?.estimated_sample_rate_hz ? `${telemetry.imu.estimated_sample_rate_hz.toFixed(2)} Hz` : "—"} />
+        <Metric label="最后一包" value={liveFresh && telemetry.imu?.last_packet_age_ms != null ? `${telemetry.imu.last_packet_age_ms.toFixed(0)} ms 前` : "—"} warn={liveFresh && telemetry.imu?.connected && (telemetry.imu?.last_packet_age_ms ?? 0) > 2000} />
+        <Metric label="剩余磁盘" value={liveFresh && telemetry.free_disk_gib != null ? `${telemetry.free_disk_gib.toFixed(1)} GiB` : "—"} warn={liveFresh && (telemetry.free_disk_gib ?? 999) < 20} />
       </section>
+
+      {selectedProfile && !selectedProfile.prod_capture_enabled && <div className="warning-banner">{selectedProfile.sensor_sn} 尚处于 {selectedProfile.lifecycle}，只允许 test；候选单位系数仅用于屏幕诊断。</div>}
+      {selectedProfile?.protocol_supported === false && <div className="error-banner">{selectedProfile.unsupported_reason ?? `当前版本不支持 ${selectedProfile.protocol_id}`}</div>}
+      {!sensorSn && <div className="warning-banner">开始预览或录制前必须人工选择一个 IMU SN。</div>}
+      {live.imu?.candidate_si_diagnostic_only && <div className="warning-banner">候选 SI（仅屏幕诊断；H5 保留原始帧并记录非权威候选元数据）：{(live.imu.candidate_si ?? []).map((value: number | null) => value == null ? "—" : value.toFixed(4)).join(" / ")}</div>}
       <section className="capture-grid">
-        <div className="panel camera-panel">
-          <div className="panel-title">实时画面 · 仅本机{devicesPreview ? " · 预览不落盘" : ""}</div>
+        <div className={`panel camera-panel ${focusCamera ? "camera-focus" : ""}`}>
+          <div className="panel-heading-row"><div><span className="step-kicker">STEP 2 · 画面确认</span><div className="panel-title">实时画面{devicesPreview ? " · 预览不落盘" : ""}</div></div><button disabled={!monitoringRequested} onClick={() => setFocusCamera((value) => !value)}>{focusCamera ? "退出专注" : "专注查看"}</button></div>
           {ownsCaptureTab && monitoringRequested && previewStreamId > 0 ? <div className="preview-stage"><img key={previewStreamId} src={`/api/v1/preview.mjpeg?stream=${previewStreamId}&retry=${previewRetry}`} onError={() => { if (previewRetry < 3) window.setTimeout(() => setPreviewRetry((value) => Math.min(value + 1, 3)), 500); }} alt="摄像头实时预览" />{live.video?.transition && <div className="preview-overlay">摄像头正在切换，暂时保留最后一帧…</div>}{previewRetry >= 3 && <div className="preview-overlay preview-overlay-error"><span>浏览器预览流连续失败 3 次</span><button onClick={() => setPreviewRetry(0)}>重试画面</button></div>}</div> : <div className="placeholder">{ownsCaptureTab ? "连接预览设备后显示实时画面" : "设备由另一个标签页预览"}</div>}
+          {focusCamera && <button className="focus-close" onClick={() => setFocusCamera(false)}>退出专注（Esc）</button>}
         </div>
         <div className="panel chart-panel">
-          <div className="panel-title">IMU 六轴实时曲线 · 最近 120 秒 · 当前为原始计数{devicesPreview ? " · 预览不落盘" : ""}</div>
+          <div><span className="step-kicker">STEP 2 · 信号确认</span><div className="panel-title">IMU 六轴原始计数 · 最近 120 秒{devicesPreview ? " · 预览不落盘" : ""}</div></div>
           <Plot time={chart.t} values={chart.values} />
         </div>
       </section>
-      {[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].length > 0 && <div className="issues"><strong>上一次录制待办（不影响当前设备预览）</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {issueCount > 0 && <div className="issues"><strong>上一次录制待办（{issueCount}，不影响当前设备预览）</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
       {(live.recording?.quality_warnings ?? []).length > 0 && <div className="warning-banner"><strong>上一次录制质量警告（允许发布）</strong>{live.recording.quality_warnings.map((warning: string) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
       {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div>{live.device?.error?.hint && <div>{userVisibleMessage(live.device.error.hint)}</div>}</div>}
       {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
       {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0} / 3 次自动重连。</div>}
+      <details className="panel technical-details" open={Boolean(live.preview_error || live.video?.camera_control_errors?.length || issueCount)}>
+        <summary>技术详情与排障数据{issueCount ? ` · ${issueCount} 项待检查` : ""}</summary>
+        <section className="metrics technical-metrics">
+          <Metric label="当前 IMU SN" value={(activeImu?.sensor_sn ?? sensorSn) || "—"} />
+          <Metric label="协议" value={activeImu?.protocol ?? selectedProfile?.protocol_id ?? "—"} />
+          <Metric label={`浏览器预览（上限 ${telemetry.video?.preview_fps_limit ?? 10}）`} value={liveFresh && monitoringRequested ? `${(telemetry.video?.preview_fps ?? 0).toFixed(1)} FPS` : "—"} />
+          <Metric label="视频帧" value={liveFresh && monitoringRequested ? telemetry.video?.frame ?? 0 : "—"} />
+          <Metric label="IMU 通知包" value={liveFresh && monitoringRequested ? telemetry.imu?.packet_count ?? 0 : "—"} />
+          <Metric label="IMU 样本" value={liveFresh && monitoringRequested ? telemetry.imu?.sample_count ?? 0 : "—"} />
+          <Metric label="设备本地时间" value={liveFresh && telemetry.imu?.device_time_ms != null ? `${telemetry.imu.device_time_ms} ms（非世界时间）` : "—"} />
+          <Metric label="设备状态" value={liveFresh ? stateLabel(telemetry.device?.state ?? "—") : "—"} warn={liveFresh && ["error", "reconnecting"].includes(telemetry.device?.state)} />
+          <Metric label="解析 / 回调丢弃" value={liveFresh && monitoringRequested ? `${telemetry.imu?.parse_errors ?? 0} / ${telemetry.imu?.callback_drops ?? 0}` : "—"} warn={liveFresh && ((telemetry.imu?.parse_errors ?? 0) > 0 || (telemetry.imu?.callback_drops ?? 0) > 0)} />
+          <Metric label="Snapshot SHA" value={configurationStatus?.selected_snapshot_sha256?.slice(0, 12) ?? "—"} />
+        </section>
+        <div className="save-row">
+          {selectedProfile && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={() => openSettings("devices", sensorSn)}>在设置中编辑候选 SI</button>}
+          {imuBinding?.state === "bound" && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={forgetImuBinding}>忘记本机 BLE 绑定</button>}
+        </div>
+      </details>
+      <section className="capture-action-bar">
+        <div><span className="step-kicker">STEP 3 · 执行</span><strong>{active ? `正在录制 ${collection}` : devicesPreview ? "设备已连接，可检查画面和曲线" : ready ? "配置完整，可先连接预览" : "请选择摄像头和 IMU"}</strong><small>{configurationStatus ? `${configurationStatus.selected_snapshot_id} · ${dataTier === "prod" ? "正式数据" : "测试数据"}` : "正在读取配置"}</small></div>
+        <div className="capture-action-buttons">
+          <button disabled={interactionBlocked || (!liveFresh && !devicesPreview) || active || busy || anotherSession || !sensorSn || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{previewButtonLabel}</button>
+          {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>重试设备</button>}
+          {!active ? <button className="primary capture-primary-action" disabled={interactionBlocked || !liveFresh || busy || anotherSession || !ready} onClick={start}>{captureOperation === "starting_recording" ? "正在准备…" : "开始录制"}</button> : <button className="danger capture-primary-action" disabled={interactionBlocked || busy} onClick={stop}>{captureOperation === "stopping_recording" ? "正在结束…" : "结束录制"}</button>}
+        </div>
+      </section>
     </main>
   );
 }
 
-function CharacterizationPage({ live, allowedUnikeys, chart, interactionBlocked }: { live: any; allowedUnikeys: string[]; chart: { t: number[]; values: number[][] }; interactionBlocked: boolean }) {
+function CharacterizationPage({ live, allowedUnikeys, chart, interactionBlocked, sensorSn }: { live: any; allowedUnikeys: string[]; chart: { t: number[]; values: number[][] }; interactionBlocked: boolean; sensorSn: string }) {
   const [operator, setOperator] = useState("xfan0282");
   const [stage, setStage] = useState(characterizationStages[0][0]);
   const [notes, setNotes] = useState("");
@@ -1500,7 +1721,7 @@ function CharacterizationPage({ live, allowedUnikeys, chart, interactionBlocked 
     </section>
     <section className="controls panel">
       <label>操作者 UniKey<select value={operator} disabled={interactionBlocked || active || busy} onChange={(e) => setOperator(e.target.value)}>{allowedUnikeys.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
-      {!active ? <button className="primary" disabled={interactionBlocked || busy || live.state === "recording"} onClick={() => invoke("/api/v1/characterizations/start", { operator_id: operator, notes })}>开始 IMU-only 表征</button> : <button className="danger" disabled={interactionBlocked} onClick={() => invoke("/api/v1/characterizations/stop")}>结束并生成报告</button>}
+      {!active ? <button className="primary" disabled={interactionBlocked || busy || live.state === "recording"} onClick={() => invoke("/api/v1/characterizations/start", { operator_id: operator, notes, sensor_sn: sensorSn || null })}>开始 IMU-only 表征</button> : <button className="danger" disabled={interactionBlocked} onClick={() => invoke("/api/v1/characterizations/stop")}>结束并生成报告</button>}
     </section>
     <section className="metrics">
       <Metric label="BLE 连接" value={live.imu?.connected ? "已连接" : "未连接"} warn={!live.imu?.connected} />

@@ -1,3 +1,5 @@
+import struct
+
 import numpy as np
 import pytest
 
@@ -7,6 +9,7 @@ from imu_data_collector.cw12eu import (
     classify_notification,
     pack_test_frame,
     parse_notification,
+    reconstruct_device_clock_times,
     reconstruct_sample_times,
 )
 
@@ -44,6 +47,47 @@ def test_notification_parser_preserves_all_candidate_fields() -> None:
 def test_notification_parser_rejects_partial_frame() -> None:
     with pytest.raises(ValueError, match="not a multiple"):
         parse_notification(b"\x00" * 15)
+
+
+def test_parse_acce_gyro_abf0_notification_preserves_six_little_endian_channels() -> None:
+    payload = struct.pack(
+        "<6hQ", -1852, 8132, 19774, -170, 22, -65, 175_000
+    ) + b"\r\n"
+
+    assert (
+        classify_notification(payload, 22, "acce_gyro_abf0_v1")
+        == NotificationKind.IMU_SAMPLES
+    )
+    parsed = parse_notification(payload, 22, "acce_gyro_abf0_v1")
+
+    np.testing.assert_array_equal(
+        parsed.raw_counts,
+        np.asarray([[-1852, 8132, 19774, -170, 22, -65]], dtype=np.int16),
+    )
+    assert parsed.trailer is None
+    np.testing.assert_array_equal(parsed.device_time_ms, np.asarray([175_000]))
+
+
+def test_acce_gyro_abf0_rejects_missing_crlf_suffix() -> None:
+    payload = struct.pack("<6hQ", 1, 2, 3, 4, 5, 6, 20) + b"\x00\x00"
+
+    assert (
+        classify_notification(payload, 22, "acce_gyro_abf0_v1")
+        == NotificationKind.UNKNOWN_INVALID
+    )
+    with pytest.raises(ValueError, match="CRLF"):
+        parse_notification(payload, 22, "acce_gyro_abf0_v1")
+
+
+def test_acce_gyro_abf0_rejects_multiple_frames_in_one_notification() -> None:
+    frame = struct.pack("<6hQ", 1, 2, 3, 4, 5, 6, 20) + b"\r\n"
+
+    assert (
+        classify_notification(frame * 2, 22, "acce_gyro_abf0_v1")
+        == NotificationKind.UNKNOWN_INVALID
+    )
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_notification(frame * 2, 22, "acce_gyro_abf0_v1")
 
 
 def test_unverified_scales_produce_nan_instead_of_guessed_units() -> None:
@@ -87,3 +131,23 @@ def test_packet_end_fit_reconstructs_monotonic_sample_clock() -> None:
     assert np.all(np.diff(times) > 0)
     assert rate == pytest.approx(30.0, rel=0.01)
     assert residual < 2_000_000
+
+
+def test_device_clock_mapping_uses_full_uint64_ticks_and_detects_epochs() -> None:
+    ticks = np.asarray([2**32 + 100, 2**32 + 120, 10, 30], dtype=np.uint64)
+    packet_indices = np.arange(4, dtype=np.int64)
+    receive = np.asarray(
+        [1_000_500_000, 1_020_500_000, 1_100_400_000, 1_120_400_000],
+        dtype=np.int64,
+    )
+
+    times, epochs, rate, residual, mappings = reconstruct_device_clock_times(
+        ticks, packet_indices, receive
+    )
+
+    assert np.all(np.diff(times) > 0)
+    assert epochs.tolist() == [0, 0, 1, 1]
+    assert rate == 0.0
+    assert residual < 1.0
+    assert mappings[0]["first_device_time_ms"] == 2**32 + 100
+    assert len(mappings) == 2

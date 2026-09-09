@@ -214,6 +214,12 @@ def validate_capture_h5(
                 for name in ("ble_backend", "local_device_id"):
                     if not str(handle["imu"].attrs.get(name, "")):
                         issues.append(f"missing IMU runtime attribute {name}")
+                for name in ("sensor_sn", "device_profile_sha256", "protocol"):
+                    if not str(handle["imu"].attrs.get(name, "")):
+                        issues.append(f"missing IMU device attribute {name}")
+            for name in ("sensor_sn", "device_profile_sha256"):
+                if not str(handle.attrs.get(name, "")):
+                    issues.append(f"missing capture device attribute {name}")
         if data_tier not in {"test", "prod"}:
             issues.append(f"invalid data_tier: {data_tier}")
         if training_eligible and data_tier != "prod":
@@ -224,13 +230,28 @@ def validate_capture_h5(
             "imu/packets/receive_time_ns",
             "imu/packets/sample_count",
             "imu/samples/raw_counts",
-            "imu/samples/trailer",
             "imu/samples/packet_index",
             "imu/samples/sample_in_packet",
             "imu/samples/time_monotonic_ns",
             "imu/samples/recording_time_ns",
             "imu/samples/values_si",
         )
+        protocol = (
+            str(handle["imu"].attrs.get("protocol", "cw12eu_v1"))
+            if "imu" in handle
+            else ""
+        )
+        uses_device_clock = (
+            schema_version == CAPTURE_SCHEMA_VERSION
+            and protocol == "acce_gyro_abf0_v1"
+        )
+        if uses_device_clock:
+            required += (
+                "imu/samples/device_time_ms",
+                "imu/samples/device_clock_epoch",
+            )
+        else:
+            required += ("imu/samples/trailer",)
         if schema_version in MODERN_CAPTURE_SCHEMA_VERSIONS:
             required += (
                 "imu/packets/packet_kind",
@@ -271,7 +292,17 @@ def validate_capture_h5(
             else None
         )
         raw_counts = handle["imu/samples/raw_counts"]
-        trailer = handle["imu/samples/trailer"]
+        trailer = handle.get("imu/samples/trailer")
+        device_time_ms = (
+            np.asarray(handle["imu/samples/device_time_ms"], dtype=np.uint64)
+            if uses_device_clock
+            else None
+        )
+        device_clock_epoch = (
+            np.asarray(handle["imu/samples/device_clock_epoch"], dtype=np.uint32)
+            if uses_device_clock
+            else None
+        )
         packet_index = handle["imu/samples/packet_index"]
         sample_in_packet = handle["imu/samples/sample_in_packet"]
         sample_times = np.asarray(handle["imu/samples/time_monotonic_ns"], dtype=np.int64)
@@ -393,7 +424,6 @@ def validate_capture_h5(
                 )
         sample_lengths = {
             sample_count,
-            len(trailer),
             len(packet_index),
             len(sample_in_packet),
             len(sample_times),
@@ -401,6 +431,12 @@ def validate_capture_h5(
             len(aligned_times),
             len(values_si),
         }
+        if trailer is not None:
+            sample_lengths.add(len(trailer))
+        if device_time_ms is not None:
+            sample_lengths.add(len(device_time_ms))
+        if device_clock_epoch is not None:
+            sample_lengths.add(len(device_clock_epoch))
         if len(sample_lengths) != 1:
             issues.append("IMU sample datasets have inconsistent lengths")
         if sample_count and np.any(np.diff(sample_times) <= 0):
@@ -411,8 +447,32 @@ def validate_capture_h5(
             issues.append("IMU aligned timestamps are not strictly increasing")
         if raw_counts.shape != (sample_count, 6):
             issues.append("raw_counts must have shape (N, 6)")
-        if trailer.shape != (sample_count, 4):
+        if trailer is not None and trailer.shape != (sample_count, 4):
             issues.append("trailer must have shape (N, 4)")
+        if uses_device_clock:
+            assert device_time_ms is not None
+            assert device_clock_epoch is not None
+            if device_time_ms.shape != (sample_count,):
+                issues.append("device_time_ms must have shape (N,)")
+            if device_clock_epoch.shape != (sample_count,):
+                issues.append("device_clock_epoch must have shape (N,)")
+            if sample_count:
+                for epoch in np.unique(device_clock_epoch):
+                    ticks = device_time_ms[device_clock_epoch == epoch]
+                    if len(ticks) > 1 and np.any(np.diff(ticks) <= 0):
+                        issues.append(
+                            "device_time_ms must be strictly increasing within each epoch"
+                        )
+                        break
+            reset_count = int(handle["imu"].attrs.get("device_clock_reset_count", -1))
+            observed_resets = (
+                int(device_clock_epoch.max()) if len(device_clock_epoch) else 0
+            )
+            metrics["device_clock_reset_count"] = observed_resets
+            if reset_count != observed_resets:
+                issues.append("device_clock_reset_count attribute mismatch")
+            if data_tier == "prod" and observed_resets:
+                issues.append("prod capture contains a device clock reset")
         if values_si.shape != (sample_count, 6):
             issues.append("values_si must have shape (N, 6)")
         calibrated = bool(handle.attrs.get("calibration_verified", False))

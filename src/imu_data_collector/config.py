@@ -22,10 +22,19 @@ from imu_data_collector.host import (
 
 @dataclass(slots=True)
 class ImuSettings:
+    sensor_sn: str = "legacy-unassigned"
+    device_profile_sha256: str | None = None
+    device_registry_revision: int | None = None
+    device_registry_snapshot_sha256: str | None = None
     name: str = "CW12EU-T"
     address: str = "83:FC:90:14:1E:A4"
     local_device_id: str | None = None
     notify_uuid: str = "00002ae1-0000-1000-8000-00805f9b34fb"
+    protocol: Literal["cw12eu_v1", "acce_gyro_abf0_v1"] = "cw12eu_v1"
+    # CW12EU-T 同时暴露经典蓝牙与 BLE，需要显式选择 LE；纯 BLE 设备应关闭。
+    force_le_bearer: bool = True
+    # 临时、未校准设备必须显式禁止正式数据录制，而不能只依赖前端默认值。
+    prod_capture_enabled: bool = True
     expected_rate_hz: float = 25.0
     expected_rate_status: str = "short_probe_observed_2026-08-25_pending_long_run"
     frame_size_bytes: int = 16
@@ -39,6 +48,25 @@ class ImuSettings:
     axis_signs: tuple[int, int, int] = (1, 1, 1)
     calibration_method: str = "unverified"
     calibration_evidence_sha256: str | None = None
+    calibration_evidence_path: Path | None = None
+    firmware_version: str = "unknown"
+    firmware_evidence_status: str = "unknown"
+    candidate_accel_counts_per_g: float | None = None
+    candidate_gyro_counts_per_dps: float | None = None
+    candidate_accel_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    candidate_gyro_bias_counts: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    candidate_raw_axis_order: tuple[int, int, int] = (0, 1, 2)
+    candidate_axis_signs: tuple[int, int, int] = (1, 1, 1)
+    candidate_conversion_sha256: str | None = None
+    candidate_conversion_source: str | None = None
+    # Whole-fleet configuration identity frozen at preview/recording selection.
+    configuration_snapshot_id: str | None = None
+    configuration_snapshot_sha256: str | None = None
+    configuration_content_sha256: str | None = None
+    configuration_source: str | None = None
+    configuration_approval_state: str | None = None
+    configuration_checked_at_utc: str | None = None
+    si_profile_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -169,6 +197,25 @@ class Settings:
     catalog_path: Path = field(default_factory=lambda: user_data_dir() / "catalog.sqlite3")
     activity_taxonomy_path: Path = Path("configs/activities.yaml")
     calibration_evidence_path: Path = Path("configs/calibration-evidence.yaml")
+    device_registry_path: Path = Path("configs/imu-devices.yaml")
+    device_drafts_path: Path = field(
+        default_factory=lambda: user_data_dir() / "imu-device-drafts.json"
+    )
+    device_candidates_path: Path = field(
+        default_factory=lambda: user_data_dir() / "imu-device-candidates.json"
+    )
+    device_registry_cache_path: Path = field(
+        default_factory=lambda: user_cache_dir() / "imu-devices.json"
+    )
+    device_configuration_root: Path = field(
+        default_factory=lambda: user_data_dir() / "device-config"
+    )
+    device_configuration_cache_root: Path = field(
+        default_factory=lambda: user_cache_dir() / "device-config"
+    )
+    device_registry_auto_refresh: bool = False
+    require_explicit_sensor_selection: bool = False
+    default_sensor_sn: str | None = None
     server_host: str = "127.0.0.1"
     server_port: int = 8765
     minimum_free_gib: int = 20
@@ -183,6 +230,44 @@ class Settings:
     auth: AuthSettings = field(default_factory=AuthSettings)
     annotation: AnnotationSettings = field(default_factory=AnnotationSettings)
     identity: IdentitySettings = field(default_factory=IdentitySettings)
+    device_registry_bootstrap_path: Path | None = field(default=None, init=False)
+    device_registry_source: str = field(default="bundled", init=False)
+    configuration_manager: Any | None = field(default=None, init=False, repr=False)
+
+    def resolve_imu(
+        self,
+        sensor_sn: str,
+        *,
+        local_device_id: str | None = None,
+    ) -> ImuSettings:
+        """Resolve a tracked or local commissioning profile for one session."""
+
+        if self.configuration_manager is not None:
+            resolved = self.configuration_manager.resolve_imu(sensor_sn)
+        else:
+            from imu_data_collector.device_registry import (
+                DeviceCandidateStore,
+                DeviceDraftStore,
+                resolve_available_imu_settings,
+            )
+
+            resolved, _profile, _source = resolve_available_imu_settings(
+                self.device_registry_path,
+                sensor_sn,
+                DeviceDraftStore(self.device_drafts_path),
+                DeviceCandidateStore(self.device_candidates_path),
+            )
+        if local_device_id:
+            resolved.local_device_id = local_device_id
+        elif platform_id() == "macos":
+            binding = DeviceBindingStore().load_imu(
+                sensor_sn=resolved.sensor_sn,
+                expected_name=resolved.name,
+                notify_uuid=resolved.notify_uuid,
+            )
+            if binding is not None:
+                resolved.local_device_id = binding.local_device_id
+        return resolved
 
     def resolve_paths(self, project_root: Path) -> None:
         self.data_root = self.data_root.expanduser().resolve()
@@ -190,11 +275,25 @@ class Settings:
         self.storage.root = self.storage.root.expanduser().resolve()
         self.storage.cache_root = self.storage.cache_root.expanduser().resolve()
         self.annotation.catalog_path = self.annotation.catalog_path.expanduser().resolve()
-        for name in ("activity_taxonomy_path", "calibration_evidence_path"):
+        self.device_drafts_path = self.device_drafts_path.expanduser().resolve()
+        self.device_candidates_path = self.device_candidates_path.expanduser().resolve()
+        self.device_registry_cache_path = (
+            self.device_registry_cache_path.expanduser().resolve()
+        )
+        self.device_configuration_root = self.device_configuration_root.expanduser().resolve()
+        self.device_configuration_cache_root = (
+            self.device_configuration_cache_root.expanduser().resolve()
+        )
+        for name in (
+            "activity_taxonomy_path",
+            "calibration_evidence_path",
+            "device_registry_path",
+        ):
             path = getattr(self, name).expanduser()
             if not path.is_absolute():
                 path = project_root / path
             setattr(self, name, path.resolve())
+        self.device_registry_bootstrap_path = self.device_registry_path
         if (
             self.imu.calibration_verified
             and self.imu.calibration_evidence_sha256 is None
@@ -203,6 +302,35 @@ class Settings:
             self.imu.calibration_evidence_sha256 = hashlib.sha256(
                 self.calibration_evidence_path.read_bytes()
             ).hexdigest()
+
+    def use_cached_device_registry_if_newer(self) -> bool:
+        """Select a valid LKG cache only when it is not older than the bootstrap."""
+
+        if not self.device_registry_auto_refresh or not self.device_registry_cache_path.is_file():
+            return False
+        from imu_data_collector.device_registry import (
+            load_device_registry,
+            validate_registry_cache,
+        )
+
+        try:
+            cached = validate_registry_cache(self.device_registry_cache_path)
+            bundled = load_device_registry(self.device_registry_path)
+        except (OSError, ValueError):
+            return False
+        if cached.registry_revision < bundled.registry_revision:
+            return False
+        self.device_registry_bootstrap_path = self.device_registry_path
+        self.device_registry_path = self.device_registry_cache_path
+        self.device_registry_source = "lkg_cache"
+        if self.default_sensor_sn:
+            from imu_data_collector.device_registry import resolve_imu_settings
+
+            self.imu = resolve_imu_settings(
+                self.device_registry_path,
+                self.default_sensor_sn,
+            )
+        return True
 
 
 def _construct_settings(payload: dict[str, Any]) -> Settings:
@@ -214,6 +342,10 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         "gyro_bias_counts",
         "raw_axis_order",
         "axis_signs",
+        "candidate_accel_bias_counts",
+        "candidate_gyro_bias_counts",
+        "candidate_raw_axis_order",
+        "candidate_axis_signs",
     ):
         if tuple_key in imu_values:
             imu_values[tuple_key] = tuple(imu_values[tuple_key])
@@ -277,6 +409,12 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         "catalog_path",
         "activity_taxonomy_path",
         "calibration_evidence_path",
+        "device_registry_path",
+        "device_drafts_path",
+        "device_candidates_path",
+        "device_registry_cache_path",
+        "device_configuration_root",
+        "device_configuration_cache_root",
     ):
         if key in values:
             values[key] = Path(values[key])
@@ -296,7 +434,11 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     )
 
 
-def load_settings(config_path: Path | None = None) -> Settings:
+def load_settings(
+    config_path: Path | None = None,
+    *,
+    resolve_default_imu: bool = True,
+) -> Settings:
     project_root = application_root()
     chosen = config_path or Path(
         os.environ.get("IMU_COLLECTOR_CONFIG", project_root / "configs/default.yaml")
@@ -319,8 +461,16 @@ def load_settings(config_path: Path | None = None) -> Settings:
     if broker_server_port := os.environ.get("IMU_UPLOAD_BROKER_PORT"):
         settings.cloud.broker_server_port = int(broker_server_port)
     settings.resolve_paths(project_root)
+    if settings.default_sensor_sn and resolve_default_imu:
+        from imu_data_collector.device_registry import resolve_imu_settings
+
+        settings.imu = resolve_imu_settings(
+            settings.device_registry_path,
+            settings.default_sensor_sn,
+        )
     if platform_id() == "macos" and settings.imu.local_device_id is None:
         binding = DeviceBindingStore().load_imu(
+            sensor_sn=settings.imu.sensor_sn,
             expected_name=settings.imu.name,
             notify_uuid=settings.imu.notify_uuid,
         )

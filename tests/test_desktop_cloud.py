@@ -25,7 +25,17 @@ from imu_data_collector.config import (
     load_settings,
 )
 from imu_data_collector.desktop_auth import DesktopOAuthManager
+from imu_data_collector.device_configuration import (
+    ConfigurationSnapshotSubmission,
+    bootstrap_snapshot_from_registry,
+)
+from imu_data_collector.device_registry import (
+    REGISTRY_PREFIX,
+    load_device_registry,
+    publish_device_registry,
+)
 from imu_data_collector.models import ArtifactDescriptor, CaptureManifestV2
+from imu_data_collector.storage import LocalFilesystemStore
 
 
 def test_pyinstaller_bundles_every_build_id_source() -> None:
@@ -87,6 +97,11 @@ def test_packaged_desktop_config_never_contains_client_secret(tmp_path: Path) ->
     assert payload["publish"]["mode"] == "broker"
     assert payload["cloud"]["broker_url"] == "https://upload.example.test"
     assert "google_oauth_client_secret" not in payload["cloud"]
+    assert payload["default_sensor_sn"] is None
+    assert payload["require_explicit_sensor_selection"] is True
+    assert payload["device_registry_auto_refresh"] is True
+    assert (output / "imu-devices.yaml").is_file()
+    assert (output / "device-config-bootstrap.lock.json").is_file()
 
 
 def test_desktop_oauth_uses_pkce_and_stores_refresh_token_and_display_email(monkeypatch) -> None:
@@ -388,6 +403,166 @@ def _broker_settings(tmp_path: Path) -> Settings:
             email_to_unikey={"member@example.com": "xfan0282"}
         ),
     )
+
+
+def _seed_registry_bucket(tmp_path: Path, bucket: _FakeBucket) -> dict:
+    store = LocalFilesystemStore(tmp_path / "registry-objects")
+    published = publish_device_registry(
+        store, Path("configs/imu-devices.yaml").resolve()
+    )
+    for key in (
+        f"{REGISTRY_PREFIX}/current.json",
+        published["snapshot_object_key"],
+    ):
+        payload, _generation = store.read_json(key)
+        bucket.blob(key).upload_from_string(json.dumps(payload))
+    return published
+
+
+def test_upload_broker_serves_only_authenticated_current_registry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bucket = _FakeBucket()
+    published = _seed_registry_bucket(tmp_path, bucket)
+    _patch_broker_storage(monkeypatch, bucket)
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    with TestClient(app) as client:
+        unauthorized = client.get("/v1/device-registry/current")
+        current = client.get(
+            "/v1/device-registry/current",
+            headers={"Authorization": "Bearer signed-id-token"},
+        )
+        snapshot = client.get(
+            f"/v1/device-registry/snapshots/{published['snapshot_sha256']}",
+            headers={"Authorization": "Bearer signed-id-token"},
+        )
+
+    assert unauthorized.status_code == 401
+    assert current.status_code == 200
+    assert current.headers["cache-control"] == "no-store"
+    assert current.json()["registry_revision"] == 1
+    assert snapshot.status_code == 200
+    assert snapshot.json()["snapshot_sha256"] == published["snapshot_sha256"]
+
+
+def test_upload_broker_v2_allocates_sn_and_accepts_immutable_candidate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bucket = _FakeBucket()
+    _patch_broker_storage(monkeypatch, bucket)
+    configuration_objects = LocalFilesystemStore(tmp_path / "device-configuration")
+    monkeypatch.setattr(
+        upload_broker,
+        "GcsObjectStore",
+        lambda _bucket, _project: configuration_objects,
+    )
+    monkeypatch.setattr(
+        upload_broker.google_id_token,
+        "verify_oauth2_token",
+        lambda token, _request, audience: {
+            "email": "member@example.com",
+            "email_verified": True,
+            "aud": audience,
+        },
+    )
+    app = upload_broker.create_upload_broker_app(_broker_settings(tmp_path))
+    bootstrap = bootstrap_snapshot_from_registry(Path("configs/imu-devices.yaml"))
+    submission = ConfigurationSnapshotSubmission(
+        name="broker candidate contract",
+        description="candidate remains unapproved",
+        client_build="pytest",
+        content=bootstrap.content,
+    )
+    headers = {"Authorization": "Bearer signed-id-token"}
+
+    with TestClient(app) as client:
+        unauthorized = client.post("/v2/device-config/identities/assets")
+        asset = client.post(
+            "/v2/device-config/identities/assets", headers=headers
+        )
+        revision = client.post(
+            "/v2/device-config/identities/revisions",
+            headers=headers,
+            json={"hardware_asset_id": asset.json()["hardware_asset_id"]},
+        )
+        candidate = client.post(
+            "/v2/device-config/snapshots",
+            headers=headers,
+            json=submission.model_dump(mode="json"),
+        )
+        listed = client.get("/v2/device-config/snapshots", headers=headers)
+
+    assert unauthorized.status_code == 401
+    assert asset.status_code == 201
+    assert asset.json()["sensor_sn"].endswith("-R01")
+    assert revision.status_code == 201
+    assert revision.json()["sensor_sn"].endswith("-R02")
+    assert revision.json()["supersedes_sn"] == asset.json()["sensor_sn"]
+    assert candidate.status_code == 201
+    assert candidate.json()["review"]["state"] == "candidate"
+    assert listed.status_code == 200
+    assert listed.json()["current_snapshot_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_desktop_refreshes_registry_through_broker_into_lkg(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bucket = _FakeBucket()
+    published = _seed_registry_bucket(tmp_path, bucket)
+    pointer = json.loads(
+        bucket.blob(f"{REGISTRY_PREFIX}/current.json").content or b"{}"
+    )
+    snapshot = json.loads(
+        bucket.blob(published["snapshot_object_key"]).content or b"{}"
+    )
+
+    class Response:
+        def __init__(self, payload: dict) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self.payload
+
+    def get(url: str, *, headers: dict[str, str], timeout: int):
+        assert headers == {"Authorization": "Bearer signed-id-token"}
+        assert timeout == 30
+        return Response(snapshot if "/snapshots/" in url else pointer)
+
+    class Auth:
+        @staticmethod
+        def id_token() -> str:
+            return "signed-id-token"
+
+    monkeypatch.setattr(broker_client.requests, "get", get)
+    settings = Settings(
+        cloud=DesktopCloudSettings(
+            broker_url="https://upload.example.test",
+            google_oauth_client_id="desktop.apps.googleusercontent.com",
+        ),
+        device_registry_cache_path=tmp_path / "cache" / "imu-devices.json",
+    )
+
+    document, received = await broker_client.refresh_device_registry_via_broker(
+        settings, Auth()
+    )
+
+    assert document.registry_revision == 1
+    assert received["snapshot_sha256"] == published["snapshot_sha256"]
+    assert settings.device_registry_source == "lkg_cache"
+    assert load_device_registry(settings.device_registry_path) == document
 
 
 def test_upload_broker_refuses_to_start_without_private_client_secret(

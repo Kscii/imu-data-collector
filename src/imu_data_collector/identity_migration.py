@@ -185,7 +185,7 @@ class CloudIdentityMigration:
             manifest = CaptureManifestV2.model_validate(payload)
             if manifest.recording_id in self.calibration_recording_ids:
                 continue
-            if manifest.schema_version == "3.0.0":
+            if manifest.schema_version in {"3.0.0", "3.1.0", "3.2.0"}:
                 continue
             manifests.append((manifest, generation))
         manifests.sort(key=lambda item: item[0].recording_id)

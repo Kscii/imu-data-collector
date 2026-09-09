@@ -36,6 +36,14 @@ for source in (
     "annotation_catalog.py",
     "model_catalog.py",
     "taxonomy_store.py",
+    "config.py",
+    "broker_client.py",
+    "device_configuration.py",
+    "device_registry.py",
+    "device_binding.py",
+    "imu_protocols.py",
+    "ble.py",
+    "cw12eu.py",
 ):
     datas.append((str(root / "src" / "imu_data_collector" / source), "imu_data_collector"))
 
@@ -128,7 +136,7 @@ coll = COLLECT(
 )
 
 if sys.platform == "darwin":
-    bundle_version = os.environ.get("APP_BUNDLE_VERSION", "0.2.0")
+    bundle_version = os.environ.get("APP_BUNDLE_VERSION", "0.3.0")
     app = BUNDLE(
         coll,
         name="IMU Data Collector.app",

@@ -8,6 +8,7 @@ manifest。
 import argparse
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -45,7 +46,18 @@ from imu_data_collector.broker_models import (
 )
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.constants import ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
+from imu_data_collector.device_configuration import (
+    ConfigurationSnapshotSubmission,
+    DeviceConfigurationStore,
+    IdentityRevisionRequest,
+)
+from imu_data_collector.device_registry import (
+    REGISTRY_CURRENT_SCHEMA,
+    REGISTRY_PREFIX,
+    validate_registry_snapshot,
+)
 from imu_data_collector.models import CaptureManifestV2
+from imu_data_collector.storage import GcsObjectStore, ObjectConflictError
 
 RESULT_PUBLICATION_SCHEMA = "imu_benchmark_result_manifest_v2"
 EXPERIMENT_PUBLICATION_SCHEMA = "imu_experiment_catalog_v1"
@@ -348,6 +360,9 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
         raise RuntimeError("上传代理缺少服务器私有的 cloud.google_oauth_client_secret")
     client = storage.Client(project=active.storage.project)
     bucket = client.bucket(active.storage.bucket.removeprefix("gs://"))
+    configuration_store = DeviceConfigurationStore(
+        GcsObjectStore(active.storage.bucket, active.storage.project)
+    )
     app = FastAPI(title="IMU 上传代理", version="1.0.0")
 
     def actor(
@@ -402,7 +417,12 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/capabilities")
     def capabilities() -> dict[str, Any]:
         return {
-            "accepted_manifest_schema_versions": ["2.1.0"],
+            "accepted_manifest_schema_versions": [
+                "2.1.0",
+                "3.0.0",
+                "3.1.0",
+                "3.2.0",
+            ],
             "accepted_capture_h5_schema_versions": list(
                 ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
             ),
@@ -414,7 +434,162 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             "model_publication_lifecycle": ["available", "deprecated"],
             "direct_to_bucket_resumable": True,
             "server_verifies_sha256_before_manifest": True,
+            "device_registry_download": True,
+            "device_configuration_v2": True,
         }
+
+    def registry_json(object_key: str) -> dict[str, Any]:
+        blob = bucket.blob(object_key)
+        if not blob.exists(client):
+            raise HTTPException(status_code=404, detail="设备注册表尚未发布")
+        try:
+            value = json.loads(blob.download_as_bytes(client=client))
+        except (ValueError, json.JSONDecodeError) as error:
+            raise HTTPException(status_code=502, detail="设备注册表不是有效 JSON") from error
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=502, detail="设备注册表不是 JSON 对象")
+        return value
+
+    @app.get("/v1/device-registry/current")
+    def device_registry_current(
+        response: Response,
+        _current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        pointer = registry_json(f"{REGISTRY_PREFIX}/current.json")
+        if pointer.get("schema_version") != REGISTRY_CURRENT_SCHEMA:
+            raise HTTPException(status_code=502, detail="设备注册表 current 指针无效")
+        response.headers["Cache-Control"] = "no-store"
+        return pointer
+
+    @app.get("/v1/device-registry/snapshots/{snapshot_sha256}")
+    def device_registry_snapshot(
+        snapshot_sha256: str,
+        response: Response,
+        _current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256):
+            raise HTTPException(status_code=422, detail="设备注册表 snapshot SHA-256 无效")
+        pointer = registry_json(f"{REGISTRY_PREFIX}/current.json")
+        if pointer.get("snapshot_sha256") != snapshot_sha256:
+            raise HTTPException(status_code=404, detail="设备注册表 snapshot 不是当前版本")
+        snapshot = registry_json(
+            f"{REGISTRY_PREFIX}/snapshots/{snapshot_sha256}/registry.json"
+        )
+        try:
+            validate_registry_snapshot(pointer, snapshot)
+        except ValueError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        response.headers["Cache-Control"] = "private, max-age=3600, immutable"
+        return snapshot
+
+    @app.get("/v2/device-config/current")
+    def device_configuration_current(
+        response: Response,
+        _current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        try:
+            current, generation = configuration_store.current()
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Current 配置尚未建立") from error
+        response.headers["Cache-Control"] = "no-store"
+        return {**current.model_dump(mode="json"), "generation": generation}
+
+    @app.get("/v2/device-config/snapshots")
+    def device_configuration_snapshots(
+        _current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        try:
+            current, _generation = configuration_store.current()
+            current_id: str | None = current.snapshot_id
+        except FileNotFoundError:
+            current_id = None
+        snapshots = []
+        for snapshot, review in configuration_store.list_snapshots():
+            snapshots.append(
+                {
+                    "snapshot_id": snapshot.snapshot_id,
+                    "snapshot_sha256": snapshot.snapshot_sha256,
+                    "content_sha256": snapshot.content_sha256,
+                    "name": snapshot.name,
+                    "description": snapshot.description,
+                    "publisher": snapshot.publisher,
+                    "published_at_utc": snapshot.published_at_utc,
+                    "device_count": len(snapshot.content.devices),
+                    "state": review.state,
+                    "review_revision": review.revision,
+                    "current": snapshot.snapshot_id == current_id,
+                }
+            )
+        return {"snapshots": snapshots, "current_snapshot_id": current_id}
+
+    @app.get("/v2/device-config/snapshots/{snapshot_id}")
+    def device_configuration_snapshot(
+        snapshot_id: str,
+        response: Response,
+        _current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        try:
+            snapshot = configuration_store.get_snapshot(snapshot_id)
+            review, generation = configuration_store.get_review(snapshot_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="找不到配置 Snapshot") from error
+        except ValueError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        response.headers["Cache-Control"] = "private, max-age=3600, immutable"
+        return {
+            "snapshot": snapshot.model_dump(mode="json"),
+            "review": review.model_dump(mode="json"),
+            "review_generation": generation,
+        }
+
+    @app.post("/v2/device-config/snapshots", status_code=201)
+    def submit_device_configuration_snapshot(
+        body: ConfigurationSnapshotSubmission,
+        current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        try:
+            snapshot, review = configuration_store.submit(
+                body,
+                actor=current["unikey"],
+            )
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "snapshot": snapshot.model_dump(mode="json"),
+            "review": review.model_dump(mode="json"),
+        }
+
+    @app.post("/v2/device-config/identities/assets", status_code=201)
+    def reserve_device_asset(
+        current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        try:
+            return configuration_store.reserve_asset(actor=current["unikey"])
+        except ObjectConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="SN 分配发生并发冲突，请重试",
+            ) from error
+
+    @app.post("/v2/device-config/identities/revisions", status_code=201)
+    def reserve_device_revision(
+        body: IdentityRevisionRequest,
+        current: Annotated[dict[str, str], Depends(actor)],
+    ) -> dict[str, Any]:
+        try:
+            return configuration_store.reserve_revision(
+                body.hardware_asset_id,
+                actor=current["unikey"],
+            )
+        except ObjectConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="SN revision 分配发生并发冲突，请重试",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.post("/v1/oauth/token", response_model=BrokerOAuthTokenResponse)
     def exchange_oauth_token(

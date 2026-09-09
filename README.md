@@ -1,6 +1,6 @@
-# CW12EU-T IMU 数据采集平台
+# 多设备 IMU 数据采集平台
 
-这是一个面向胸前佩戴 CW12EU-T 的数据采集与标注项目。采集端以原生 Linux 为已验收生产基线，原生 Windows 10/11 x64 已具备独立安装包和系统后端适配；macOS 13+ 已具备 Intel 与 Apple Silicon 分架构 DMG，但仍待 Intel 真机完成 BLE、摄像头、权限和完整录制验收。WSL2 与 Android 暂不属于采集端支持范围。同一仓库提供两个独立应用：本机采集端连接 BLE IMU 与摄像头，云端标注端只读取已发布制品，不初始化任何采集硬件。HDF5 保留原始数据和实际时间戳，Matroska（MKV）保留 H.264 原始视频；同步、标注、负责人和当前有效导出单独保存在对象存储的 `review.json`。
+这是一个面向胸前佩戴 IMU 的数据采集与标注项目。设备由项目 SN 和版本化协议/校准档案识别，而不是写死广播名或 BLE 地址；当前同时保留已验证 CW12EU-T 和 commissioning 阶段 `acce&gyro` 设备。采集端以原生 Linux 为已验收生产基线，原生 Windows 10/11 x64 已具备独立安装包和系统后端适配；macOS 13+ 已具备 Intel 与 Apple Silicon 分架构 DMG，但仍待 Intel 真机完成 BLE、摄像头、权限和完整录制验收。WSL2 与 Android 暂不属于采集端支持范围。同一仓库提供两个独立应用：本机采集端连接 BLE IMU 与摄像头，云端标注端只读取已发布制品，不初始化任何采集硬件。HDF5 保留原始数据和实际时间戳，Matroska（MKV）保留 H.264 原始视频；同步、标注、负责人和当前有效导出单独保存在对象存储的 `review.json`。
 
 项目采用 **时间戳优先** 原则：录制时不把 IMU 或视频强制改造成固定频率。原始 IMU 接收时间和视频逐帧 PTS 会被保留；交付 MKV 仅无损重封装为从零开始的浏览器媒体时间轴，H5 同时保存媒体时间和主机单调时钟时间。完成同步与标注、冻结数据集时，才把每个已标注 IMU 片段重采样为严格的 25 Hz 训练输入。视频是标注与审计证据，不生成伪造的“严格 30 fps”训练视频。
 
@@ -10,11 +10,12 @@
 
 ## 当前边界
 
-- 设备：CW12EU-T，当前样机 BLE 地址 `83:FC:90:14:1E:A4`；电脑端已验证六轴候选数据从通知特征 `0x2AE1` 到达。
-- 传感器语义：当前样机已用六面静止和八次三轴旋转冻结工程校准档案；原始列映射为 `[raw_ax, -raw_ay, raw_az]`，加速度为 4096 counts/g、陀螺仪为 32.8 counts/(°/s)。4-byte trailer 仍保持未知并原样保存。
-- 采样率：供应商口头信息为 30 Hz，但当前样机多次短测和两次 10 分钟静态均稳定在约 25 Hz；平台按 25 Hz 保存实际时间戳，不把原始 IMU 伪造成 30 Hz。
+- 设备：每次预览或录制必须显式选择项目 SN，不再把广播名、MAC 或某一台样机写成默认设备。`IMU-0001-R01` 是已验证 CW12EU-T；`IMU-0002-R01` 是 `acce&gyro` commissioning 设备，只允许 test。
+- 传感器语义：旧设备的正式档案为 `[raw_ax, -raw_ay, raw_az]`、4096 counts/g、32.8 counts/(°/s)。新设备的 22-byte ABF2 原始协议与设备本地毫秒计数器已验证，但单位系数仍只是本机诊断候选；正式 `values_si` 保持 `NaN`。
+- 采样率：平台保留各 SN 的实际时间戳和原始频率；旧设备当前约 25 Hz，新设备当前实测约 50 Hz。严格 25 Hz 只属于通过校准、同步与标注门禁后的训练派生层。
 - 摄像头：Linux 罗技 C930c 已验收 MJPEG 1920×1080、30 fps，固定手动曝光后实测输入约 30 FPS；Windows/macOS 从系统后端选择能够达到 30 FPS 的最高分辨率，并以实际 FPS/PTS 门禁代替不可移植的 UVC 控件假设。浏览器预览独立限为约 10 FPS。保存 H.264、约 6 Mbit/s、无音频；同时存在兼容的内置与外接相机时默认优先外接相机。
 - 产物：一次佩戴录制对应本地同名 `.h5`/`.mkv`；后台发布时增加可重建 `preview.mp4` 和不可变 `manifest.json`。标注端另写当前 `review.json` 快照，原始制品不再因同步或标注而修改。
+- 设备配置：采集使用完整、不可变的 Snapshot v2，不再把单位系数或设备 ID 写死在页面。每条新 HDF5 1.9 / manifest 3.2 冻结 Snapshot/content 哈希、SN 和 SI Profile ID；local/candidate 只允许 test，只有 approved + verified SI 可以正式采集。主机路径、OAuth、标签和本机 BLE 绑定不进入 Snapshot。
 - 身份：采集端不选择或保存参与者，录制 ID 只有 UTC 时间戳；任务负责人在标注端依据视频证据
   选择并再次确认参与者。公网标注端由 Google IAP 验证登录账号，再由服务器私有邮箱映射得到
   操作者 UniKey。训练制品只写 `cw12eu:subject-NNN`，私有映射不得暴露给浏览器或 benchmark。
@@ -33,6 +34,9 @@
 
 实验 ONNX、最终两文件模型发布、最小权限发布和标注平台模型目录见
 [ONNX 模型目录](docs/model-catalog.md)。
+
+设备设置页、团队审批、SN/revision、SI Profile、LKG 与 bootstrap lock 的完整合同见
+[设备配置 Snapshot v2](docs/device-configuration-v2.md)。
 
 Windows 安装包提供两个入口：普通用户双击“IMU 数采平台”启动系统托盘并自动打开浏览器；
 关闭浏览器不退出后端，双击托盘图标可重新打开，右键“退出”才释放设备。`imu-collector.exe`
@@ -115,6 +119,7 @@ uv run imu-collector probe-video --seconds 20 --camera-id '<稳定 camera_id>'
 uv run imu-collector characterize-imu --operator xfan0282 \
   --stage pipeline_smoke_uncontrolled --seconds 10
 uv run imu-collector validate /path/to/recording.h5
+uv run imu-collector migrate-device-configuration-v2
 ```
 
 `characterize-imu` 生成 IMU-only H5 和相邻 JSON 报告，固定落入
@@ -123,6 +128,10 @@ WebUI 的“IMU 表征”页逐阶段操作，详见
 [IMU 表征与校准候选](docs/imu-characterization.md)。
 当前冻结坐标、换算公式与证据边界见
 [CW12EU-T 坐标系与工程校准档案](docs/device-coordinate-system.md)。
+多设备 SN、commissioning、协议切换与 Bucket 快照流程见
+[IMU device registry and protocol integration](docs/device-registry-and-protocols.md)；新设备实机审计见
+[IMU-0002-R01 audit](docs/device-audits/IMU-0002-R01-2026-09-08.md)，本次代码、配置、真机和三平台发布门禁见
+[v0.3.0 多设备正式版本检查清单](docs/release-v0.3.0-checklist.md)。
 开始第一条正式数据前，应逐项执行
 [每场次正式采集检查清单](docs/pre-collection-checklist.md)。
 生产部署后的代码、服务器和人工业务验收见
