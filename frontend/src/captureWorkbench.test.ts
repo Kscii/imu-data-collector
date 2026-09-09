@@ -44,6 +44,9 @@ test("设备配置以表单为主并保留高级 JSON 逃生口", () => {
     assert.ok(settings.includes(expected), `缺少表单配置交互：${expected}`);
   }
   assert.doesNotMatch(app, /编辑本机候选换算 JSON/);
+  assert.doesNotMatch(settings, /setWorkspace\(parsed\)/);
+  assert.match(settings, /尚不是运行时可选设备/);
+  assert.match(settings, /choices=\{\[-1, 1\]\}/);
 });
 
 test("BLE 发现与连接语义明确分离", () => {

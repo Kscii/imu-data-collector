@@ -229,17 +229,24 @@ function nullableNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function TripleFields({ label, value, onChange, integer = false }: {
+function TripleFields({ label, value, onChange, integer = false, choices }: {
   label: string;
   value: Triple;
   onChange: (value: Triple) => void;
   integer?: boolean;
+  choices?: number[];
 }) {
-  return <fieldset className="triple-fields"><legend>{label}</legend>{value.map((item, index) => <label key={index}>{["X", "Y", "Z"][index]}<input type="number" step={integer ? 1 : "any"} value={item} onChange={(event) => {
-    const next = [...value] as Triple;
-    next[index] = Number(event.target.value);
-    onChange(next);
-  }} /></label>)}</fieldset>;
+  return <fieldset className="triple-fields"><legend>{label}</legend>{value.map((item, index) => <label key={index}>{["X", "Y", "Z"][index]}{choices
+    ? <select value={item} onChange={(event) => {
+      const next = [...value] as Triple;
+      next[index] = Number(event.target.value);
+      onChange(next);
+    }}>{choices.map((choice) => <option key={choice} value={choice}>{choice}</option>)}</select>
+    : <input type="number" step={integer ? 1 : "any"} value={item} onChange={(event) => {
+      const next = [...value] as Triple;
+      next[index] = Number(event.target.value);
+      onChange(next);
+    }} />}</label>)}</fieldset>;
 }
 
 function newUnverifiedSi(): ConfigurationDevice["si_profile"] {
@@ -329,7 +336,6 @@ export function CaptureSettingsPage({
     let parsed: ConfigurationSubmission;
     try {
       parsed = JSON.parse(workspaceText) as ConfigurationSubmission;
-      setWorkspace(parsed);
       setWorkspaceState("dirty");
     } catch {
       setWorkspaceState("invalid");
@@ -466,6 +472,13 @@ export function CaptureSettingsPage({
   const reserveRevision = async () => {
     const source = workspace?.content.devices.find((item) => item.sensor_sn === selectedDeviceSn);
     if (!source) return;
+    const latestRevision = Math.max(...(workspace?.content.devices
+      .filter((item) => item.hardware_asset_id === source.hardware_asset_id)
+      .map((item) => item.revision) ?? [source.revision]));
+    if (source.revision !== latestRevision) {
+      setError(`请先选择 ${source.hardware_asset_id} 的最新 revision；旧 revision 不能直接跳级。`);
+      return;
+    }
     const reservation = await run(
       "revision",
       () => requestJson<{ sensor_sn: string; hardware_asset_id: string; revision: number; supersedes_sn: string }>("/api/v1/configuration/identities/revisions", { method: "POST", body: JSON.stringify({ hardware_asset_id: source.hardware_asset_id }) }),
@@ -493,8 +506,13 @@ export function CaptureSettingsPage({
   const devices = workspace?.content.devices ?? [];
   const selectedDevice = devices.find((item) => item.sensor_sn === selectedDeviceSn) ?? devices[0];
   const selectedRuntimeProfile = imuProfiles.find((item) => item.sensor_sn === selectedDevice?.sensor_sn) ?? null;
-  const remoteUnavailable = cloud !== null && (!cloud.configured || !cloud.logged_in);
-  const remoteReason = !cloud?.configured
+  const selectedIsLatestRevision = Boolean(selectedDevice && selectedDevice.revision === Math.max(
+    ...devices.filter((item) => item.hardware_asset_id === selectedDevice.hardware_asset_id).map((item) => item.revision),
+  ));
+  const remoteUnavailable = cloud === null || !cloud.configured || !cloud.logged_in;
+  const remoteReason = cloud === null
+    ? "正在读取团队 broker 与登录状态。"
+    : !cloud.configured
     ? "当前安装尚未配置团队 broker 与桌面 OAuth Client ID。SN 只能由中心分配，不能生成本机临时号。"
     : !cloud.logged_in
       ? "团队 broker 已配置，但尚未完成 Google 登录。登录后才可永久保留 SN。"
@@ -735,7 +753,7 @@ export function CaptureSettingsPage({
         </div>
         <div className="save-row vertical">
           <button disabled={Boolean(busy) || remoteUnavailable} title={remoteUnavailable ? remoteReason : ""} onClick={reserveAsset}>为新物理设备保留 SN</button>
-          <button disabled={Boolean(busy) || remoteUnavailable || !selectedDevice} title={remoteUnavailable ? remoteReason : ""} onClick={reserveRevision}>为所选设备保留新 revision</button>
+          <button disabled={Boolean(busy) || remoteUnavailable || !selectedDevice || !selectedIsLatestRevision} title={remoteUnavailable ? remoteReason : !selectedIsLatestRevision ? "只能从该物理资产的最新 revision 继续分配" : ""} onClick={reserveRevision}>为所选设备保留新 revision</button>
         </div>
         {remoteUnavailable && <div className="disabled-reason">
           <strong>为什么按钮不可用？</strong><span>{remoteReason}</span>
@@ -760,7 +778,7 @@ export function CaptureSettingsPage({
               <label>状态<select value={selectedDevice.lifecycle} onChange={(event) => patchDevice((next) => { next.lifecycle = event.target.value as "active" | "retired"; })}><option value="active">使用中</option><option value="retired">已退役</option></select></label>
               <label>广播名<input value={selectedDevice.identity.advertised_name} onChange={(event) => patchDevice((next) => { next.identity.advertised_name = event.target.value; })} /></label>
               <label>公共地址<input value={selectedDevice.identity.public_address ?? ""} placeholder="留空表示不固定" onChange={(event) => patchDevice((next) => { next.identity.public_address = nullable(event.target.value); })} /></label>
-              <label>地址类型<input value={selectedDevice.identity.address_type} onChange={(event) => patchDevice((next) => { next.identity.address_type = event.target.value; })} /></label>
+              <label>地址类型<select value={selectedDevice.identity.address_type} onChange={(event) => patchDevice((next) => { next.identity.address_type = event.target.value; })}><option value="public">public</option><option value="random">random</option><option value="unknown">unknown</option></select></label>
               <label>广播 Service UUID<input value={selectedDevice.identity.advertised_service_uuid ?? ""} placeholder="可留空" onChange={(event) => patchDevice((next) => { next.identity.advertised_service_uuid = nullable(event.target.value); })} /></label>
               <label className="wide">GATT 指纹 SHA-256<input value={selectedDevice.identity.gatt_fingerprint_sha256 ?? ""} placeholder="64 位小写十六进制；未测量可留空" onChange={(event) => patchDevice((next) => { next.identity.gatt_fingerprint_sha256 = nullable(event.target.value); })} /></label>
             </div>
@@ -807,8 +825,8 @@ export function CaptureSettingsPage({
             <div className="triple-grid">
               <TripleFields label="加速度 bias（raw counts）" value={selectedDevice.si_profile.accel_bias_counts} onChange={(value) => patchDevice((next) => { next.si_profile.accel_bias_counts = value; })} />
               <TripleFields label="角速度 bias（raw counts）" value={selectedDevice.si_profile.gyro_bias_counts} onChange={(value) => patchDevice((next) => { next.si_profile.gyro_bias_counts = value; })} />
-              <TripleFields label="原始轴顺序（0/1/2）" value={selectedDevice.si_profile.raw_axis_order} integer onChange={(value) => patchDevice((next) => { next.si_profile.raw_axis_order = value; })} />
-              <TripleFields label="轴方向（仅 -1/1）" value={selectedDevice.si_profile.axis_signs} integer onChange={(value) => patchDevice((next) => { next.si_profile.axis_signs = value; })} />
+              <TripleFields label="原始轴顺序（0/1/2）" value={selectedDevice.si_profile.raw_axis_order} choices={[0, 1, 2]} onChange={(value) => patchDevice((next) => { next.si_profile.raw_axis_order = value; })} />
+              <TripleFields label="轴方向（仅 -1/1）" value={selectedDevice.si_profile.axis_signs} choices={[-1, 1]} onChange={(value) => patchDevice((next) => { next.si_profile.axis_signs = value; })} />
             </div>
             <details className="nested-details">
               <summary>坐标系与证据摘要（{selectedDevice.si_profile.evidence.length} 条）</summary>
@@ -830,7 +848,7 @@ export function CaptureSettingsPage({
               <div><h3>本机候选 SI</h3><p>候选值用于屏幕诊断；录制 H5 仍保存原始帧，并明确记录候选非权威属性。它不会自动成为正式 SI。</p></div>
               {selectedRuntimeProfile?.candidate_conversion_source && <span className="config-pill config-pill-unverified">{selectedRuntimeProfile.candidate_conversion_source === "local_override" ? "本机覆盖" : "设备档案候选"}</span>}
             </div>
-            {!candidateDraft ? <div className="placeholder compact"><span>当前设备没有候选 SI。 <button onClick={() => {
+            {!selectedRuntimeProfile ? <div className="warning-banner">该设备目前只存在于工作区，尚不是运行时可选设备。本机候选存储按运行时 SN 管理；请直接编辑上方工作区 SI，或先保存并选择包含该设备的本机快照。</div> : !candidateDraft ? <div className="placeholder compact"><span>当前设备没有候选 SI。 <button onClick={() => {
               setCandidateDraft({
                 accel_counts_per_g: null,
                 gyro_counts_per_dps: null,
@@ -850,8 +868,8 @@ export function CaptureSettingsPage({
               <div className="triple-grid">
                 <TripleFields label="加速度 bias" value={candidateDraft.accel_bias_counts} onChange={(value) => { setCandidateDraft({ ...candidateDraft, accel_bias_counts: value }); setCandidateDirty(true); }} />
                 <TripleFields label="角速度 bias" value={candidateDraft.gyro_bias_counts} onChange={(value) => { setCandidateDraft({ ...candidateDraft, gyro_bias_counts: value }); setCandidateDirty(true); }} />
-                <TripleFields label="原始轴顺序" value={candidateDraft.raw_axis_order} integer onChange={(value) => { setCandidateDraft({ ...candidateDraft, raw_axis_order: value }); setCandidateDirty(true); }} />
-                <TripleFields label="轴方向" value={candidateDraft.axis_signs} integer onChange={(value) => { setCandidateDraft({ ...candidateDraft, axis_signs: value }); setCandidateDirty(true); }} />
+                <TripleFields label="原始轴顺序" value={candidateDraft.raw_axis_order} choices={[0, 1, 2]} onChange={(value) => { setCandidateDraft({ ...candidateDraft, raw_axis_order: value }); setCandidateDirty(true); }} />
+                <TripleFields label="轴方向" value={candidateDraft.axis_signs} choices={[-1, 1]} onChange={(value) => { setCandidateDraft({ ...candidateDraft, axis_signs: value }); setCandidateDirty(true); }} />
               </div>
               <div className="save-row">
                 <button className="primary" disabled={!candidateDirty || Boolean(busy)} onClick={saveCandidate}>{busy === "candidate" ? "保存中…" : "保存本机候选"}</button>
