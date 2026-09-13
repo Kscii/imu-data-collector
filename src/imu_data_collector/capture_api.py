@@ -22,6 +22,7 @@ from imu_data_collector.broker_client import (
 from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
+from imu_data_collector.desktop_auth import oauth_error_english
 from imu_data_collector.device_binding import DeviceBindingStore
 from imu_data_collector.device_configuration import (
     ConfigurationSelectionRequest,
@@ -333,7 +334,7 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
                     request,
                     ok=False,
                     zh=f"Google 登录失败：{caught}",
-                    en=f"Google sign-in failed: {caught}",
+                    en=f"Google sign-in failed: {oauth_error_english(caught)}",
                 ),
                 status_code=400,
             )

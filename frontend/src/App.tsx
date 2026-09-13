@@ -947,7 +947,7 @@ function jobStateLabel(job: BackgroundJob) {
   const uploadRole = job.phase.startsWith("uploading:")
     ? job.phase.slice("uploading:".length)
     : "";
-  return `${state[job.state]} · ${uploadRole ? `上传 ${uploadRole}` : phase[job.phase] ?? job.phase}`;
+  return `${state[job.state]} · ${uploadRole ? tr(`上传 ${uploadRole}`, `Uploading ${uploadRole}`) : phase[job.phase] ?? job.phase}`;
 }
 
 function issueLabel(issue: string) {
@@ -963,7 +963,7 @@ function issueLabel(issue: string) {
   const labels: Record<string, string> = {
     "synchronization anchors have not been verified": "同步锚点尚未验证",
     "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证",
-    "IMU packet timestamp maximum residual exceeds 0.5 seconds": "IMU 包时间戳最大残差超过 0.5 秒",
+    "IMU packet timestamp maximum residual exceeds 0.5 seconds": tr("IMU 包时间戳最大残差超过 0.5 秒", "IMU packet timestamp maximum residual exceeds 0.5 seconds"),
   };
   return labels[issue] ?? userVisibleMessage(issue);
 }
@@ -1337,9 +1337,9 @@ export default function App() {
           <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
         </>}
       </nav>
-      {annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
-      {!annotationApplication && captureError && <div className="error-banner">{captureError}</div>}
-      {!annotationApplication && versionMismatch && <div className="error-banner">采集页面与后端 API 版本不一致：页面 {__CAPTURE_API_BUILD_ID__}，后端 {config?.build_id ?? "旧版未报告"}。源码更新后请在项目根目录运行 <code>./scripts/update-local-capture.sh</code>；普通的 systemctl 重启不会重新构建页面。</div>}
+      {annotationApplication && captureError && <div className="error-banner">{userVisibleMessage(captureError)}</div>}
+      {!annotationApplication && captureError && <div className="error-banner">{userVisibleMessage(captureError)}</div>}
+      {!annotationApplication && versionMismatch && <div className="error-banner">{tr("采集页面与后端 API 版本不一致：页面", "Capture page/API version mismatch. Page: ")}{__CAPTURE_API_BUILD_ID__}{tr("，后端", ", backend: ")}{config?.build_id ?? "旧版未报告"}{tr("。源码更新后请在项目根目录运行", ". After updating the source, run this command from the project root: ")}<code>./scripts/update-local-capture.sh</code>{tr("；普通的 systemctl 重启不会重新构建页面。", "; a normal systemctl restart does not rebuild the page.")}</div>}
       {!annotationApplication && !ownsCaptureTab && <div className="warning-banner">另一个标签页正在控制本机采集设备。本页保持只读；关闭另一个页面后最多等待 6 秒即可接管。</div>}
       {tab === "capture" && (
         <CapturePage
@@ -1449,13 +1449,13 @@ function CalibrationEvidencePage() {
     return () => controller.abort();
   }, [selected]);
 
-  if (error) return <main><div className="error-banner">{error}</div></main>;
-  if (!profile) return <main><section className="panel">正在读取校准证据…</section></main>;
+  if (error) return <main><div className="error-banner">{userVisibleMessage(error)}</div></main>;
+  if (!profile) return <main><section className="panel">{tr("正在读取校准证据…", "Loading calibration evidence…")}</section></main>;
   const current = profile.evidence.find((item) => item.recording_id === selected);
   const copyId = async () => {
     if (!current) return;
     await navigator.clipboard.writeText(current.recording_id);
-    setMessage(`已复制 ${current.recording_id}`);
+    setMessage(tr(`已复制 ${current.recording_id}`, `Copied ${current.recording_id}`));
   };
   const selectRecordingTime = (time: number) => {
     setCurrentTime(time);
@@ -1488,15 +1488,15 @@ function CalibrationEvidencePage() {
       <div className="status-grid">
         <span>加速度尺度 {profile.calibration.accel_counts_per_g} counts/g</span>
         <span>角速度尺度 {profile.calibration.gyro_counts_per_dps} counts/(°/s)</span>
-        <span>原始加速度零偏 [{profile.calibration.accel_bias_counts_raw.join(", ")}]</span>
-        <span>原始角速度零偏 [{profile.calibration.gyro_bias_counts_raw.join(", ")}]</span>
+        <span>{tr("原始加速度零偏 [", "Raw accelerometer bias [")}{profile.calibration.accel_bias_counts_raw.join(", ")}]</span>
+        <span>{tr("原始角速度零偏 [", "Raw gyroscope bias [")}{profile.calibration.gyro_bias_counts_raw.join(", ")}]</span>
       </div>
       <p>{localizedField(profile.calibration, "conclusion")}</p>
       <p className="stage-help">{tr("目标右手坐标系", "Target right-handed coordinate system")}：+X {localizedField(profile.coordinate_system, "x_positive")}；+Y {localizedField(profile.coordinate_system, "y_positive")}；+Z {localizedField(profile.coordinate_system, "z_positive")}。</p>
     </section>
     <section className="annotation-layout calibration-layout">
       <aside className="panel calibration-evidence-sidebar">
-        <div className="panel-title">证据录制（{profile.evidence.length}）</div>
+        <div className="panel-title">{tr(`证据录制（${profile.evidence.length}）`, `Evidence recordings (${profile.evidence.length})`)}</div>
         <div className="calibration-evidence-list">
           {profile.evidence.map((item) => <button key={item.recording_id} className={selected === item.recording_id ? "selected" : ""} disabled={!item.available} onClick={() => setSelected(item.recording_id)}><strong>{item.kind === "accel_static_face" ? "六面静态" : item.kind === "gyro_rotation" ? "360° 旋转" : "动态校验"}</strong><span>{item.recording_id}</span><span>{item.available ? "证据可用" : "制品缺失"}</span></button>)}
         </div>
@@ -1507,7 +1507,7 @@ function CalibrationEvidencePage() {
             <div className="panel-title">{tr("证据视频 · 与两条 IMU 曲线共享时间轴", "Evidence video · shared timeline with both IMU plots")}</div>
             <video ref={video} key={current.recording_id} controls preload="metadata" src={`/api/v1/calibration-evidence/${current.recording_id}/video`} onTimeUpdate={updateTimeFromVideo} onSeeked={updateTimeFromVideo} />
           </div>
-          {analysisError && <div className="error-banner">{analysisError}</div>}
+          {analysisError && <div className="error-banner">{userVisibleMessage(analysisError)}</div>}
           {!analysis && !analysisError && <div className="panel">{tr("正在读取证据时间轴…", "Loading evidence timeline…")}</div>}
           {analysis && <>
             <div className="panel calibration-plot-panel">
@@ -1595,94 +1595,94 @@ function CapturePage(props: any) {
         ? "正式采集未获授权"
         : "基础配置完整";
   const previewButtonLabel = captureOperation === "releasing_preview"
-    ? "正在释放…"
+    ? tr("正在释放…", "Releasing…")
     : captureOperation === "connecting_preview"
-      ? "正在连接…"
+      ? tr("正在连接…", "Connecting…")
       : devicesPreview
         ? "释放预览设备"
         : "连接预览设备";
   return (
     <main className="capture-workbench">
-      {!liveFresh && <div className="error-banner live-stale-banner"><strong>实时状态不可用</strong><span>{liveTransport === "reconnecting" ? "WebSocket 已断开，正在自动重连。" : "正在建立实时连接。"} 上次更新：{Number.isFinite(liveAgeMs) ? `${(liveAgeMs / 1000).toFixed(1)} 秒前` : "尚未收到"}。下方实时值显示为“—”，不会用旧值冒充当前状态。</span></div>}
+      {!liveFresh && <div className="error-banner live-stale-banner"><strong>实时状态不可用</strong><span>{liveTransport === "reconnecting" ? "WebSocket 已断开，正在自动重连。" : "正在建立实时连接。"}{tr("上次更新：", " Last update: ")}{Number.isFinite(liveAgeMs) ? tr(`${(liveAgeMs / 1000).toFixed(1)} 秒前`, `${(liveAgeMs / 1000).toFixed(1)} seconds ago`) : "尚未收到"}{tr("。下方实时值显示为“—”，不会用旧值冒充当前状态。", ". Live values below show “—” instead of displaying stale readings as current.")}</span></div>}
       <section className="panel capture-setup-card">
         <div className="capture-setup-heading"><div><span className="step-kicker">STEP 1 · 本次采集</span><div className="panel-title">确认场次与数据级别</div></div><span className={`readiness ${ready ? "ready" : "not-ready"}`}>{readinessLabel}</span></div>
         <div className="capture-setup-grid">
           <label>采集场次 ID<input value={collection} readOnly disabled={interactionBlocked || active || busy} /></label>
           <button className="field-action" disabled={interactionBlocked || active || busy} onClick={() => setCollection(nextCollectionId(collection))}>下一个场次</button>
           <label>数据级别<select value={dataTier} onChange={(e) => setDataTier(e.target.value as "test" | "prod")} disabled={interactionBlocked || active || busy}><option value="test">测试 · 不进入训练</option><option value="prod" disabled={selectedProfile && !selectedProfile.prod_capture_enabled}>正式 · 需权威配置</option></select></label>
-          <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product}{item.integration === "external" ? " · 外接" : ""}{item.supports_default_profile && item.color_capture ? " · 推荐" : " · 不兼容"}</option>)}</select></label>
+          <label>摄像头<select value={cameraId} onChange={(e) => changeCamera(e.target.value)} disabled={interactionBlocked || active || busy}>{cameras.map((item: Camera) => <option value={item.camera_id} key={item.camera_id}>{isEnglish && /[\u3400-\u9fff]/u.test(item.product) ? "Camera" : item.product}{item.integration === "external" ? tr(" · 外接", " · external") : ""}{item.supports_default_profile && item.color_capture ? tr(" · 推荐", " · recommended") : tr(" · 不兼容", " · incompatible")}</option>)}</select></label>
           <button className="field-action" disabled={interactionBlocked || active || busy} onClick={() => refreshCameras(true)}>扫描摄像头</button>
-          <label>IMU 设备<select value={sensorSn} onChange={(e) => selectSensor(e.target.value)} disabled={interactionBlocked || active || busy || devicesPreview}><option value="">请选择固定 SN…</option>{imuProfiles.filter((item: ImuProfile) => item.selectable).map((item: ImuProfile) => <option key={item.sensor_sn} value={item.sensor_sn}>{item.sensor_sn} · {item.display_name}</option>)}</select></label>
-          <button className="field-action" disabled={interactionBlocked || active || busy || devicesPreview} onClick={scanImu}>查找附近 IMU</button>
+          <label>IMU 设备<select value={sensorSn} onChange={(e) => selectSensor(e.target.value)} disabled={interactionBlocked || active || busy || devicesPreview}><option value="">请选择固定 SN…</option>{imuProfiles.filter((item: ImuProfile) => item.selectable).map((item: ImuProfile) => <option data-no-localize key={item.sensor_sn} value={item.sensor_sn}>{item.sensor_sn} · {item.display_name}</option>)}</select></label>
+          <button className="field-action" disabled={interactionBlocked || active || busy || devicesPreview} onClick={scanImu}>{tr("查找附近 IMU", "Find nearby IMUs")}</button>
         </div>
         <div className="capture-config-line">
-          <span>配置 Snapshot</span><code>{configurationStatus?.selected_snapshot_id ?? "正在读取…"}</code><span className={`config-pill config-pill-${configurationStatus?.selected_state ?? "loading"}`}>{configurationStatus?.selected_state ?? "loading"}</span>{configurationStatus?.manually_pinned && <span className="config-pill">人工固定</span>}<button onClick={() => openSettings()}>查看或切换</button>
+          <span>配置 Snapshot</span><code>{configurationStatus?.selected_snapshot_id ?? tr("正在读取…", "Loading…")}</code><span className={`config-pill config-pill-${configurationStatus?.selected_state ?? "loading"}`}>{configurationStatus?.selected_state ?? "loading"}</span>{configurationStatus?.manually_pinned && <span className="config-pill">人工固定</span>}<button onClick={() => openSettings()}>查看或切换</button>
         </div>
         {bleScan?.requested && <div className="ble-scan-summary">
-          <strong>最近一次附近设备发现</strong>
+          <strong>{tr("最近一次附近设备发现", "Latest nearby device scan")}</strong>
           <span>{bleScan.error
-            ? `失败 · ${bleScan.adapter_state}`
-            : `发现 ${imuCandidates.length} 台符合条件的 IMU · ${(bleScan.elapsed_ms / 1000).toFixed(1)} 秒`}</span>
-          <small>仅扫描广播；尚未连接、订阅数据或修改设备登记。完整结果在“设备与设置 → 诊断与运行环境”。</small>
+            ? tr(`失败 · ${bleScan.adapter_state}`, `Failed · ${bleScan.adapter_state}`)
+            : tr(`发现 ${imuCandidates.length} 台符合条件的 IMU · ${(bleScan.elapsed_ms / 1000).toFixed(1)} 秒`, `Found ${imuCandidates.length} matching IMUs · ${(bleScan.elapsed_ms / 1000).toFixed(1)} seconds`)}</span>
+          <small>{tr("仅扫描广播；尚未连接、订阅数据或修改设备登记。完整结果在“设备与设置 → 诊断与运行环境”。", "Only advertisements were scanned; no connection, data subscription, or registration changes were made. Full results are under Devices & settings → Diagnostics & runtime.")}</small>
         </div>}
-        {imuCandidates.length > 1 && <label className="local-ble-choice">检测到多个 BLE 设备，请选择本机标识<select value={imuLocalDeviceId} onChange={(e) => setImuLocalDeviceId(e.target.value)} disabled={interactionBlocked || active || busy}>{imuCandidates.filter((item: ImuCandidate) => !item.matched_sensor_sns.length || item.matched_sensor_sns.includes(sensorSn)).map((item: ImuCandidate) => <option key={item.local_device_id} value={item.local_device_id}>{item.name || "IMU"} · {item.local_device_id}</option>)}</select></label>}
-        {imuCandidates.some((item: ImuCandidate) => item.registration_state === "unregistered") && <div className="warning-banner">扫描发现未登记设备。请到“设备与设置”先永久保留 SN 并写入配置 Snapshot，避免临时编号污染采集证据。 <button onClick={() => openSettings("devices")}>打开设备设置</button></div>}
+        {imuCandidates.length > 1 && <label className="local-ble-choice">{tr("检测到多个 BLE 设备，请选择本机标识", "Multiple BLE devices found. Select the local identifier.")}<select value={imuLocalDeviceId} onChange={(e) => setImuLocalDeviceId(e.target.value)} disabled={interactionBlocked || active || busy}>{imuCandidates.filter((item: ImuCandidate) => !item.matched_sensor_sns.length || item.matched_sensor_sns.includes(sensorSn)).map((item: ImuCandidate) => <option data-no-localize key={item.local_device_id} value={item.local_device_id}>{item.name || "IMU"} · {item.local_device_id}</option>)}</select></label>}
+        {imuCandidates.some((item: ImuCandidate) => item.registration_state === "unregistered") && <div className="warning-banner">扫描发现未登记设备。请到“设备与设置”先永久保留 SN 并写入配置 Snapshot，避免临时编号污染采集证据。 <button onClick={() => openSettings("devices")}>{tr("打开设备设置", "Open device settings")}</button></div>}
       </section>
 
-      <section className="capture-health-strip" aria-label="采集健康状态">
-        <Metric label="实时通道" value={liveFresh ? "正常" : "不可用"} warn={!liveFresh} />
-        <Metric label="摄像头输入" value={liveFresh && monitoringRequested ? `${(telemetry.video?.source_fps ?? telemetry.video?.fps ?? 0).toFixed(1)} FPS` : "—"} warn={liveFresh && monitoringRequested && (telemetry.video?.source_fps ?? telemetry.video?.fps ?? 0) < 29} />
-        <Metric label="BLE" value={liveFresh && monitoringRequested ? telemetry.imu?.connected ? "已连接" : "未连接" : "—"} warn={liveFresh && monitoringRequested && !telemetry.imu?.connected} />
-        <Metric label="IMU 频率" value={liveFresh && telemetry.imu?.estimated_sample_rate_hz ? `${telemetry.imu.estimated_sample_rate_hz.toFixed(2)} Hz` : "—"} />
-        <Metric label="最后一包" value={liveFresh && telemetry.imu?.last_packet_age_ms != null ? `${telemetry.imu.last_packet_age_ms.toFixed(0)} ms 前` : "—"} warn={liveFresh && telemetry.imu?.connected && (telemetry.imu?.last_packet_age_ms ?? 0) > 2000} />
-        <Metric label="剩余磁盘" value={liveFresh && telemetry.free_disk_gib != null ? `${telemetry.free_disk_gib.toFixed(1)} GiB` : "—"} warn={liveFresh && (telemetry.free_disk_gib ?? 999) < 20} />
+      <section className="capture-health-strip" aria-label={tr("采集健康状态", "Capture health")}>
+        <Metric label={tr("实时通道", "Live channel")} value={liveFresh ? tr("正常", "Healthy") : tr("不可用", "Unavailable")} warn={!liveFresh} />
+        <Metric label={tr("摄像头输入", "Camera input")} value={liveFresh && monitoringRequested ? `${(telemetry.video?.source_fps ?? telemetry.video?.fps ?? 0).toFixed(1)} FPS` : "—"} warn={liveFresh && monitoringRequested && (telemetry.video?.source_fps ?? telemetry.video?.fps ?? 0) < 29} />
+        <Metric label="BLE" value={liveFresh && monitoringRequested ? telemetry.imu?.connected ? tr("已连接", "Connected") : tr("未连接", "Disconnected") : "—"} warn={liveFresh && monitoringRequested && !telemetry.imu?.connected} />
+        <Metric label={tr("IMU 频率", "IMU rate")} value={liveFresh && telemetry.imu?.estimated_sample_rate_hz ? `${telemetry.imu.estimated_sample_rate_hz.toFixed(2)} Hz` : "—"} />
+        <Metric label={tr("最后一包", "Last packet")} value={liveFresh && telemetry.imu?.last_packet_age_ms != null ? tr(`${telemetry.imu.last_packet_age_ms.toFixed(0)} ms 前`, `${telemetry.imu.last_packet_age_ms.toFixed(0)} ms ago`) : "—"} warn={liveFresh && telemetry.imu?.connected && (telemetry.imu?.last_packet_age_ms ?? 0) > 2000} />
+        <Metric label={tr("剩余磁盘", "Free disk")} value={liveFresh && telemetry.free_disk_gib != null ? `${telemetry.free_disk_gib.toFixed(1)} GiB` : "—"} warn={liveFresh && (telemetry.free_disk_gib ?? 999) < 20} />
       </section>
 
-      {selectedProfile && !selectedProfile.prod_capture_enabled && <div className="warning-banner">{selectedProfile.sensor_sn} 尚处于 {selectedProfile.lifecycle}，只允许 test；候选单位系数仅用于屏幕诊断。</div>}
-      {selectedProfile?.protocol_supported === false && <div className="error-banner">{selectedProfile.unsupported_reason ?? `当前版本不支持 ${selectedProfile.protocol_id}`}</div>}
+      {selectedProfile && !selectedProfile.prod_capture_enabled && <div className="warning-banner">{selectedProfile.sensor_sn} 尚处于 {selectedProfile.lifecycle}{tr("，只允许 test；候选单位系数仅用于屏幕诊断。", "; test only. Candidate conversion factors are used only for on-screen diagnostics.")}</div>}
+      {selectedProfile?.protocol_supported === false && <div className="error-banner">{tr(`当前版本不支持 ${selectedProfile.protocol_id}`, `This version does not support ${selectedProfile.protocol_id}`)}</div>}
       {!sensorSn && <div className="warning-banner">开始预览或录制前必须人工选择一个 IMU SN。</div>}
-      {live.imu?.candidate_si_diagnostic_only && <div className="warning-banner">候选 SI（仅屏幕诊断；H5 保留原始帧并记录非权威候选元数据）：{(live.imu.candidate_si ?? []).map((value: number | null) => value == null ? "—" : value.toFixed(4)).join(" / ")}</div>}
+      {live.imu?.candidate_si_diagnostic_only && <div className="warning-banner">{tr("候选 SI（仅屏幕诊断；H5 保留原始帧并记录非权威候选元数据）：", "Candidate SI (on-screen diagnostics only; H5 retains raw frames and non-authoritative candidate metadata):")}{(live.imu.candidate_si ?? []).map((value: number | null) => value == null ? "—" : value.toFixed(4)).join(" / ")}</div>}
       <section className="capture-grid">
         <div className={`panel camera-panel ${focusCamera ? "camera-focus" : ""}`}>
-          <div className="panel-heading-row"><div><span className="step-kicker">STEP 2 · 画面确认</span><div className="panel-title">实时画面{devicesPreview ? " · 预览不落盘" : ""}</div></div><button disabled={!monitoringRequested} onClick={() => setFocusCamera((value) => !value)}>{focusCamera ? "退出专注" : "专注查看"}</button></div>
-          {ownsCaptureTab && monitoringRequested && previewStreamId > 0 ? <div className="preview-stage"><img key={previewStreamId} src={`/api/v1/preview.mjpeg?stream=${previewStreamId}&retry=${previewRetry}`} onError={() => { if (previewRetry < 3) window.setTimeout(() => setPreviewRetry((value) => Math.min(value + 1, 3)), 500); }} alt="摄像头实时预览" />{live.video?.transition && <div className="preview-overlay">摄像头正在切换，暂时保留最后一帧…</div>}{previewRetry >= 3 && <div className="preview-overlay preview-overlay-error"><span>浏览器预览流连续失败 3 次</span><button onClick={() => setPreviewRetry(0)}>重试画面</button></div>}</div> : <div className="placeholder">{ownsCaptureTab ? "连接预览设备后显示实时画面" : "设备由另一个标签页预览"}</div>}
+          <div className="panel-heading-row"><div><span className="step-kicker">STEP 2 · 画面确认</span><div className="panel-title">{tr("实时画面", "Live video")}{devicesPreview ? tr(" · 预览不落盘", " · preview is not saved") : ""}</div></div><button disabled={!monitoringRequested} onClick={() => setFocusCamera((value) => !value)}>{focusCamera ? "退出专注" : "专注查看"}</button></div>
+          {ownsCaptureTab && monitoringRequested && previewStreamId > 0 ? <div className="preview-stage"><img key={previewStreamId} src={`/api/v1/preview.mjpeg?stream=${previewStreamId}&retry=${previewRetry}`} onError={() => { if (previewRetry < 3) window.setTimeout(() => setPreviewRetry((value) => Math.min(value + 1, 3)), 500); }} alt={tr("摄像头实时预览", "Live camera preview")} />{live.video?.transition && <div className="preview-overlay">{tr("摄像头正在切换，暂时保留最后一帧…", "Switching cameras; holding the last frame temporarily…")}</div>}{previewRetry >= 3 && <div className="preview-overlay preview-overlay-error"><span>浏览器预览流连续失败 3 次</span><button onClick={() => setPreviewRetry(0)}>重试画面</button></div>}</div> : <div className="placeholder">{ownsCaptureTab ? "连接预览设备后显示实时画面" : "设备由另一个标签页预览"}</div>}
           {focusCamera && <button className="focus-close" onClick={() => setFocusCamera(false)}>退出专注（Esc）</button>}
         </div>
         <div className="panel chart-panel">
-          <div><span className="step-kicker">STEP 2 · 信号确认</span><div className="panel-title">IMU 六轴原始计数 · 最近 120 秒{devicesPreview ? " · 预览不落盘" : ""}</div></div>
+          <div><span className="step-kicker">STEP 2 · 信号确认</span><div className="panel-title">{tr("IMU 六轴原始计数 · 最近 120 秒", "IMU six-axis raw counts · Last 120 seconds")}{devicesPreview ? tr(" · 预览不落盘", " · preview is not saved") : ""}</div></div>
           <Plot time={chart.t} values={chart.values} />
         </div>
       </section>
-      {issueCount > 0 && <div className="issues"><strong>上一次录制待办（{issueCount}，不影响当前设备预览）</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
+      {issueCount > 0 && <div className="issues"><strong>{tr("上一次录制待办（", "Previous recording pending (")}{issueCount}{tr("，不影响当前设备预览）", "; current device preview is unaffected)")}</strong>{[...(live.recording?.issues ?? []), ...(live.recording?.validation_issues ?? [])].map((issue: string) => <div key={issue}>{issueLabel(issue)}</div>)}</div>}
       {(live.recording?.quality_warnings ?? []).length > 0 && <div className="warning-banner"><strong>上一次录制质量警告（允许发布）</strong>{live.recording.quality_warnings.map((warning: string) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
       {live.preview_error && <div className="issues"><div>{userVisibleMessage(live.preview_error)}</div>{live.device?.error?.hint && <div>{userVisibleMessage(live.device.error.hint)}</div>}</div>}
-      {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">摄像头固定曝光未完全生效：{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
-      {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0} / 3 次自动重连。</div>}
+      {live.video?.camera_control_errors?.length > 0 && <div className="warning-banner">{tr("摄像头固定曝光未完全生效：", "Fixed camera exposure was not fully applied: ")}{live.video.camera_control_errors.map(userVisibleMessage).join("；")}</div>}
+      {live.device?.state === "reconnecting" && <div className="warning-banner">预览设备已断开，正在进行第 {live.device?.reconnect_attempt ?? 0}{tr("/ 3 次自动重连。", "/ 3 automatic reconnection attempts.")}</div>}
       <details className="panel technical-details" open={Boolean(live.preview_error || live.video?.camera_control_errors?.length || issueCount)}>
-        <summary>技术详情与排障数据{issueCount ? ` · ${issueCount} 项待检查` : ""}</summary>
+        <summary>技术详情与排障数据{issueCount ? tr(` · ${issueCount} 项待检查`, ` · ${issueCount} items to check`) : ""}</summary>
         <section className="metrics technical-metrics">
-          <Metric label="当前 IMU SN" value={(activeImu?.sensor_sn ?? sensorSn) || "—"} />
-          <Metric label="协议" value={activeImu?.protocol ?? selectedProfile?.protocol_id ?? "—"} />
-          <Metric label={`浏览器预览（上限 ${telemetry.video?.preview_fps_limit ?? 10}）`} value={liveFresh && monitoringRequested ? `${(telemetry.video?.preview_fps ?? 0).toFixed(1)} FPS` : "—"} />
-          <Metric label="视频帧" value={liveFresh && monitoringRequested ? telemetry.video?.frame ?? 0 : "—"} />
-          <Metric label="IMU 通知包" value={liveFresh && monitoringRequested ? telemetry.imu?.packet_count ?? 0 : "—"} />
-          <Metric label="IMU 样本" value={liveFresh && monitoringRequested ? telemetry.imu?.sample_count ?? 0 : "—"} />
-          <Metric label="设备本地时间" value={liveFresh && telemetry.imu?.device_time_ms != null ? `${telemetry.imu.device_time_ms} ms（非世界时间）` : "—"} />
-          <Metric label="设备状态" value={liveFresh ? stateLabel(telemetry.device?.state ?? "—") : "—"} warn={liveFresh && ["error", "reconnecting"].includes(telemetry.device?.state)} />
-          <Metric label="解析 / 回调丢弃" value={liveFresh && monitoringRequested ? `${telemetry.imu?.parse_errors ?? 0} / ${telemetry.imu?.callback_drops ?? 0}` : "—"} warn={liveFresh && ((telemetry.imu?.parse_errors ?? 0) > 0 || (telemetry.imu?.callback_drops ?? 0) > 0)} />
+          <Metric label={tr("当前 IMU SN", "Current IMU SN")} value={(activeImu?.sensor_sn ?? sensorSn) || "—"} />
+          <Metric label={tr("协议", "Protocol")} value={activeImu?.protocol ?? selectedProfile?.protocol_id ?? "—"} />
+          <Metric label={tr(`浏览器预览（上限 ${telemetry.video?.preview_fps_limit ?? 10}）`, `Browser preview (limit ${telemetry.video?.preview_fps_limit ?? 10})`)} value={liveFresh && monitoringRequested ? `${(telemetry.video?.preview_fps ?? 0).toFixed(1)} FPS` : "—"} />
+          <Metric label={tr("视频帧", "Video frames")} value={liveFresh && monitoringRequested ? telemetry.video?.frame ?? 0 : "—"} />
+          <Metric label={tr("IMU 通知包", "IMU notifications")} value={liveFresh && monitoringRequested ? telemetry.imu?.packet_count ?? 0 : "—"} />
+          <Metric label={tr("IMU 样本", "IMU samples")} value={liveFresh && monitoringRequested ? telemetry.imu?.sample_count ?? 0 : "—"} />
+          <Metric label={tr("设备本地时间", "Device-local time")} value={liveFresh && telemetry.imu?.device_time_ms != null ? tr(`${telemetry.imu.device_time_ms} ms（非世界时间）`, `${telemetry.imu.device_time_ms} ms (not wall-clock time)`) : "—"} />
+          <Metric label={tr("设备状态", "Device state")} value={liveFresh ? stateLabel(telemetry.device?.state ?? "—") : "—"} warn={liveFresh && ["error", "reconnecting"].includes(telemetry.device?.state)} />
+          <Metric label={tr("解析 / 回调丢弃", "Parse errors / callback drops")} value={liveFresh && monitoringRequested ? `${telemetry.imu?.parse_errors ?? 0} / ${telemetry.imu?.callback_drops ?? 0}` : "—"} warn={liveFresh && ((telemetry.imu?.parse_errors ?? 0) > 0 || (telemetry.imu?.callback_drops ?? 0) > 0)} />
           <Metric label="Snapshot SHA" value={configurationStatus?.selected_snapshot_sha256?.slice(0, 12) ?? "—"} />
         </section>
         <div className="save-row">
-          {selectedProfile && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={() => openSettings("devices", sensorSn)}>在设置中编辑候选 SI</button>}
-          {imuBinding?.state === "bound" && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={forgetImuBinding}>忘记本机 BLE 绑定</button>}
+          {selectedProfile && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={() => openSettings("devices", sensorSn)}>{tr("在设置中编辑候选 SI", "Edit candidate SI in settings")}</button>}
+          {imuBinding?.state === "bound" && <button disabled={interactionBlocked || active || busy || devicesPreview} onClick={forgetImuBinding}>{tr("忘记本机 BLE 绑定", "Forget local BLE binding")}</button>}
         </div>
       </details>
       <section className="capture-action-bar">
-        <div><span className="step-kicker">STEP 3 · 执行</span><strong>{active ? `正在录制 ${collection}` : devicesPreview ? "设备已连接，可检查画面和曲线" : ready ? "配置完整，可先连接预览" : "请选择摄像头和 IMU"}</strong><small>{configurationStatus ? `${configurationStatus.selected_snapshot_id} · ${dataTier === "prod" ? "正式数据" : "测试数据"}` : "正在读取配置"}</small></div>
+        <div><span className="step-kicker">STEP 3 · 执行</span><strong>{active ? tr(`正在录制 ${collection}`, `Recording ${collection}`) : devicesPreview ? "设备已连接，可检查画面和曲线" : ready ? "配置完整，可先连接预览" : "请选择摄像头和 IMU"}</strong><small>{configurationStatus ? `${configurationStatus.selected_snapshot_id} · ${dataTier === "prod" ? tr("正式数据", "Production data") : tr("测试数据", "Test data")}` : "正在读取配置"}</small></div>
         <div className="capture-action-buttons">
           <button disabled={interactionBlocked || (!liveFresh && !devicesPreview) || active || busy || anotherSession || !sensorSn || (!devicesPreview && !cameraId)} onClick={toggleImuPreview}>{previewButtonLabel}</button>
-          {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>重试设备</button>}
-          {!active ? <button className="primary capture-primary-action" disabled={interactionBlocked || !liveFresh || busy || anotherSession || !ready} onClick={start}>{captureOperation === "starting_recording" ? "正在准备…" : "开始录制"}</button> : <button className="danger capture-primary-action" disabled={interactionBlocked || busy} onClick={stop}>{captureOperation === "stopping_recording" ? "正在结束…" : "结束录制"}</button>}
+          {monitoringRequested && live.device?.state === "error" && <button disabled={interactionBlocked || active || busy} onClick={retryPreview}>{tr("重试设备", "Retry device")}</button>}
+          {!active ? <button className="primary capture-primary-action" disabled={interactionBlocked || !liveFresh || busy || anotherSession || !ready} onClick={start}>{captureOperation === "starting_recording" ? tr("正在准备…", "Preparing…") : "开始录制"}</button> : <button className="danger capture-primary-action" disabled={interactionBlocked || busy} onClick={stop}>{captureOperation === "stopping_recording" ? tr("正在结束…", "Stopping…") : "结束录制"}</button>}
         </div>
       </section>
     </main>
@@ -1714,7 +1714,7 @@ function CharacterizationPage({ live, allowedUnikeys, chart, interactionBlocked,
   };
   const selectedDescription = characterizationStages.find((item) => item[0] === stage);
   return <main>
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     <section className="panel characterization-intro">
       <div><div className="panel-title">设备坐标系与结论边界</div><p>+X 指向佩戴者右侧，+Y 指向头部/挂绳端，+Z 指向身体外侧/按键面。这里保存原始数据并生成候选报告；不会把未验证比例写入 SI，也不会进入训练集。</p></div>
       <div className="training-guard">training_eligible = false</div>
@@ -1724,24 +1724,24 @@ function CharacterizationPage({ live, allowedUnikeys, chart, interactionBlocked,
       {!active ? <button className="primary" disabled={interactionBlocked || busy || live.state === "recording"} onClick={() => invoke("/api/v1/characterizations/start", { operator_id: operator, notes, sensor_sn: sensorSn || null })}>开始 IMU-only 表征</button> : <button className="danger" disabled={interactionBlocked} onClick={() => invoke("/api/v1/characterizations/stop")}>结束并生成报告</button>}
     </section>
     <section className="metrics">
-      <Metric label="BLE 连接" value={live.imu?.connected ? "已连接" : "未连接"} warn={!live.imu?.connected} />
-      <Metric label="通知包" value={live.imu?.packet_count ?? 0} />
-      <Metric label="候选样本" value={live.imu?.sample_count ?? 0} />
-      <Metric label="回调丢弃" value={live.imu?.callback_drops ?? 0} warn={(live.imu?.callback_drops ?? 0) > 0} />
-      <Metric label="当前阶段" value={currentStage?.stage_code ?? "未开始"} />
-      <Metric label="训练资格" value="禁止" warn />
+      <Metric label={tr("BLE 连接", "BLE connection")} value={live.imu?.connected ? tr("已连接", "Connected") : tr("未连接", "Disconnected")} warn={!live.imu?.connected} />
+      <Metric label={tr("通知包", "Notifications")} value={live.imu?.packet_count ?? 0} />
+      <Metric label={tr("候选样本", "Candidate samples")} value={live.imu?.sample_count ?? 0} />
+      <Metric label={tr("回调丢弃", "Callback drops")} value={live.imu?.callback_drops ?? 0} warn={(live.imu?.callback_drops ?? 0) > 0} />
+      <Metric label={tr("当前阶段", "Current stage")} value={currentStage?.stage_code ?? tr("未开始", "Not started")} />
+      <Metric label={tr("训练资格", "Training eligibility")} value={tr("禁止", "Blocked")} warn />
     </section>
     <section className="capture-grid">
       <div className="panel">
         <div className="panel-title">分阶段物理实验</div>
         <label>实验阶段<select value={stage} disabled={interactionBlocked || !active || !!currentStage} onChange={(e) => setStage(e.target.value as typeof stage)}>{characterizationStages.map((item) => <option value={item[0]} key={item[0]}>{item[1]}</option>)}</select></label>
         <p className="stage-help">{selectedDescription?.[2]}</p>
-        <label>阶段备注<input value={notes} disabled={interactionBlocked || !active || !!currentStage} onChange={(e) => setNotes(e.target.value)} placeholder="夹具、摆放或异常说明" /></label>
+        <label>阶段备注<input value={notes} disabled={interactionBlocked || !active || !!currentStage} onChange={(e) => setNotes(e.target.value)} placeholder={tr("夹具、摆放或异常说明", "Fixture, placement, or anomaly notes")} /></label>
         <div className="stage-actions">{!currentStage ? <button className="primary" disabled={interactionBlocked || !active} onClick={() => invoke("/api/v1/characterizations/stages/start", { stage_code: stage, notes })}>开始该阶段</button> : <button disabled={interactionBlocked} onClick={() => invoke("/api/v1/characterizations/stages/stop")}>结束该阶段</button>}</div>
       </div>
       <div className="panel chart-panel"><div className="panel-title">六轴实时原始计数 · 最近 120 秒</div><Plot time={chart.t} values={chart.values} /></div>
     </section>
-    <section className="panel library"><div className="panel-title">历史表征报告</div>{history.length === 0 ? <span className="muted">尚无完整报告</span> : history.map((item) => <article key={item.report_path}><div><strong>{item.source_h5}</strong><span>{(item.observed_rate_hz ?? 0).toFixed(5)} Hz · {item.packet_count} 包 · {item.calibration_status}</span></div><div className="state state-needs_attention">仅诊断</div></article>)}</section>
+    <section className="panel library"><div className="panel-title">历史表征报告</div>{history.length === 0 ? <span className="muted">尚无完整报告</span> : history.map((item) => <article key={item.report_path}><div><strong>{item.source_h5}</strong><span>{(item.observed_rate_hz ?? 0).toFixed(5)} Hz · {item.packet_count}{tr("包 ·", "packets ·")}{item.calibration_status}</span></div><div className="state state-needs_attention">仅诊断</div></article>)}</section>
   </main>;
 }
 
@@ -1980,7 +1980,7 @@ function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; o
     : definition.change?.source_code ?? "";
 
   return <main className="taxonomy-admin">
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel taxonomy-intro">
       <div><div className="panel-title">活动标签管理</div><strong>当前版本 {definition.version}</strong><p className="stage-help">code 是不可修改的机器标识，name 是标注页面使用的可修改显示名称。历史版本和训练快照保持不可变。</p>{definition.change
@@ -1992,7 +1992,7 @@ function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; o
       <div className="panel-title">新增活动标签</div>
       <div className="taxonomy-create-fields">
         <label>标签类型<select value={binaryLabel} onChange={(event) => setBinaryLabel(event.target.value as "fall" | "non_fall")}><option value="non_fall">非跌倒</option><option value="fall">跌倒</option></select></label>
-        <label>稳定 code<input value={code} onChange={(event) => setCode(event.target.value)} placeholder="例如 stair_climbing" /></label>
+        <label>稳定 code<input value={code} onChange={(event) => setCode(event.target.value)} placeholder={tr("例如 stair_climbing", "For example, stair_climbing")} /></label>
         <label>{tr("显示名称", "Display name")}<input value={name} onChange={(event) => setName(event.target.value)} placeholder={tr("例如 上楼梯", "For example, Stair climbing")} /></label>
         <button className="primary" disabled={busy !== "" || !code.trim() || !name.trim()} onClick={createActivity}>新增标签</button>
       </div>
@@ -2555,7 +2555,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       action === "assign"
       && review.workflow.state === "in_progress"
       && review.workflow.annotator_id !== annotator
-      && !window.confirm(`该任务当前由 ${review.workflow.annotator_id} 领取。确认接管吗？`)
+      && !window.confirm(tr(`该任务当前由 ${review.workflow.annotator_id} 领取。确认接管吗？`, `This task is claimed by ${review.workflow.annotator_id}. Take over?`))
     ) return;
     setError("");
     try {
@@ -2671,7 +2671,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
           `目录刷新完成：新增或更新 ${result.imported} 条，未变化 ${result.unchanged} 条，跳过异常 ${result.skipped} 条`,
           `Catalog refreshed: ${result.imported} added or updated, ${result.unchanged} unchanged, ${result.skipped} invalid`,
         )
-        + (firstIssue ? `；${firstIssue.recording_id} [${firstIssue.code}] ${firstIssue.message}` : "")
+        + (firstIssue ? `${tr("；", "; ")}${firstIssue.recording_id} [${firstIssue.code}] ${userVisibleMessage(firstIssue.message)}` : "")
       );
     } catch (e) {
       setError((e as Error).message);
@@ -2830,7 +2830,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       : review.workflow.state === "completed"
         ? "该任务已经完成；负责人或管理员重开后才能修改"
         : review.workflow.annotator_id !== annotator
-          ? `任务当前由 ${review.workflow.annotator_id} 负责；接管后才能修改`
+          ? tr(`任务当前由 ${review.workflow.annotator_id} 负责；接管后才能修改`, `This task is assigned to ${review.workflow.annotator_id}; take over before editing`)
           : "";
   const displayTaxonomy = review?.workflow.state === "completed" ? recordingTaxonomy : taxonomy;
   const activityDisplay = (code: string) => {
@@ -2849,9 +2849,9 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
     },
   ), [recordings, session.unikey, recordingQuery, recordingTier, recordingParticipant, recordingCollection]);
   const queueOrder: { key: RecordingQueueKey; zh: string; en: string }[] = [
-    { key: "mine", zh: "分配给我", en: "Assigned to me" },
+    { key: "mine", zh: tr("分配给我", "Assign to me"), en: "Assigned to me" },
     { key: "unassigned", zh: "未领取", en: "Unassigned" },
-    { key: "others", zh: "其他成员进行中", en: "Others in progress" },
+    { key: "others", zh: tr("其他成员进行中", "In progress by another member"), en: "Others in progress" },
     { key: "completed", zh: "已完成", en: "Completed" },
   ];
   const visibleRecordingCount = queueOrder.reduce(
@@ -3061,11 +3061,11 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       <section className="annotation-workbench-bar">
         <button ref={recordingDrawerButtonRef} onClick={openRecordingDrawer}>{tr("录制列表", "Recordings")}</button>
         <div className="annotation-recording-summary">
-          <strong>{selectedRecording ? `${selectedRecording.participant_id ?? "待确认身份"} · ${tierLabel(selectedRecording.data_tier)}` : "未选择录制"}</strong>
+          <strong>{selectedRecording ? `${selectedRecording.participant_id ?? tr("待确认身份", "Identity unconfirmed")} · ${tierLabel(selectedRecording.data_tier)}` : "未选择录制"}</strong>
           {selected && <code title={selected}>{selected}</code>}
         </div>
         {review && <span className={`state state-${review.workflow.state === "completed" ? "ready" : review.workflow.state === "in_progress" ? "in_progress" : "needs_attention"}`}>
-          {review.workflow.state === "unassigned" ? "未领取" : review.workflow.state === "in_progress" ? `标注中 · ${review.workflow.annotator_id}` : "已完成"}
+          {review.workflow.state === "unassigned" ? "未领取" : review.workflow.state === "in_progress" ? tr(`标注中 · ${review.workflow.annotator_id}`, `Annotating · ${review.workflow.annotator_id}`) : "已完成"}
         </span>}
         <span className={`save-indicator save-${saveState}`}>
           {saveState === "saving" ? "正在保存…" : saveState === "saved" ? "已保存" : saveState === "error" ? "保存失败" : saveState === "conflict" ? "版本冲突" : "无待保存修改"}
@@ -3190,12 +3190,12 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         </section>
 
         <section className="annotation-tools-pane">
-          <nav className="annotation-task-tabs" aria-label="标注任务">
-            {(["sync", "annotate", "data", "manage"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : item === "data" ? "3 数据" : "4 管理"}</button>)}
+          <nav className="annotation-task-tabs" aria-label={tr("标注任务", "Annotation tasks")}>
+            {(["sync", "annotate", "data", "manage"] as AnnotationTaskTab[]).map((item) => <button key={item} className={taskTab === item ? "active" : ""} onClick={() => setTaskTab(item)}>{item === "sync" ? "1 同步" : item === "annotate" ? "2 标注" : item === "data" ? tr("3 数据", "3 Data") : tr("4 管理", "4 Management")}</button>)}
           </nav>
 
           <div className={`annotation-task-scroll ${taskTab === "annotate" ? "annotation-task-scroll-annotate" : ""}`}>
-            {error && <div className="error-banner">{error}</div>}
+            {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
             {saveMessage && saveState !== "saved" && <p className="stage-help warning-text">{saveMessage}</p>}
             {review && !canEdit && <div className="task-notice"><strong>{editDisabledReason}</strong></div>}
 
@@ -3203,10 +3203,10 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
               {review && <div className="panel compact-panel participant-selection-panel">
                 <div className="panel-title">参与者</div>
                 <div className="save-row">
-                  <label>参与者 UniKey<select value={participantChoice} disabled={!canMutate} onChange={(event) => setParticipantChoice(event.target.value)}><option value="" disabled>请选择</option>{participants.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
-                  <button className="primary" disabled={!canMutate || !participantChoice || (review.participant_assignment.status === "confirmed" && review.participant_assignment.participant_id === participantChoice)} onClick={selectParticipant}>{review.participant_assignment.status === "confirmed" ? "更改参与者" : "保存参与者"}</button>
+                  <label>参与者 UniKey<select value={participantChoice} disabled={!canMutate} onChange={(event) => setParticipantChoice(event.target.value)}><option value="" disabled>{tr("请选择", "Select an option")}</option>{participants.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
+                  <button className="primary" disabled={!canMutate || !participantChoice || (review.participant_assignment.status === "confirmed" && review.participant_assignment.participant_id === participantChoice)} onClick={selectParticipant}>{review.participant_assignment.status === "confirmed" ? tr("更改参与者", "Change participant") : tr("保存参与者", "Save participant")}</button>
                 </div>
-                {review.participant_assignment.status === "confirmed" && <div className="success-banner compact-banner">当前参与者：<strong>{review.participant_assignment.participant_id}</strong></div>}
+                {review.participant_assignment.status === "confirmed" && <div className="success-banner compact-banner">{tr("当前参与者：", "Current participant: ")}<strong>{review.participant_assignment.participant_id}</strong></div>}
               </div>}
               <div className="panel compact-panel">
                 <div className="panel-title">轻拍同步复核</div>
@@ -3216,9 +3216,9 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                 </div>
                 {!experimentWindow ? <div className="placeholder compact">先在左侧逐帧定位，再点击“设为轻拍接触帧”</div> : <>
                   <div className={`recommendation-card confidence-${experimentWindow.recommendation.confidence}`}>
-                    <strong>推荐样本 {experimentWindow.recommendation.sample_index ?? "—"} · 置信度 {experimentWindow.recommendation.confidence === "high" ? "高" : experimentWindow.recommendation.confidence === "medium" ? "中" : "低"}</strong>
+                    <strong>推荐样本 {experimentWindow.recommendation.sample_index ?? "—"}{tr("· 置信度", " · confidence ")}{experimentWindow.recommendation.confidence === "high" ? "高" : experimentWindow.recommendation.confidence === "medium" ? "中" : "低"}</strong>
                     <span>视频帧 {experimentWindow.video_frame_index} · IMU {experimentImuSample ?? "未选择"}</span>
-                    <span>{experimentWindow.recommendation.reason}</span>
+                    <span>{userVisibleMessage(experimentWindow.recommendation.reason)}</span>
                   </div>
                   <Plot time={experimentWindow.time_s} values={experimentWindow.raw_counts} cursorTime={selectedExperimentTime} markers={experimentMarkers} height={220} onSelectTime={(time) => {
                     const candidates = experimentWindow.candidate_sample_index;
@@ -3229,9 +3229,9 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                       setExperimentImuSample(experimentWindow.sample_index[nearestIndex(experimentWindow.time_s, time)]);
                     }
                   }} />
-                  <div className="candidate-peaks">{experimentWindow.candidate_peaks.map((candidate) => <button key={candidate.sample_index} className={experimentImuSample === candidate.sample_index ? "selected" : ""} onClick={() => setExperimentImuSample(candidate.sample_index)}>#{candidate.sample_index} · {candidate.time_s.toFixed(3)} s · 强度 {candidate.strength_rank}</button>)}</div>
-                  <div className="save-row"><button className="primary" disabled={!canMutate || experimentImuSample === null || !selectedExperimentIsCandidate || experimentBusy} onClick={confirmFormalAnchor}>确认{syncRole === "start_tap" ? "开始" : "结束"}锚点</button><button onClick={() => { setExperimentWindow(null); setExperimentImuSample(null); }}>取消</button></div>
-                  {selectedExperimentCandidate && <details><summary>候选技术数据</summary><p className="stage-help">事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)} · 样本突变 {selectedExperimentCandidate.robust_z.toFixed(1)} · 推荐分数 {selectedExperimentCandidate.recommendation_score.toFixed(3)} · 时间先验 {recommendationOffsetSource === "formal_anchor" ? "已确认锚点" : "共同主机时钟"}</p></details>}
+                  <div className="candidate-peaks">{experimentWindow.candidate_peaks.map((candidate) => <button key={candidate.sample_index} className={experimentImuSample === candidate.sample_index ? "selected" : ""} onClick={() => setExperimentImuSample(candidate.sample_index)}>#{candidate.sample_index} · {candidate.time_s.toFixed(3)}{tr("s · 强度", " s · strength ")}{candidate.strength_rank}</button>)}</div>
+                  <div className="save-row"><button className="primary" disabled={!canMutate || experimentImuSample === null || !selectedExperimentIsCandidate || experimentBusy} onClick={confirmFormalAnchor}>{syncRole === "start_tap" ? tr("确认开始锚点", "Confirm start anchor") : tr("确认结束锚点", "Confirm end anchor")}</button><button onClick={() => { setExperimentWindow(null); setExperimentImuSample(null); }}>取消</button></div>
+                  {selectedExperimentCandidate && <details><summary>候选技术数据</summary><p className="stage-help">事件显著性 {selectedExperimentCandidate.event_robust_z.toFixed(1)}{tr("· 样本突变", " · sample change ")}{selectedExperimentCandidate.robust_z.toFixed(1)}{tr("· 推荐分数", " · suggestion score ")}{selectedExperimentCandidate.recommendation_score.toFixed(3)}{tr("· 时间先验", " · timing prior ")}{recommendationOffsetSource === "formal_anchor" ? "已确认锚点" : "共同主机时钟"}</p></details>}
                 </>}
                 <div className="anchor-list">{sync?.anchors.map((anchor) => <div key={anchor.role}><button onClick={() => jumpToRecordingTime(anchor.video_time_ns)}>{anchor.role === "start_tap" ? tr("开始", "Start") : tr("结束", "End")} · {tr("帧", "Frame")} {anchor.source_video_frame ?? "—"} · {seconds(anchor.video_time_ns)}</button><button disabled={!canMutate} onClick={() => removeSyncAnchor(anchor.role)}>{tr("删除", "Delete")}</button></div>)}</div>
               </div>
@@ -3239,10 +3239,10 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                 <div className="panel-title">同步结论</div>
                 <div className={`recommendation-card confidence-${sync?.quality === "verified" ? "high" : "low"}`}>
                   <strong>{sync?.quality === "verified" ? "同步已验证" : sync?.quality === "awaiting_confirmation" ? "等待确认固定偏移" : sync?.quality === "needs_review" ? "需要重新检查锚点" : "尚未评估"}</strong>
-                  <span>估计偏移 {sync ? `${sync.estimated_offset_seconds >= 0 ? "+" : ""}${sync.estimated_offset_seconds.toFixed(3)} s` : "—"} · 首尾差 {sync ? `${(sync.anchor_disagreement_ns / 1e9).toFixed(3)} s` : "—"}</span>
+                  <span>估计偏移 {sync ? `${sync.estimated_offset_seconds >= 0 ? "+" : ""}${sync.estimated_offset_seconds.toFixed(3)} s` : "—"}{tr("· 首尾差", " · start/end difference ")}{sync ? `${(sync.anchor_disagreement_ns / 1e9).toFixed(3)} s` : "—"}</span>
                 </div>
                 <div className="save-row"><button className="primary" disabled={!canMutate || !hasFormalAnchors} onClick={() => saveSync(false)}>评估并保存</button>{sync?.recommendation === "apply_fixed_offset" && <button className="danger" disabled={!canMutate} onClick={() => saveSync(true)}>应用固定偏移</button>}<button disabled={!canMutate || !hasFormalAnchors || !doc} onClick={proposeTapExclusions}>生成轻拍排除区</button></div>
-                <details><summary>同步规则与技术数据</summary><p className="stage-help">原始主机时间永不覆盖。时间比例固定为 1.0；仅当偏移明显且首尾一致时才建议固定平移。开始 {sync ? seconds(sync.start_offset_ns) : "—"} · 结束 {sync ? seconds(sync.end_offset_ns) : "—"} · RMS {sync && Number.isFinite(sync.residual_rms_ns) ? `${(sync.residual_rms_ns / 1e6).toFixed(2)} ms` : "—"}。</p></details>
+                <details><summary>同步规则与技术数据</summary><p className="stage-help">{tr("原始主机时间永不覆盖。时间比例固定为 1.0；仅当偏移明显且首尾一致时才建议固定平移。开始", "Original host timestamps are never overwritten. The scale stays at 1.0; a fixed shift is suggested only for a clear, consistent offset. Start ")}{sync ? seconds(sync.start_offset_ns) : "—"}{tr("· 结束", " · end ")}{sync ? seconds(sync.end_offset_ns) : "—"} · RMS {sync && Number.isFinite(sync.residual_rms_ns) ? `${(sync.residual_rms_ns / 1e6).toFixed(2)} ms` : "—"}。</p></details>
               </div>
             </>}
 
@@ -3252,7 +3252,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
                 <div className="time-readout">{currentTime.toFixed(3)} s · {tr("帧", "frame")} {currentFrame}</div>
                 <div className="mark-buttons"><button disabled={!canMutate} onClick={() => mark("start")}>起点 I</button><button disabled={!canMutate} onClick={() => mark("end")}>终点 O</button><button disabled={!canMutate || annotationKind !== "fall"} onClick={() => mark("impact")}>撞击 2</button></div>
                 <div className="marks"><span>{tr("起", "Start")} {seconds(marks.start)}</span><span>{tr("止", "End")} {seconds(marks.end)}</span><span>{tr("撞击", "Impact")} {seconds(marks.impact)}</span></div>
-                <div className="segment-form"><select disabled={!canMutate} value={annotationKind} onChange={(event) => setAnnotationKind(event.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 训练</option><option value="fall">跌倒 · 训练</option><option value="exclude">明确排除</option></select>{annotationKind === "exclude" ? <select disabled={!canMutate} value={exclusionReason} onChange={(event) => setExclusionReason(event.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canMutate} value={activity} onChange={(event) => setActivity(event.target.value)}>{choices.map((item) => <option value={item.code} key={item.code}>{item.name}</option>)}</select>}<button className="primary" disabled={!canMutate || marks.start === undefined || marks.end === undefined} onClick={addAnnotationInterval}>添加并保存</button></div>
+                <div className="segment-form"><select disabled={!canMutate} value={annotationKind} onChange={(event) => setAnnotationKind(event.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 训练</option><option value="fall">跌倒 · 训练</option><option value="exclude">明确排除</option></select>{annotationKind === "exclude" ? <select disabled={!canMutate} value={exclusionReason} onChange={(event) => setExclusionReason(event.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canMutate} value={activity} onChange={(event) => setActivity(event.target.value)}>{choices.map((item) => <option data-no-localize value={item.code} key={item.code}>{item.name}</option>)}</select>}<button className="primary" disabled={!canMutate || marks.start === undefined || marks.end === undefined} onClick={addAnnotationInterval}>添加并保存</button></div>
                 <details><summary>标注规范</summary><p className="stage-help">跌倒区间从首次明确失衡开始，到落地后身体大动作停止并稳定。区间起点同时表示 onset；每个跌倒区间必须有且仅有一个撞击时刻。准备阶段和稳定后的自然状态标为 non_fall。</p></details>
               </div>
               {doc && <section className="panel compact-panel interval-list-panel">
@@ -3282,26 +3282,26 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
 
             {taskTab === "data" && review && <>
             {doc && <div className="panel compact-panel review-panel">
-              <div className="panel-title">标注完成情况</div>
-              <div className="coverage-track" aria-label="标注覆盖时间轴">{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}</div>
-              <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? `未覆盖 ${(uncoveredNs / 1e9).toFixed(3)} s` : "全时间轴已覆盖"} · {fallWithoutImpactCount > 0 ? `${fallWithoutImpactCount} 个跌倒缺少撞击` : "所有跌倒均有撞击"} · {sync?.quality === "verified" ? "同步已验证" : "同步未验证"}</div>
-              {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); jumpToRecordingTime(gap.start); setTaskTab("annotate"); }}>空白 {index + 1} · {seconds(gap.start)}–{seconds(gap.end)}</button>)}</div>}
+              <div className="panel-title">{tr("标注完成情况", "Annotation completeness")}</div>
+              <div className="coverage-track" aria-label={tr("标注覆盖时间轴", "Annotation coverage timeline")}>{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}</div>
+              <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? tr(`未覆盖 ${(uncoveredNs / 1e9).toFixed(3)} s`, `Uncovered: ${(uncoveredNs / 1e9).toFixed(3)} s`) : "全时间轴已覆盖"} · {fallWithoutImpactCount > 0 ? tr(`${fallWithoutImpactCount} 个跌倒缺少撞击`, `${fallWithoutImpactCount} falls missing impact`) : "所有跌倒均有撞击"} · {sync?.quality === "verified" ? "同步已验证" : "同步未验证"}</div>
+              {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); jumpToRecordingTime(gap.start); setTaskTab("annotate"); }}>{tr("空白", "Uncovered ")}{index + 1} · {seconds(gap.start)}–{seconds(gap.end)}</button>)}</div>}
               {review?.workflow.state === "completed"
                 ? <div className="success-banner compact-banner">任务已完成；可在“数据”中下载当前导出，重开后才能修改。</div>
                 : <div className="save-row"><button className="primary" disabled={!canMutate || review?.participant_assignment.status !== "confirmed" || selectedRecording?.data_tier !== "prod" || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={finalizeAndComplete}>完成标注并生成训练 H5</button></div>}
               {selectedRecording?.data_tier !== "prod" && <p className="stage-help warning-text">测试数据允许保存和下载，但不会完成为训练数据。</p>}
             </div>}
             <div className="panel compact-panel workflow-panel">
-              <div className="panel-title">数据文件</div>
+              <div className="panel-title">{tr("数据文件", "Data files")}</div>
               <div className="download-grid"><a className="button-link" href={`/api/v1/recordings/${selected}/capture-h5/download`} download>原始 capture.h5</a><a className="button-link" href={`/api/v1/recordings/${selected}/review/download`} download>标注 review.json</a>{selectedRecording?.data_tier === "prod" && status?.export === "exported" && <a className="button-link primary" href={`/api/v1/recordings/${selected}/aligned/download`} download>训练 aligned.h5</a>}</div>
             </div>
             </>}
 
             {taskTab === "manage" && review && <div className="panel compact-panel workflow-panel">
-              <div className="panel-title">录制管理</div>
-              <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>工作流 {review.workflow.state === "completed" ? "已完成" : review.workflow.state === "in_progress" ? "标注中" : "未领取"}</span><span>身份 {status?.participant === "confirmed" ? "已确认" : status?.participant === "selected" ? "待确认" : "未选择"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
-              {doc && <details><summary>任务技术详情</summary><p className="stage-help">review revision {review.revision} · 负责人 {review.workflow.annotator_id ?? "无"} · 最后编辑者 {review.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>}
-              {canReopen && <div className="save-row"><button onClick={() => changeWorkflow("reopen")}>重开任务</button><span>重开后当前训练导出失效，需要重新完成标注。</span></div>}
+              <div className="panel-title">{tr("录制管理", "Recording management")}</div>
+              <div className="status-grid"><span>{selectedRecording?.data_tier === "prod" ? "正式数据" : "测试数据"}</span><span>{tr("工作流", "Workflow: ")}{review.workflow.state === "completed" ? "已完成" : review.workflow.state === "in_progress" ? "标注中" : "未领取"}</span><span>{tr("身份", "Identity: ")}{status?.participant === "confirmed" ? tr("已确认", "Confirmed") : status?.participant === "selected" ? tr("待确认", "Unconfirmed") : "未选择"}</span><span>校准 {status?.calibration === "verified" ? "已验证" : "未验证"}</span><span>导出 {status?.export === "exported" ? "已生成" : "未生成"}</span></div>
+              {doc && <details><summary>任务技术详情</summary><p className="stage-help">review revision {review.revision}{tr("· 负责人", " · owner ")}{review.workflow.annotator_id ?? "无"}{tr("· 最后编辑者", " · last editor ")}{review.workflow.last_editor_id ?? "无"} · taxonomy {doc.taxonomy_version}</p></details>}
+              {canReopen && <div className="save-row"><button onClick={() => changeWorkflow("reopen")}>重开任务</button><span>{tr("重开后当前训练导出失效，需要重新完成标注。", "Reopening invalidates the active training export. Complete annotation again to generate a new export.")}</span></div>}
               <details className="danger-zone"><summary>删除整条录制</summary><p className="stage-help">删除会立即隐藏原始文件、预览、标注和当前导出；存储桶仍按策略保留软删除恢复窗口。</p>{!deleteArmed ? <button className="danger" onClick={() => setDeleteArmed(true)}>开始删除</button> : <><label>输入 <code>DELETE {selected}</code><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="save-row"><button className="danger" disabled={deleteBusy || deleteConfirmation !== `DELETE ${selected}`} onClick={permanentlyDeleteRecording}>确认删除</button><button disabled={deleteBusy} onClick={() => { setDeleteArmed(false); setDeleteConfirmation(""); }}>取消</button></div></>}</details>
             </div>}
           </div>
@@ -3374,7 +3374,7 @@ function SnapshotDeliveryViewer() {
     .map((item) => ({ time: item.start_s, label: tr("撞击", "Impact"), color: "#facc15", dashed: true })) ?? [];
   return <main className="snapshot-viewer">
     <div className="save-row"><a className="button-link" href="?view=training">← {tr("返回训练快照", "Back to training snapshots")}</a><strong>{tr("不可变快照只读查看", "Immutable snapshot viewer")} · {snapshotId}</strong></div>
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     {catalog && <section className="snapshot-viewer-layout">
       <aside className="panel snapshot-viewer-recordings">
         <div className="panel-title">{tr("快照录制", "Snapshot recordings")} · {catalog.recordings.length}</div>
@@ -3497,7 +3497,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
   const otherSnapshots = snapshots.filter((item) => item !== currentSnapshot);
 
   return <main>
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
       <div className="panel-title">{tr("训练快照", "Training snapshots")}</div>
@@ -3557,8 +3557,8 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
       {snapshot.delivery?.eligible && snapshot.delivery.state === "ready" && <a className="button-link" href="https://viewer.imu.kscii.tech" target="_blank" rel="noreferrer">{tr("打开本地文件查看器", "Open local-file viewer")}</a>}
       {snapshot.delivery?.eligible && snapshot.delivery.state !== "ready" && <button disabled={busy || generating} onClick={() => onGenerateDelivery(snapshot.snapshot_id)}>{generating ? tr(`后台生成中 ${progress.toFixed(0)}%`, `Generating ${progress.toFixed(0)}%`) : snapshot.delivery.state === "failed" ? tr("重试生成客户 H5", "Retry client HDF5") : tr("生成客户 H5", "Create client HDF5")}</button>}
       {snapshot.delivery?.eligible && generating && <span className="muted">{stageLabels[snapshot.delivery.stage ?? "queued"] ?? snapshot.delivery.stage} · {snapshot.delivery.bytes_total ? `${formatDatasetBytes(snapshot.delivery.bytes_complete ?? 0)} / ${formatDatasetBytes(snapshot.delivery.bytes_total)}` : tr("正在排队", "Queued")}</span>}
-      {snapshot.delivery?.eligible && snapshot.delivery.state === "failed" && snapshot.delivery.message && <span className="warning-text">{tr("生成失败：", "Generation failed: ")}{snapshot.delivery.message}</span>}
-      {!snapshot.delivery?.eligible && <span className="muted" title={snapshot.delivery?.message ?? ""}>{tr("该快照不可生成客户 H5", "This snapshot is not eligible for client HDF5 delivery")}</span>}
+      {snapshot.delivery?.eligible && snapshot.delivery.state === "failed" && snapshot.delivery.message && <span className="warning-text">{tr("生成失败：", "Generation failed: ")}{userVisibleMessage(snapshot.delivery.message)}</span>}
+      {!snapshot.delivery?.eligible && <span className="muted" title={userVisibleMessage(snapshot.delivery?.message ?? "")}>{tr("该快照不可生成客户 H5", "This snapshot is not eligible for client HDF5 delivery")}</span>}
       {snapshot.benchmark && !snapshot.benchmark.is_current && <button disabled={busy} onClick={() => onActivate(snapshot.snapshot_id)}>{tr("验证后激活 current", "Activate current after validation")}</button>}
       {session.is_admin && <button className="danger" disabled={busy} onClick={() => onDelete(snapshot.snapshot_id)}>{tr("清理快照", "Delete snapshot")}</button>}
     </div>
@@ -3566,20 +3566,20 @@ function SnapshotRow({ snapshot, current = false, session, busy, onDelete, onAct
 }
 
 const MODEL_METRICS = [
-  { id: "balanced_accuracy", scope: "window", labelZh: "平衡准确率", labelEn: "Balanced accuracy", core: true },
-  { id: "sensitivity", scope: "window", labelZh: "窗口灵敏度", labelEn: "Window sensitivity", core: true },
+  { id: "balanced_accuracy", scope: "window", labelZh: tr("平衡准确率", "Balanced accuracy"), labelEn: "Balanced accuracy", core: true },
+  { id: "sensitivity", scope: "window", labelZh: tr("窗口灵敏度", "Window sensitivity"), labelEn: "Window sensitivity", core: true },
   { id: "f1", scope: "window", labelZh: "F1", labelEn: "F1", core: true },
   { id: "auprc", scope: "window", labelZh: "AUPRC", labelEn: "AUPRC", core: true },
-  { id: "event_sensitivity", scope: "event", labelZh: "事件灵敏度", labelEn: "Event sensitivity", core: true },
-  { id: "adl_alarm_episodes_per_hour", scope: "alarm", labelZh: "ADL 报警事件/小时", labelEn: "ADL alarm episodes/hour", core: true },
-  { id: "onset_latency_p95_s", scope: "alarm", labelZh: "Onset 检测延迟 P95（秒）", labelEn: "Onset detection latency P95 (s)", core: true },
-  { id: "specificity", scope: "window", labelZh: "特异度", labelEn: "Specificity", core: false },
-  { id: "precision", scope: "window", labelZh: "精确率", labelEn: "Precision", core: false },
+  { id: "event_sensitivity", scope: "event", labelZh: tr("事件灵敏度", "Event sensitivity"), labelEn: "Event sensitivity", core: true },
+  { id: "adl_alarm_episodes_per_hour", scope: "alarm", labelZh: tr("ADL 报警事件/小时", "ADL alarm episodes/hour"), labelEn: "ADL alarm episodes/hour", core: true },
+  { id: "onset_latency_p95_s", scope: "alarm", labelZh: tr("Onset 检测延迟 P95（秒）", "Onset detection latency P95 (seconds)"), labelEn: "Onset detection latency P95 (s)", core: true },
+  { id: "specificity", scope: "window", labelZh: tr("特异度", "Specificity"), labelEn: "Specificity", core: false },
+  { id: "precision", scope: "window", labelZh: tr("精确率", "Precision"), labelEn: "Precision", core: false },
   { id: "mcc", scope: "window", labelZh: "MCC", labelEn: "MCC", core: false },
   { id: "auroc", scope: "window", labelZh: "AUROC", labelEn: "AUROC", core: false },
-  { id: "adl_recording_false_positive_rate", scope: "alarm", labelZh: "ADL 录制误报率", labelEn: "ADL recording FPR", core: false },
-  { id: "onset_latency_median_s", scope: "alarm", labelZh: "延迟中位数", labelEn: "Median latency", core: false },
-  { id: "impact_offset_median_s", scope: "alarm", labelZh: "撞击偏移中位数", labelEn: "Median impact offset", core: false },
+  { id: "adl_recording_false_positive_rate", scope: "alarm", labelZh: tr("ADL 录制误报率", "ADL recording false-positive rate"), labelEn: "ADL recording FPR", core: false },
+  { id: "onset_latency_median_s", scope: "alarm", labelZh: tr("延迟中位数", "Median latency"), labelEn: "Median latency", core: false },
+  { id: "impact_offset_median_s", scope: "alarm", labelZh: tr("撞击偏移中位数", "Median impact offset"), labelEn: "Median impact offset", core: false },
 ] as const;
 
 type ModelMetricDefinition = typeof MODEL_METRICS[number];
@@ -3618,7 +3618,7 @@ function ModelCatalogPage({ session }: { session: Session }) {
   const availableModels = catalog?.models.filter((item) => item.status === "available") ?? [];
 
   return <main className="model-catalog-page">
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     <section className="panel model-catalog">
       <div className="model-catalog-heading">
         <div>
@@ -3699,7 +3699,7 @@ function ModelPublicationCard({ summary, session, onChanged }: { summary: ModelC
         {session.is_admin && summary.status === "available" && <button className="danger secondary-danger" disabled={busy} onClick={() => void deprecate()}>{tr("标记为已弃用", "Deprecate")}</button>}
       </div>
     </div>
-    {error && <div className="error-banner compact-banner">{error}</div>}
+    {error && <div className="error-banner compact-banner">{userVisibleMessage(error)}</div>}
     {detail && summary.kind === "experiment" && <ExperimentEvidence detail={detail} />}
     {detail && summary.kind === "model" && <ModelReleaseEvidence detail={detail} />}
   </article>;
@@ -3715,10 +3715,10 @@ function ModelDownloads({ detail, fileIds }: { detail: ModelCatalogDetail; fileI
 }
 
 const MODEL_ENUM_LABELS: Record<string, [string, string]> = {
-  normalized_window: ["标准化 50×6 IMU 窗口", "Normalized 50×6 IMU window"],
-  engineered_features: ["158 维工程特征", "158 engineered features"],
-  si_window: ["原始 SI 50×6 IMU 窗口", "Raw SI 50×6 IMU window"],
-  participant_class_balanced: ["参与者与类别平衡", "Participant- and class-balanced"],
+  normalized_window: [tr("标准化 50×6 IMU 窗口", "Normalized 50×6 IMU window"), "Normalized 50×6 IMU window"],
+  engineered_features: [tr("158 维工程特征", "158 engineered features"), "158 engineered features"],
+  si_window: [tr("原始 SI 50×6 IMU 窗口", "Raw SI 50×6 IMU window"), "Raw SI 50×6 IMU window"],
+  participant_class_balanced: [tr("参与者与类别平衡", "Participant and class balancing"), "Participant- and class-balanced"],
 };
 
 function humanModelEnum(value: unknown) {
@@ -3822,7 +3822,7 @@ function DatasetCatalogPage() {
   useEffect(() => { void refresh(); }, []);
 
   return <main>
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     <section className="panel dataset-catalog">
       <div className="dataset-catalog-heading">
         <div>
@@ -4015,7 +4015,7 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
     try {
       const estimate = await api<{ estimated_bytes: number }>(`/api/v1/recordings/${recording.recording_id}/publish/estimate`);
       const gib = estimate.estimated_bytes / 1024 ** 3;
-      if (!window.confirm(`将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。\n预计读取或上传约 ${gib.toFixed(2)} GiB，继续吗？`)) return;
+      if (!window.confirm(tr(`将生成浏览代理并发布 H5、原始 MKV、代理 MP4 和 manifest。\n预计读取或上传约 ${gib.toFixed(2)} GiB，继续吗？`, `Generate a preview and publish the H5, original MKV, preview MP4, and manifest.\nAbout ${gib.toFixed(2)} GiB will be read or uploaded. Continue?`))) return;
       const result = await api<{ auth_required?: boolean }>(`/api/v1/recordings/${recording.recording_id}/publish`, { method: "POST" });
       if (result.auth_required) {
         setPendingPublish(recording);
@@ -4023,8 +4023,8 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
         return;
       }
       setMessage(publishMode === "local"
-        ? `已加入本机归档队列：${recording.recording_id}`
-        : `已加入后台上传队列：${recording.recording_id}`);
+        ? tr(`已加入本机归档队列：${recording.recording_id}`, `Queued for local archiving: ${recording.recording_id}`)
+        : tr(`已加入后台上传队列：${recording.recording_id}`, `Queued for background upload: ${recording.recording_id}`));
       onChanged();
     } catch (e) {
       setError((e as Error).message);
@@ -4052,8 +4052,8 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
   const uploadStateLabel = (recording: Recording) => {
     if (recording.upload_state === "stored_local") return "仅保存在本机";
     if (recording.upload_state === "auth_required") return "等待 Google 登录";
-    if (recording.upload_state === "legacy_published") return "历史校准已归档";
-    if (recording.upload_state === "remote_missing") return "云端未找到";
+    if (recording.upload_state === "legacy_published") return tr("历史校准已归档", "Historical calibration archived");
+    if (recording.upload_state === "remote_missing") return tr("云端未找到", "Not found in cloud storage");
     if (["uploaded", "published"].includes(recording.upload_state)) {
       return ["broker", "direct_gcs"].includes(recording.publish_target ?? "")
         ? "已上传团队 Bucket"
@@ -4066,7 +4066,7 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
       retry_wait: "等待自动重试",
       failed: "上传失败",
     };
-    return labels[recording.upload_state] ?? `发布 ${recording.upload_state}`;
+    return labels[recording.upload_state] ?? tr(`发布 ${recording.upload_state}`, `Publishing ${recording.upload_state}`);
   };
 
   const retryFinalization = async (recording: Recording) => {
@@ -4077,7 +4077,7 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
       await api(`/api/v1/recordings/${recording.recording_id}/finalization/retry`, {
         method: "POST"
       });
-      setMessage(`已加入后台收尾队列：${recording.recording_id}`);
+      setMessage(tr(`已加入后台收尾队列：${recording.recording_id}`, `Queued for background finalization: ${recording.recording_id}`));
       onChanged();
     } catch (e) {
       setError((e as Error).message);
@@ -4090,14 +4090,14 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
   const copyRecordingId = async (recordingId: string) => {
     try {
       await navigator.clipboard.writeText(recordingId);
-      setMessage(`已复制录制 ID：${recordingId}`);
+      setMessage(tr(`已复制录制 ID：${recordingId}`, `Copied recording ID: ${recordingId}`));
     } catch (e) {
       setError((e as Error).message);
     }
   };
 
   const deleteRecording = async (recordingId: string) => {
-    const confirmation = window.prompt(`这只删除本机副本；已经发布到云端的录制不会被删除。请输入完整 recording_id：\n${recordingId}`);
+    const confirmation = window.prompt(tr(`这只删除本机副本；已经发布到云端的录制不会被删除。请输入完整 recording_id：\n${recordingId}`, `Only the local copy will be deleted; recordings already published to the cloud will remain. Enter the complete recording_id:\n${recordingId}`));
     if (confirmation === null) return;
     setError("");
     try {
@@ -4105,7 +4105,7 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
         method: "DELETE",
         body: JSON.stringify({ confirmation })
       });
-      setMessage(`已永久删除本地录制：${recordingId}`);
+      setMessage(tr(`已永久删除本地录制：${recordingId}`, `Permanently deleted local recording: ${recordingId}`));
       onChanged();
     } catch (e) { setError((e as Error).message); }
   };
@@ -4131,13 +4131,13 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
     setError("");
     try {
       const result = await api<{ imported: number; skipped: number }>("/api/v1/maintenance/rebuild-catalog", { method: "POST" });
-      setMessage(`目录重建完成：导入 ${result.imported}，跳过 ${result.skipped}`);
+      setMessage(tr(`目录重建完成：导入 ${result.imported}，跳过 ${result.skipped}`, `Catalog rebuilt: ${result.imported} imported, ${result.skipped} skipped`));
       onChanged();
     } catch (e) { setError((e as Error).message); }
   };
 
   return <main>
-    {error && <div className="error-banner">{error}</div>}
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
       <div className="panel-title">本地录制与后台处理</div>
@@ -4158,19 +4158,19 @@ function CaptureLibrary({ recordings, onChanged, publishMode, cloudConfigured }:
           {recording.index_state === "indexed" && <span>标注端已接收</span>}
           {recording.index_state === "pending" && <span>等待标注端接收</span>}
           {recording.index_state === "rejected" && recording.upload_state !== "legacy_published" && <span className="warning-text">标注端拒绝</span>}
-          {recording.index_state === "rejected" && recording.upload_state === "legacy_published" && <span>校准证据不进入标注</span>}
+          {recording.index_state === "rejected" && recording.upload_state === "legacy_published" && <span>{tr("校准证据不进入标注", "Calibration evidence is excluded from annotation")}</span>}
         </div>
-        {recording.finalization_job && <p className={recording.finalization_job.state === "failed" ? "warning-text" : "stage-help"}>后台收尾：{jobStateLabel(recording.finalization_job)} · 尝试 {recording.finalization_job.attempts}/{recording.finalization_job.max_attempts}{recording.finalization_job.last_error ? ` · ${recording.finalization_job.last_error}` : ""}</p>}
-        {recording.upload_job && <p className={recording.upload_job.state === "failed" ? "warning-text" : "stage-help"}>后台上传：{jobStateLabel(recording.upload_job)} · 尝试 {recording.upload_job.attempts}/{recording.upload_job.max_attempts}{(recording.upload_job.total_bytes ?? 0) > 0 ? ` · ${Math.min(100, 100 * (recording.upload_job.progress_bytes ?? 0) / (recording.upload_job.total_bytes ?? 1)).toFixed(0)}%` : ""}{recording.upload_job.last_error ? ` · ${recording.upload_job.last_error}` : ""}</p>}
-        {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{recording.index_message}</p>}
+        {recording.finalization_job && <p className={recording.finalization_job.state === "failed" ? "warning-text" : "stage-help"}>{tr("后台收尾：", "Background finalization: ")}{jobStateLabel(recording.finalization_job)}{tr("· 尝试", " · attempt ")}{recording.finalization_job.attempts}/{recording.finalization_job.max_attempts}{recording.finalization_job.last_error ? ` · ${userVisibleMessage(recording.finalization_job.last_error)}` : ""}</p>}
+        {recording.upload_job && <p className={recording.upload_job.state === "failed" ? "warning-text" : "stage-help"}>{tr("后台上传：", "Background upload: ")}{jobStateLabel(recording.upload_job)}{tr("· 尝试", " · attempt ")}{recording.upload_job.attempts}/{recording.upload_job.max_attempts}{(recording.upload_job.total_bytes ?? 0) > 0 ? ` · ${Math.min(100, 100 * (recording.upload_job.progress_bytes ?? 0) / (recording.upload_job.total_bytes ?? 1)).toFixed(0)}%` : ""}{recording.upload_job.last_error ? ` · ${userVisibleMessage(recording.upload_job.last_error)}` : ""}</p>}
+        {recording.index_message && <p className={recording.index_state === "rejected" ? "warning-text" : "stage-help"}>{userVisibleMessage(recording.index_message)}</p>}
         <div className="save-row">
-          {recording.h5_path?.endsWith(".partial.h5") && recording.mkv_path?.endsWith(".partial.mkv") && !activeJobStates.has(recording.finalization_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => retryFinalization(recording)}>{busy === recording.recording_id ? "正在提交…" : "重新收尾"}</button>}
-          {publishMode !== "disabled" && recording.state === "ready" && !["uploaded", "published", "legacy_published", "remote_missing"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? "正在提交…" : recording.upload_job?.state === "failed" ? "重新上传" : publishMode === "local" ? "归档到本机" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并上传"}</button>}
+          {recording.h5_path?.endsWith(".partial.h5") && recording.mkv_path?.endsWith(".partial.mkv") && !activeJobStates.has(recording.finalization_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => retryFinalization(recording)}>{busy === recording.recording_id ? tr("正在提交…", "Submitting…") : "重新收尾"}</button>}
+          {publishMode !== "disabled" && recording.state === "ready" && !["uploaded", "published", "legacy_published", "remote_missing"].includes(recording.upload_state) && !activeJobStates.has(recording.upload_job?.state ?? "") && <button className="primary" disabled={busy === recording.recording_id} onClick={() => publish(recording)}>{busy === recording.recording_id ? tr("正在提交…", "Submitting…") : recording.upload_job?.state === "failed" ? "重新上传" : publishMode === "local" ? "归档到本机" : recording.data_tier === "prod" ? "立即加入上传队列" : "估算并上传"}</button>}
           <button onClick={() => copyRecordingId(recording.recording_id)}>复制录制 ID</button>
           <button className="danger" disabled={Boolean(busy) || [recording.finalization_job, recording.upload_job].some((job) => job && activeJobStates.has(job.state))} onClick={() => deleteRecording(recording.recording_id)}>永久删除</button>
         </div>
         {[...recording.issues, ...(recording.validation_issues ?? [])].length > 0 && <ul>{[...recording.issues, ...(recording.validation_issues ?? [])].map((issue) => <li key={issue}>{issueLabel(issue)}</li>)}</ul>}
-        {(recording.quality_warnings ?? []).length > 0 && <ul className="warning-text">{recording.quality_warnings?.map((warning) => <li key={warning}>质量警告（允许发布）：{issueLabel(warning)}</li>)}</ul>}
+        {(recording.quality_warnings ?? []).length > 0 && <ul className="warning-text">{recording.quality_warnings?.map((warning) => <li key={warning}>{tr("质量警告（允许发布）：", "Quality warnings (publication allowed): ")}{issueLabel(warning)}</li>)}</ul>}
       </article>)}
     </section>
     <section className="panel library">

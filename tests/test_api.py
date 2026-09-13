@@ -19,6 +19,33 @@ def test_mjpeg_part_has_explicit_length_and_valid_boundaries() -> None:
     assert part.endswith(jpeg + b"\r\n")
 
 
+def test_oauth_callback_errors_follow_browser_language(monkeypatch, tmp_path: Path) -> None:
+    app = create_capture_app(Settings(
+        data_root=tmp_path / "data",
+        catalog_path=tmp_path / "catalog.sqlite3",
+        activity_taxonomy_path=Path("configs/activities.yaml").resolve(),
+    ))
+
+    def fail_login(**_kwargs):
+        raise RuntimeError("OAuth state 无效或已经过期，请重新登录")
+
+    monkeypatch.setattr(app.state.coordinator.cloud_auth, "complete", fail_login)
+    client = TestClient(app)
+    for language, expected in [
+        ("en-US,en;q=0.9", "The sign-in request is invalid or has expired"),
+        ("zh-CN", "OAuth state 无效或已经过期"),
+    ]:
+        response = client.get(
+            "/api/v1/cloud/oauth/callback?state=expired&code=test-code",
+            headers={"accept-language": language},
+        )
+        assert response.status_code == 400
+        assert expected in response.text
+        assert "imu-oauth-failed" in response.text
+        if language.startswith("en"):
+            assert "请重新登录" not in response.text
+
+
 def test_local_api_health_config_and_frontend(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()

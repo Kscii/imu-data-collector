@@ -199,6 +199,10 @@ def test_desktop_oauth_reports_safe_google_error_details(monkeypatch) -> None:
 
     assert "client_secret is missing" in str(caught.value)
     assert "one-time-code" not in str(caught.value)
+    english = desktop_auth.oauth_error_english(caught.value)
+    assert "HTTP 400, invalid_request" in english
+    assert "client_secret is missing" in english
+    assert "one-time-code" not in english
 
 
 def test_desktop_oauth_does_not_require_native_client_secret() -> None:

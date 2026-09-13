@@ -1,5 +1,12 @@
 # 桌面跨平台采集
 
+## 本轮发布范围：v0.3.0
+
+2026-09-13：本轮只发布 [Linux 源码与安装说明](linux-source-install.md)，并更新云端服务。
+客户提供的换算系数与当前新设备不匹配，需等待正确文档或匹配设备，因此 Windows/macOS
+新版本暂缓发布。Linux 新设备同样保持 test-only；软件发布不代表系数已经验证。
+下文 Windows/macOS 的构建和历史验收记录保留，但不代表 v0.3.0 提供了新的安装包。
+
 ## 支持矩阵
 
 | 平台 | BLE | 摄像头 | 安装形式 | 当前结论 |
@@ -22,15 +29,15 @@ Windows 10 与 Windows 11 共用 WinRT、DirectShow 和 x64 安装包代码路�
 - Bleak 回调进入进程时立即读取 Python `monotonic_ns()`；原始通知、设备原始采样和接收时间不重采样。CW12EU-T 当前约 25 Hz，`acce&gyro` 新设备当前实测约 50 Hz。
 - 视频保留 FFmpeg 报告的真实逐帧 PTS；Windows/macOS 把第一帧源 PTS 映射到本次 FFmpeg 启动时的主机单调时钟，Linux 继续保存 V4L2 的单调 PTS。
 - 严格 25 Hz 只在同步、标注完成后的 `aligned.h5` 中派生，不能覆盖原始 H5。
-- 一次录制仍是同名 H5/MKV 原子文件对，不因操作系统改变目录层级或 manifest 3.1 合同。
+- 一次录制仍是同名 H5/MKV 原子文件对，不因操作系统改变目录层级；新版 manifest 为 3.2。
 
-capture H5 schema 1.8 延续并新增以下运行时事实：
+capture H5 schema 1.9 保留以下运行时事实，并冻结配置 Snapshot/content 哈希及 SI Profile ID：
 
 - 根属性：`host_os`、`host_os_version`、`host_architecture`、`monotonic_implementation`、`clock_domain`；
 - `imu` 属性：`ble_backend`、`local_device_id`、`sensor_sn`、协议/设备档案摘要、设备注册表 revision/快照摘要，以及明确标记为非正式的本机候选换算元数据；
 - `video` 属性：`video_backend`、`timestamp_mapping`、`camera_control_policy`。
 
-新协议的 22-byte ABF2 通知按“一条通知一个样本”保存六轴原始计数、设备本地毫秒计数器和原始后缀。该计数器不是世界时间；跨设备/视频对齐仍以主机单调时钟为基础。旧 schema 只作为只读历史输入，新采集必须写 1.8，不能把旧文件静默改版本。
+新协议的 22-byte ABF2 通知按“一条通知一个样本”保存六轴原始计数、设备本地毫秒计数器和原始后缀。该计数器不是世界时间；跨设备/视频对齐仍以主机单调时钟为基础。旧 schema 只作为只读历史输入，新采集写 1.9，不能把旧文件静默改版本。
 
 ## 摄像头策略
 

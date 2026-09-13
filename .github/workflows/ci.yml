@@ -148,6 +148,12 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
         working-directory: frontend
         run: npm ci
+      - name: 前端行为与语言测试
+        if: >-
+          needs.scope.outputs.frontend == 'true' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true')
+        working-directory: frontend
+        run: npm test
       - name: 构建采集端与标注端
         if: >-
           needs.scope.outputs.frontend == 'true' ||
