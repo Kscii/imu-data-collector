@@ -105,3 +105,43 @@ def test_tray_idle_exit_requests_graceful_server_shutdown(
 
     assert application.server.should_exit is True
     assert icon.stopped is True
+
+
+def test_windows_exit_confirmation_follows_ui_language(monkeypatch) -> None:
+    messages = []
+    monkeypatch.setattr(tray, "platform_id", lambda: "windows")
+    monkeypatch.setattr(tray, "os", SimpleNamespace(name="nt"))
+
+    def message_box(_window, message, title, _flags):
+        messages.append((title, message))
+        return 6
+
+    monkeypatch.setattr(
+        tray.ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(MessageBoxW=message_box)),
+        raising=False,
+    )
+    monkeypatch.setattr(tray, "_uses_chinese", lambda: False)
+    assert tray._confirm_exit() is True
+    assert messages[-1][0] == "Exit IMU Data Collector"
+    assert "Exit now?" in messages[-1][1]
+    monkeypatch.setattr(tray, "_uses_chinese", lambda: True)
+    assert tray._confirm_exit() is True
+    assert "确定退出吗" in messages[-1][1]
+
+
+def test_english_startup_error_keeps_log_location_without_chinese(monkeypatch) -> None:
+    messages = []
+    monkeypatch.setattr(tray, "_configure_logging", lambda: None)
+    monkeypatch.setattr(tray, "platform_id", lambda: "windows")
+    monkeypatch.setattr(tray, "_uses_chinese", lambda: False)
+    monkeypatch.setattr(tray, "_release_instance_lock", lambda _lock: None)
+
+    def fail_settings():
+        raise ValueError("设备配置校验失败")
+
+    monkeypatch.setattr(tray, "load_settings", fail_settings)
+    monkeypatch.setattr(tray, "_show_message", lambda title, body, **_kw: messages.append(body))
+    tray.main()
+    assert "ValueError" in messages[0]
+    assert "logs/tray.log" in messages[0]
+    assert "设备配置校验失败" not in messages[0]

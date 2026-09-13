@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import secrets
 import threading
 import time
@@ -31,6 +32,41 @@ class OAuthPending:
     verifier: str
     redirect_uri: str
     created_monotonic: float
+
+
+def oauth_error_english(error: RuntimeError) -> str:
+    """Translate callback errors without changing the API's original error messages."""
+    message = str(error)
+    translations = {
+        "云端发布尚未配置 broker_url 和 Google OAuth client ID":
+            "Team cloud publishing requires a broker URL and Google OAuth client ID.",
+        "OAuth state 无效或已经过期，请重新登录":
+            "The sign-in request is invalid or has expired. Start sign-in again.",
+        "无法向 Google 完成登录，请检查网络后重试":
+            "Could not complete Google sign-in. Check your network and try again.",
+        "Google 未返回 refresh token，请撤销旧授权后重新登录":
+            "Google did not return a refresh token. "
+            "Revoke the previous authorization and sign in again.",
+        "云端发布尚未配置上传代理": "The team upload broker is not configured.",
+        "Google token endpoint 返回了无效响应":
+            "The Google token endpoint returned an invalid response.",
+        "Google token 响应缺少 id_token": "The Google token response is missing an ID token.",
+    }
+    if message in translations:
+        return translations[message]
+    # Preserve the already-sanitized HTTP status and OAuth code from our formatter.
+    matched = re.fullmatch(r"Google OAuth 拒绝请求（HTTP (\d+)，([\w.-]+)）：(.*)", message)
+    if matched:
+        status, code, description = matched.groups()
+        if re.search(r"[\u3400-\u9fff]", description):
+            description = "Check the OAuth client type and callback configuration."
+        return f"Google OAuth rejected the request (HTTP {status}, {code}): {description}"
+    if message and not re.search(r"[\u3400-\u9fff]", message):
+        return message
+    return (
+        "Could not complete Google sign-in. "
+        "Try again and check the local service logs for details."
+    )
 
 
 def _oauth_http_error_message(error: requests.HTTPError) -> str:

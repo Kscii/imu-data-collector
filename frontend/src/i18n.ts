@@ -25,6 +25,97 @@ export function localizedField<T extends Record<string, unknown>>(
 }
 
 const translations: Record<string, string> = {
+  "找不到该录制": "Recording not found",
+  "找不到配置 Snapshot": "Configuration snapshot not found",
+  "找不到本机设备草稿": "Local device draft not found",
+  "找不到本机候选 SI": "Local candidate SI profile not found",
+  "找不到该 IMU SN": "IMU serial number not found",
+  "找不到视频": "Video not found",
+  "SN 格式无效": "Invalid serial number format",
+  "请先结束录制并断开预览设备，再切换配置 Snapshot": "Stop the recording and disconnect preview devices before switching configuration snapshots.",
+  "该 SN 已存在于正式设备注册表": "This serial number already exists in the official device registry.",
+  "该 BLE 地址已分配给其他 SN": "This BLE address is already assigned to another serial number.",
+  "本机 commissioning 草稿不能声明正式校准证据": "A local commissioning draft cannot claim verified calibration evidence.",
+  "预览通道尚未建立或已经释放": "The preview channel has not been established or has already been released.",
+  "确认 IMU 未被手机占用并处于可连接状态": "Make sure the IMU is available for connection and is not connected to a phone.",
+  "检查 IMU、摄像头和设备预览状态后重试": "Check the IMU, camera, and device preview status, then try again.",
+  "可再次点击释放；该操作是幂等的": "You can safely click Release again.",
+  "检查摄像头是否被其他程序占用": "Check whether another application is using the camera.",
+  "配置 Snapshot content SHA-256 不匹配": "Configuration snapshot content SHA-256 mismatch",
+  "配置 Snapshot SHA-256 不匹配": "Configuration snapshot SHA-256 mismatch",
+  "配置 Snapshot ID 与 SHA-256 不匹配": "Configuration snapshot ID and SHA-256 do not match",
+  "raw_axis_order 必须是 0、1、2 的排列": "raw_axis_order must be a permutation of 0, 1, and 2",
+  "正式 SI Profile 必须具有两个尺度和证据 SHA-256": "A verified SI profile requires both scales and an evidence SHA-256.",
+  "hardware_asset_id 必须与 sensor_sn 一致": "hardware_asset_id must match sensor_sn",
+  "revision 必须与 sensor_sn 一致": "revision must match sensor_sn",
+  "supersedes_sn 必须指向同一资产的上一 revision": "supersedes_sn must reference the previous revision of the same asset",
+  "allowed_data_tiers 不能重复": "allowed_data_tiers must not contain duplicates",
+  "允许 prod 的设备必须具有正式 SI Profile": "Devices authorized for prod require a verified SI profile.",
+  "配置包含重复 sensor_sn": "The configuration contains duplicate sensor_sn values.",
+  "只有 approved Snapshot 可以设为 Current": "Only an approved snapshot can be set as Current.",
+  "请先将 Current 切换到其他 approved Snapshot": "Switch Current to another approved snapshot first.",
+  "找不到该物理资产的已保留 SN": "No reserved serial number was found for this hardware asset.",
+  "该物理资产的 firmware revision 已达到上限": "This hardware asset has reached its firmware revision limit.",
+  "captured_at_utc 必须带时区": "captured_at_utc must include a timezone",
+  "revoked Snapshot 只能查看，不能用于新采集": "Revoked snapshots are read-only and cannot be used for new captures.",
+  "revoked Snapshot 不能用于新采集": "Revoked snapshots cannot be used for new captures.",
+  "retired 设备不能用于新采集": "Retired devices cannot be used for new captures.",
+  "团队 Current Snapshot 尚未缓存": "The team Current snapshot has not been cached yet.",
+  "尚未配置上传代理 URL": "The upload broker URL is not configured.",
+  "上传代理返回了无效 JSON": "The upload broker returned invalid JSON.",
+  "云端发布尚未配置 broker_url 和 Google OAuth client ID": "Team cloud publishing requires a broker URL and Google OAuth client ID.",
+  "OAuth state 无效或已经过期，请重新登录": "The sign-in request is invalid or has expired. Start sign-in again.",
+  "云端发布尚未配置上传代理": "The team upload broker is not configured.",
+  "Google token endpoint 返回了无效响应": "The Google token endpoint returned an invalid response.",
+  "Google token 响应缺少 id_token": "The Google token response is missing an ID token.",
+  "云端发布尚未配置": "Team cloud publishing is not configured.",
+  "尚未登录 Google，无法发布到团队云端": "Sign in to Google before publishing to the team cloud.",
+  "无法向 Google 完成登录，请检查网络后重试": "Could not complete Google sign-in. Check your network and try again.",
+  "Google 未返回 refresh token，请撤销旧授权后重新登录": "Google did not return a refresh token. Revoke the previous authorization and sign in again.",
+  "Google 登录已失效，请重新登录": "Your Google sign-in has expired. Sign in again.",
+  "IMU 预览连接已断开": "The IMU preview connection was lost.",
+  "摄像头预览进程已退出": "The camera preview process has exited.",
+  "确认 IMU 和摄像头可用后重新开始；失败的 partial 文件不能用于训练": "Check that the IMU and camera are available, then restart. Failed partial files cannot be used for training.",
+  "当前临时 IMU 尚未完成校准，只允许录制 test 数据": "This temporary IMU has not been calibrated and can only record test data.",
+  "只有通过采集验证的 ready 录制可以发布": "Only ready recordings that passed capture validation can be published.",
+  "当前配置已禁用发布": "Publishing is disabled by the current configuration.",
+  "已经发布的录制禁止重新收尾": "Published recordings cannot be finalized again.",
+  "只有收尾失败或中断的录制可以重新收尾": "Only recordings with failed or interrupted finalization can be finalized again.",
+  "该录制的后台收尾仍在执行或等待自动重试": "Background finalization is still running or waiting for an automatic retry.",
+  "该录制仍有后台收尾或上传任务，暂不能删除": "This recording still has finalization or upload jobs and cannot be deleted yet.",
+  "录制的 H5/MKV 源文件不完整": "The recording source H5/MKV files are incomplete.",
+  "录制、预览或后台任务进行中，暂不切换设备配置": "Device configuration cannot be switched while recording, preview, or background jobs are active.",
+  "页面选择的配置 Snapshot 已变化；请刷新状态后重新开始": "The selected configuration snapshot has changed. Refresh the status and start again.",
+  "开始预览或录制前必须选择 IMU SN": "Select an IMU serial number before starting preview or recording.",
+  "已有设备连接操作正在进行，请等待其完成或清理": "A device connection is already in progress. Wait for it to complete or clean up.",
+  "设备正在连接、重连或释放，请等待当前操作完成": "A device is connecting, reconnecting, or being released. Wait for the operation to finish.",
+  "请先连接预览设备，再切换摄像头": "Connect the preview devices before switching cameras.",
+  "正式录制或 IMU 表征正在进行，不能通过预览释放接口停止": "Recording or IMU characterization is active and cannot be stopped by releasing preview devices.",
+  "预览设备仍在连接或清理，暂不能开始录制": "Preview devices are still connecting or cleaning up. Recording cannot start yet.",
+  "设备正在连接、重连或释放，暂不能开始录制": "A device is connecting, reconnecting, or being released. Recording cannot start yet.",
+  "IMU 会继续接收；检查摄像头后重新连接设备": "IMU reception will continue. Check the camera, then reconnect the devices.",
+  "录制文件不受影响；摄像头将独立重试三次": "Recording files are unaffected. The camera will retry independently three times.",
+  "健康组件会保持运行；失败组件将自动重试三次": "Working components will keep running. Failed components will retry automatically three times.",
+  "摄像头切换失败；已尝试恢复原摄像头": "Camera switching failed. An attempt was made to restore the original camera.",
+  "源标签和目标标签不能相同": "The source and target labels must differ.",
+  "只能在同一跌倒类型内迁移活动标签": "Activity labels can only be migrated within the same fall category.",
+  "目标标签必须处于启用状态": "The target label must be active.",
+  "必须先领取处于进行中的标注任务": "Claim an active annotation task first.",
+  "该任务已由其他成员领取，请先接管并刷新页面": "Another member claimed this task. Take over and refresh the page first.",
+  "任务状态已经变化，请刷新后重试": "The task state has changed. Refresh and try again.",
+  "已完成的标注必须先重开": "Reopen the completed annotation first.",
+  "已完成的同步必须先重开": "Reopen the completed synchronization first.",
+  "必须先选择参与者": "Select a participant first.",
+  "确认身份与当前选择不一致，请刷新后重试": "The confirmed identity differs from the current selection. Refresh and try again.",
+  "test 数据永久禁止导出到训练集": "Test data can never be exported for training.",
+  "训练导出前必须确认参与者身份；无法确认时不得猜测": "Confirm the participant identity before training export. Do not guess an unknown identity.",
+  "完成前必须定稿标注": "Finalize the annotation before completing the task.",
+  "完成前必须验证同步": "Verify synchronization before completing the task.",
+  "没有已完成的正式录制可生成训练快照": "No completed production recordings are available for a training snapshot.",
+  "该历史快照没有冻结的视频映射，不能生成客户交付包": "This historical snapshot has no frozen video mapping and cannot generate a client delivery.",
+  "上一次生成任务因服务重启或进程退出而中断，可以安全重试": "The previous generation job was interrupted by a service restart or process exit. It is safe to retry.",
+  "客户交付使用的 cw12eu.h5 校验失败": "Validation failed for the cw12eu.h5 used for client delivery.",
+  "采集页面与后端 API 版本不一致：设备列表缺少当前版本字段。请更新并重启采集服务。": "The capture page and backend API versions do not match: the device list lacks fields required by this version. Update and restart the capture service.",
   "采集页面与后端 API 版本不一致": "The capture page and backend API versions do not match",
   "页面": "page",
   "后端": "backend",
@@ -820,19 +911,35 @@ export function translateText(value: string): string {
 }
 
 export function apiErrorMessage(detail: unknown, status: number, statusText: string): string {
+  const fallback = tr(`${status} ${statusText}`, ({
+    401: "Sign in and try again.",
+    403: "You do not have permission to perform this operation.",
+    409: "The request conflicts with the current state. Refresh and try again.",
+    422: "Check the supplied fields and try again.",
+  } as Record<number, string>)[status] ?? `Request failed (${status} ${statusText})`);
+  const readable = (value: unknown): string => {
+    if (typeof value !== "string" || !value.trim()) return "";
+    const translated = translateText(value);
+    return isEnglish && /[\u3400-\u9fff]/u.test(translated) ? "" : translated;
+  };
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      const message = readable(item?.msg);
+      const location = Array.isArray(item?.loc) ? item.loc.join(".") : "";
+      return message ? `${location ? `${location}: ` : ""}${message}` : "";
+    }).filter(Boolean);
+    return messages.join(tr("；", "; ")) || fallback;
+  }
   if (detail && typeof detail === "object") {
     const structured = detail as { code?: unknown; message?: unknown; hint?: unknown };
-    const raw = [structured.message, structured.hint]
-      .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
-      .join("；");
-    if (raw) return translateText(raw);
-    if (typeof structured.code === "string") return tr("请求失败，请稍后重试", `Request failed (${structured.code})`);
+    const message = readable(structured.message);
+    const hint = readable(structured.hint);
+    const code = typeof structured.code === "string" && /^[a-zA-Z0-9_.:-]+$/.test(structured.code)
+      ? structured.code : "";
+    const text = [message || fallback, hint].filter(Boolean).join(tr("；", " "));
+    return !message && code ? `${text} (${code})` : text;
   }
-  if (typeof detail === "string" && detail.trim()) {
-    const translated = translateText(detail);
-    if (!isEnglish || !/[\u3400-\u9fff]/u.test(translated)) return translated;
-  }
-  return tr(`${status} ${statusText}`, `Request failed (${status} ${statusText})`);
+  return readable(detail) || fallback;
 }
 
 export function userVisibleMessage(value: unknown): string {
@@ -844,9 +951,12 @@ export function userVisibleMessage(value: unknown): string {
   return translated;
 }
 
+const verbatimTextSelector = "pre, code, textarea, script, style, [data-no-localize]";
+
 function localizeNode(root: Node): void {
   if (!isEnglish) return;
   if (root instanceof Text) {
+    if (root.parentElement?.closest(verbatimTextSelector)) return;
     const next = translateText(root.data);
     if (next !== root.data) root.data = next;
     return;
@@ -855,14 +965,19 @@ function localizeNode(root: Node): void {
   const textNodes: Text[] = [];
   while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
   for (const node of textNodes) {
+    if (node.parentElement?.closest(verbatimTextSelector)) continue;
     const next = translateText(node.data);
     if (next !== node.data) node.data = next;
   }
   if (root instanceof Element) {
     for (const element of [root, ...root.querySelectorAll("[title], [placeholder], [aria-label], [alt]")]) {
+      if (element.closest("[data-no-localize]")) continue;
       for (const attribute of ["title", "placeholder", "aria-label", "alt"]) {
         const current = element.getAttribute(attribute);
-        if (current) element.setAttribute(attribute, translateText(current));
+        if (current) {
+          const next = translateText(current);
+          if (next !== current) element.setAttribute(attribute, next);
+        }
       }
     }
   }
@@ -875,11 +990,14 @@ export function useDocumentLocalization(): void {
     if (!isEnglish) return;
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
-        if (mutation.type === "characterData") localizeNode(mutation.target);
+        if (mutation.type === "characterData" || mutation.type === "attributes") localizeNode(mutation.target);
         for (const node of mutation.addedNodes) localizeNode(node);
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, {
+      childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ["title", "placeholder", "aria-label", "alt"],
+    });
     return () => observer.disconnect();
   }, []);
 }

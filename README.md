@@ -8,6 +8,10 @@
 时间映射、冻结标签和 SHA-256 的单 H5。团队只读查看器与完整格式见
 [客户数据交付与只读查看](docs/client-delivery.md)。
 
+从 IMU 数据包、本地中间态、Bucket、同步标注到训练与带视频客户 H5 的总览，见
+[项目数据链路与落盘格式说明（中文）](docs/data-pipeline.zh-CN.md) / [English](docs/data-pipeline.en.md)
+（含 Mermaid 流程图和格式表）。
+
 ## 当前边界
 
 - 设备：每次预览或录制必须显式选择项目 SN，不再把广播名、MAC 或某一台样机写成默认设备。`IMU-0001-R01` 是已验证 CW12EU-T；`IMU-0002-R01` 是 `acce&gyro` commissioning 设备，只允许 test。
@@ -49,17 +53,28 @@ macOS 安装后从“应用程序”打开 `IMU Data Collector.app`，它作为�
 启动需要在 Finder 中右键应用选择“打开”。安装、权限、目录和真机验收见
 [macOS 桌面测试版](docs/macos-desktop.md)。
 
-## 开发运行
+## v0.3.0：Linux 源码与云端发布
+
+本轮发布 Linux 源码版，并更新云端标注和上传代理。安装步骤见
+[Linux 源码安装](docs/linux-source-install.md)，变更与限制见
+[v0.3.0 发布说明](docs/releases/v0.3.0.md)。本轮不提供新的 Windows EXE、macOS DMG 或 Linux 二进制安装包。
+
+**客户提供的文档中，换算系数与当前新设备不匹配；仍需等待正确文档或与文档匹配的设备。
+因此 Windows/macOS 新版本暂缓发布。Linux 上的新设备同样只允许 test 原始数据采集，
+不能据此宣称正式 SI 换算、训练数据或跨平台实机验收已经完成。**
+
+普通源码 Release 使用 `v0.3.0`；`desktop-v*` 是已有 Windows/macOS 打包工作流的独立入口。
+上文的 EXE/DMG 使用方式属于已有桌面版本，不代表本次源码 Release 包含这些安装包。
+
+## 源码运行
 
 ```bash
-uv sync
-uv run pytest
-uv run ruff check .
+uv sync --frozen
 cd frontend
-npm install
-npm run build
+npm ci
+npm run build:capture
 cd ..
-uv run imu-collector start
+uv run --frozen imu-collector start
 ```
 
 `start` 会启动后端，并在健康接口就绪后自动打开 `http://127.0.0.1:8765`。终端保持运行时，
@@ -68,7 +83,12 @@ uv run imu-collector start
 `0.0.0.0`。
 
 重复执行 `start` 时，如果本项目后端已经健康运行，它只会打开现有页面，不会启动第二个
-实例或打断进行中的录制。推荐首次安装按需使用的用户级 systemd 服务：
+实例或打断进行中的录制。通用源码安装可直接使用上述终端入口。
+下面的 systemd 安装和更新脚本是作者现有工作站的维护入口，预设 `%h/Codes/imu-data-collector`、
+`/usr/bin/uv` 和 `%h/.config/imu-data-collector/gcs.yaml`；新用户不能原样照搬，
+需要先按自己的路径和配置调整单元。这些脚本不会替你创建私有云配置。
+
+已满足上述条件的现有工作站可使用：
 
 ```bash
 ./scripts/install-user-service.sh

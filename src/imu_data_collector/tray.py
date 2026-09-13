@@ -11,6 +11,7 @@ import json
 import locale
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -111,8 +112,11 @@ def _confirm_exit() -> bool:
         return True
     result = ctypes.windll.user32.MessageBoxW(
         None,
-        "退出后将释放 IMU 和摄像头，浏览器页面也会停止工作。\n\n确定退出吗？",
-        "退出 IMU 数采平台",
+        _text(
+            "退出后将释放 IMU 和摄像头，浏览器页面也会停止工作。\n\n确定退出吗？",
+            "Exiting releases the IMU and camera and stops the local WebUI.\n\nExit now?",
+        ),
+        _text("退出 IMU 数采平台", "Exit IMU Data Collector"),
         0x00000004 | 0x00000020,
     )
     return result == 6
@@ -372,11 +376,17 @@ def main() -> None:
         TrayApplication(settings).run()
     except Exception as error:
         logger.exception("托盘应用启动或运行失败")
+        english_detail = str(error)
+        if re.search(r"[\u3400-\u9fff]", english_detail):
+            english_detail = (
+                f"The application could not start or continue ({type(error).__name__})."
+            )
         _show_message(
             _text("IMU 数采平台启动失败", "IMU Data Collector failed to start"),
             _text(
                 f"{error}\n\n详细日志位于本机应用缓存目录的 logs/tray.log。",
-                f"{error}\n\nSee logs/tray.log in the application cache directory for details.",
+                f"{english_detail}\n\n"
+                "See logs/tray.log in the application cache directory for details.",
             ),
             error=True,
         )
