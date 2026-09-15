@@ -8,7 +8,7 @@ function captureApiBuildId() {
   const digest = createHash("sha256");
   const root = resolve(import.meta.dirname, "../src/imu_data_collector");
   for (const name of [
-    "capture_api.py", "calibration_api.py", "calibration_experiments.py", "calibration_cloud.py", "coordinator.py", "models.py", "config.py", "broker_client.py",
+    "capture_api.py", "calibration_api.py", "calibration_orientation.py", "calibration_experiments.py", "calibration_cloud.py", "coordinator.py", "models.py", "config.py", "broker_client.py",
     "device_configuration.py", "device_registry.py", "device_binding.py",
     "imu_protocols.py", "ble.py", "cw12eu.py"
   ]) {

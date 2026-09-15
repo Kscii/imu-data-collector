@@ -19,6 +19,7 @@ from imu_data_collector.calibration_experiments import (
     TrialExclusion,
     utc_now,
 )
+from imu_data_collector.calibration_orientation import register_orientation_api
 from imu_data_collector.device_configuration import ConfigurationSnapshotSubmission, si_profile_id
 from imu_data_collector.models import CharacterizationStageRequest, CharacterizationStartRequest
 
@@ -207,6 +208,8 @@ class CalibrationController:
             return self.detail(experiment_id)
 
     async def close(self) -> None:
+        if hasattr(self, "orientation"):
+            await self.orientation.close()
         if self.active_id:
             await self.stop(self.active_id)
         for task in self.upload_tasks.values():
@@ -218,6 +221,7 @@ def register_calibration_api(app: FastAPI, coordinator, configuration_manager, c
     controller = CalibrationController(coordinator)
     store = controller.store
     app.state.calibration = controller
+    controller.orientation = register_orientation_api(app, coordinator)
 
     def read(experiment_id: str) -> dict:
         try:
@@ -243,7 +247,16 @@ def register_calibration_api(app: FastAPI, coordinator, configuration_manager, c
         )
         if device is None:
             raise HTTPException(422, "Select a registered device")
-        return store.create(request, device.model_dump(mode="json"))
+        setup = None
+        if request.orientation_session_id:
+            setup = await controller.orientation.finish(
+                request.orientation_session_id, request.sensor_sn, request.directions
+            )
+        experiment = store.create(request, device.model_dump(mode="json"))
+        if setup:
+            experiment["orientation_setup"] = setup
+            store.save(experiment)
+        return experiment
 
     @app.get("/api/v1/calibration-experiments/{experiment_id}")
     async def detail(experiment_id: str):

@@ -119,6 +119,20 @@ def test_validation_cannot_change_fit_or_rezero_its_own_bias(tmp_path):
     assert any(row["result"].get("vector_error_g", 0) > 0.05 for row in after["trials"])
 
 
+def test_native_axis_setup_cannot_silently_relabel_conflicting_fit(tmp_path):
+    experiment, arrays = evidence(tmp_path)
+    experiment["orientation_setup"] = {"axis_definition": "raw_accelerometer", "faces": {}}
+    report = analyze_experiment(experiment, arrays)
+    assert "raw_axis_setup_conflicts_with_fitting_faces" in report["warnings"]
+    assert not report["axis_mapping_available"]
+    assert report["candidate"]["accel_counts_per_g"] is None
+    assert report["candidate"]["gyro_counts_per_dps"] is None
+    assert report["directions"] == experiment["directions"]
+    # The same evidence remains valid for an older, manually defined coordinate system.
+    experiment["orientation_setup"] = None
+    assert analyze_experiment(experiment, arrays)["axis_mapping_available"]
+
+
 def test_extra_repetitions_exclusions_and_original_ids_are_retained(tmp_path):
     experiment, arrays = evidence(tmp_path)
     extra = copy.deepcopy(experiment["trials"][0])

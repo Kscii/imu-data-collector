@@ -159,6 +159,9 @@ type BleScanSummary = {
 };
 
 type CaptureSettingsProps = {
+  captureSensorSn: string;
+  onOpenCalibration: () => void;
+  registerLeaveGuard: (guard: (() => Promise<boolean>) | null) => void;
   interactionBlocked: boolean;
   runtimeConfiguration?: RuntimeConfiguration | null;
   imuProfiles: SettingsImuProfile[];
@@ -271,6 +274,9 @@ function newUnverifiedSi(): ConfigurationDevice["si_profile"] {
 }
 
 export function CaptureSettingsPage({
+  captureSensorSn,
+  onOpenCalibration,
+  registerLeaveGuard,
   interactionBlocked,
   runtimeConfiguration,
   imuProfiles,
@@ -298,6 +304,7 @@ export function CaptureSettingsPage({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const pendingSave = useRef<Promise<unknown>>(Promise.resolve());
   const loadedText = useRef("");
   const latestWorkspaceText = useRef("");
 
@@ -323,7 +330,7 @@ export function CaptureSettingsPage({
         loadedText.current = text;
         latestWorkspaceText.current = text;
         setWorkspaceState("saved");
-        const requestedSn = new URLSearchParams(location.search).get("device");
+        const requestedSn = new URLSearchParams(location.search).get("device") || captureSensorSn;
         setSelectedDeviceSn(
           value.content.devices.find((item) => item.sensor_sn === requestedSn)?.sensor_sn
             ?? value.content.devices[0]?.sensor_sn
@@ -335,39 +342,60 @@ export function CaptureSettingsPage({
     ]).catch((caught) => setError(userVisibleMessage((caught as Error).message)));
   }, []);
 
-  useEffect(() => {
-    if (!workspaceText || workspaceText === loadedText.current) return;
-    let parsed: ConfigurationSubmission;
+  const saveText = (submittedText: string) => {
+    const operation = pendingSave.current.catch(() => {}).then(async () => {
+      if (submittedText === loadedText.current || submittedText !== latestWorkspaceText.current) return;
+      const parsed = JSON.parse(submittedText) as ConfigurationSubmission;
+      setWorkspaceState("saving");
+      const saved = await requestJson<ConfigurationSubmission>("/api/v1/configuration/workspace", {
+        method: "PUT", body: JSON.stringify(parsed),
+      });
+      const canonical = JSON.stringify(saved, null, 2);
+      loadedText.current = canonical;
+      if (latestWorkspaceText.current === submittedText) {
+        latestWorkspaceText.current = canonical; setWorkspace(saved); setWorkspaceText(canonical);
+        setWorkspaceState("saved"); setError("");
+      }
+    });
+    pendingSave.current = operation;
+    return operation;
+  };
+  const flushWorkspace = async (): Promise<boolean> => {
     try {
-      parsed = JSON.parse(workspaceText) as ConfigurationSubmission;
-      setWorkspaceState("dirty");
-    } catch {
+      await pendingSave.current.catch(() => {});
+      while (latestWorkspaceText.current !== loadedText.current) {
+        await saveText(latestWorkspaceText.current);
+      }
+      return true;
+    } catch (caught) {
       setWorkspaceState("invalid");
+      setError(tr("草稿尚未保存，请修正后再离开：", "The draft has not been saved. Fix it before leaving: ") + userVisibleMessage((caught as Error).message));
+      return false;
+    }
+  };
+  useEffect(() => {
+    registerLeaveGuard(flushWorkspace);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (latestWorkspaceText.current !== loadedText.current) { event.preventDefault(); event.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => { registerLeaveGuard(null); window.removeEventListener("beforeunload", beforeUnload); };
+  }, []);
+  useEffect(() => {
+    if (!workspaceText && !loadedText.current) return;
+    if (workspaceText === loadedText.current) {
+      setWorkspaceState("saved");
+      setError("");
       return;
     }
-    const timer = window.setTimeout(async () => {
-      const submittedText = workspaceText;
-      setWorkspaceState("saving");
-      try {
-        const saved = await requestJson<ConfigurationSubmission>("/api/v1/configuration/workspace", {
-          method: "PUT",
-          body: JSON.stringify(parsed),
-        });
-        const canonical = JSON.stringify(saved, null, 2);
-        loadedText.current = canonical;
-        if (latestWorkspaceText.current === submittedText) {
-          latestWorkspaceText.current = canonical;
-          setWorkspace(saved);
-          setWorkspaceText(canonical);
-          setWorkspaceState("saved");
-          setError("");
+    try { JSON.parse(workspaceText); setWorkspaceState("dirty"); }
+    catch { setWorkspaceState("invalid"); return; }
+    const timer = window.setTimeout(() => {
+      void saveText(workspaceText).catch(caught => {
+        if (latestWorkspaceText.current === workspaceText) {
+          setWorkspaceState("invalid"); setError(userVisibleMessage((caught as Error).message));
         }
-      } catch (caught) {
-        if (latestWorkspaceText.current === submittedText) {
-          setWorkspaceState("invalid");
-          setError(userVisibleMessage((caught as Error).message));
-        }
-      }
+      });
     }, 900);
     return () => window.clearTimeout(timer);
   }, [workspaceText]);
@@ -396,13 +424,14 @@ export function CaptureSettingsPage({
   };
 
   const run = async <T,>(name: string, operation: () => Promise<T>, success: string | ((value: T) => string)) => {
+    if (!(await flushWorkspace())) return;
     setBusy(name);
     setError("");
     setMessage("");
     try {
       const value = await operation();
       const nextStatus = await refresh();
-      const detailId = ["select", "reset", "refresh"].includes(name)
+      const detailId = ["select", "reset", "refresh", "local"].includes(name)
         ? nextStatus.selected_snapshot_id
         : detail?.snapshot.snapshot_id;
       if (detailId) setDetail(await requestJson<SnapshotDetail>(`/api/v1/configuration/snapshots/${encodeURIComponent(detailId)}`));
@@ -426,8 +455,10 @@ export function CaptureSettingsPage({
     }
   };
 
-  const copySnapshotToWorkspace = () => {
-    if (!detail) return;
+  const copySnapshotToWorkspace = async () => {
+    if (!detail || !(await flushWorkspace())) return;
+    if (workspace && JSON.stringify(workspace.content) !== JSON.stringify(detail.snapshot.content)
+      && !window.confirm(tr("当前草稿与此配置不同。用选中配置替换整个草稿？", "The draft differs from this configuration. Replace the entire draft?"))) return;
     const draft: ConfigurationSubmission = {
       name: tr(`${detail.snapshot.name} · 工作副本`, `${detail.snapshot.name} · Working copy`),
       description: detail.snapshot.description,
@@ -436,7 +467,7 @@ export function CaptureSettingsPage({
       content: detail.snapshot.content,
     };
     replaceWorkspace(draft);
-    setSelectedDeviceSn(draft.content.devices[0]?.sensor_sn ?? "");
+    setSelectedDeviceSn(draft.content.devices.find(d => d.sensor_sn === captureSensorSn)?.sensor_sn ?? draft.content.devices[0]?.sensor_sn ?? "");
     setMessage(tr("已创建可编辑工作区副本；原快照保持不变，字段校验通过后自动保存。", "Editable workspace copy created. The source snapshot is unchanged; fields are autosaved after validation."));
   };
 
@@ -585,13 +616,13 @@ export function CaptureSettingsPage({
   return <main className="settings-page" data-no-localize>
     <section className="settings-heading">
       <div>
-        <span className="eyebrow">DEVICE CONFIGURATION · SCHEMA 2.0</span>
+        <span className="eyebrow">{tr("本机设备与配置", "LOCAL DEVICES & CONFIGURATION")}</span>
         <h2>{tr("设备与设置", "Devices & settings")}</h2>
         <p>{tr("低频配置与诊断集中在这里；采集页只保留当场必须操作的内容。", "Low-frequency configuration and diagnostics live here; the capture page keeps only the controls needed during a session.")}</p>
       </div>
       <div className="config-summary-card">
-        <span>{tr("采集正在使用", "Used for capture")}</span>
-        <strong>{status?.selected_snapshot_id ?? tr("正在读取…", "Loading…")}</strong>
+        <span>{tr("采集正在使用的配置", "Configuration used for capture")}</span>
+        <strong>{status?.selected_source === "bootstrap" ? tr("应用附带的初始配置", "Configuration included with the app") : snapshots.find(item => item.snapshot_id === status?.selected_snapshot_id)?.name ?? tr("正在读取…", "Loading…")}</strong>
         <div>
           <StatusPill state={status?.selected_state ?? "loading"} />
           {status?.manually_pinned && <span className="config-pill">{tr("人工固定", "Manually pinned")}</span>}
@@ -602,26 +633,28 @@ export function CaptureSettingsPage({
       </div>
     </section>
 
+    <section className="panel settings-calibration-entry"><div><strong>{tr("需要测量新设备的单位系数？", "Need to measure a new device's conversion factors?")}</strong><p>{tr("连接 IMU → 识别外壳方向 → 做实验 → 生成配置草稿。", "Connect the IMU → identify its faces → run trials → create a configuration draft.")}</p><small>{tr("当前采集设备：", "Capture device: ")}{captureSensorSn || tr("尚未选择", "Not selected")}</small></div><button className="primary" onClick={onOpenCalibration}>{tr("IMU 标定实验", "IMU calibration experiment")}</button></section>
+    {interactionBlocked && <p className="warning-banner">{tr("切换配置前，请先结束录制并释放预览设备。草稿仍可编辑和保存。", "Finish recording and release preview devices before switching configurations. You can still edit and save drafts.")}</p>}
     {error && <div className="error-banner">{error}</div>}
     {message && <div className="success-banner">{message}</div>}
-    {status?.update_available && <div className="warning-banner">{tr("团队 Current 已变化，但本机仍保持人工选择。确认后可“恢复跟随 Current”，不会在采集中途自动切换。", "Team Current has changed, but this workstation remains pinned. Choose ‘Follow Current again’ when ready; it will never switch during capture.")}</div>}
+    {status?.update_available && <div className="warning-banner">{tr("团队推荐版本已更新，本机仍保持你选择的配置。准备好后可点“使用团队推荐版本”。", "The team recommendation has changed. This computer keeps your selection until you choose Use the team recommendation.")}</div>}
     {cloud?.configured && !cloud.logged_in && <div className="warning-banner">{tr("远端配置操作需要团队登录。本机工作区和本机快照仍可使用。", "Remote configuration actions require team sign-in. The local workspace and local snapshots remain available.")}<button onClick={onOpenPublishing}>{tr("前往“记录与发布”登录", "Open Records & publishing to sign in")}</button>
     </div>}
     {cloud && !cloud.configured && <div className="warning-banner">{tr("当前安装未配置团队 broker；本机工作区、候选 SI 和本机快照仍可使用，中心 SN 与团队候选不可用。", "No team broker is configured. Local workspaces, candidate SI, and local snapshots remain available; central SN allocation and team candidates are unavailable.")}</div>}
 
     <nav className="settings-tabs" aria-label={tr("设备设置区域", "Device settings sections")}>
-      <button className={tab === "snapshots" ? "active" : ""} onClick={() => setTab("snapshots")}>{tr("配置快照", "Configuration snapshots")}</button>
-      <button className={tab === "devices" ? "active" : ""} onClick={() => setTab("devices")}>{tr("设备档案与 SI", "Device profiles & SI")}</button>
-      <button className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>{tr("诊断与运行环境", "Diagnostics & runtime")}</button>
+      <button className={tab === "snapshots" ? "active" : ""} onClick={() => setTab("snapshots")}>{tr("配置管理", "Configurations")}</button>
+      <button className={tab === "devices" ? "active" : ""} onClick={() => setTab("devices")}>{tr("设备与标定参数", "Devices & calibration")}</button>
+      <button className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>{tr("连接与诊断", "Connection & diagnostics")}</button>
     </nav>
 
     {tab === "snapshots" && <section className="settings-split">
       <div className="panel config-list-panel">
         <div className="panel-heading-row">
-          <div><div className="panel-title">{tr("本机可用快照", "Snapshots available locally")}</div><p>{tr("快照不可变；选择仅影响之后的新预览与录制。", "Snapshots are immutable; selection affects only future previews and recordings.")}</p></div>
+          <div><div className="panel-title">{tr("可用的配置版本", "Available configuration versions")}</div><p>{tr("每个版本保存一份固定配置。“正在使用”表示本机已选用；“团队推荐”表示团队建议使用。", "Each version is a fixed configuration. In use means selected here; Team recommendation means suggested by the team.")}</p></div>
           <button
-            disabled={Boolean(busy) || remoteUnavailable}
-            title={remoteUnavailable ? remoteReason : ""}
+            disabled={interactionBlocked || Boolean(busy) || remoteUnavailable}
+            title={interactionBlocked ? tr("先结束录制并释放预览设备", "Finish recording and release preview devices first") : remoteUnavailable ? remoteReason : busy ? tr("正在处理，请稍候", "An operation is in progress") : ""}
             onClick={() => run("refresh", () => requestJson("/api/v1/configuration/refresh", { method: "POST" }), tr("已刷新团队配置缓存", "Team configuration cache refreshed"))}
           >{busy === "refresh" ? tr("刷新中…", "Refreshing…") : tr("刷新团队配置", "Refresh team configuration")}</button>
         </div>
@@ -633,61 +666,64 @@ export function CaptureSettingsPage({
             onClick={() => openSnapshot(item.snapshot_id)}
           >
             <span><strong>{item.name}</strong><StatusPill state={item.state} /></span>
-            <code>{item.snapshot_id}</code>
+
             <small>{tr(`${item.device_count} 台设备 · ${dateLabel(item.published_at_utc)}`, `${item.device_count} devices · ${dateLabel(item.published_at_utc)}`)}</small>
-            <span className="config-flags">{item.current && <b>Current</b>}{item.selected && <b>{tr("正在使用", "In use")}</b>}</span>
+            <span className="config-flags">{item.current && <b>{tr("团队推荐", "Team recommendation")}</b>}{item.selected && <b>{tr("正在使用", "In use")}</b>}</span>
           </button>)}
         </div>
       </div>
 
       <div className="panel config-detail-panel">
-        <div className="panel-title">{detail ? detail.snapshot.name : tr("快照详情", "Snapshot details")}</div>
-        {!detail ? <div className="placeholder compact">{tr("选择左侧快照查看哈希、设备与切换条件", "Select a snapshot to inspect its hashes, devices, and switching constraints.")}</div> : <>
-          <dl className="config-definition-list">
+        <div className="panel-title">{detail ? detail.snapshot.name : tr("配置版本详情", "Configuration version")}</div>
+        {!detail ? <div className="placeholder compact">{tr("选择左侧版本，查看内容并决定是否使用。", "Select a version to review and use it.")}</div> : <>
+          <details className="technical-details"><summary>{tr("技术详情：版本标识与校验值", "Technical details: version IDs and checksums")}</summary><dl className="config-definition-list">
             <div><dt>Snapshot ID</dt><dd><code>{detail.snapshot.snapshot_id}</code></dd></div>
             <div><dt>{tr("状态", "Status")}</dt><dd><StatusPill state={detail.state ?? detail.review?.state ?? "unknown"} /></dd></div>
             <div><dt>Snapshot SHA-256</dt><dd title={detail.snapshot.snapshot_sha256}>{shortHash(detail.snapshot.snapshot_sha256)}</dd></div>
             <div><dt>{tr("内容 SHA-256", "Content SHA-256")}</dt><dd title={detail.snapshot.content_sha256}>{shortHash(detail.snapshot.content_sha256)}</dd></div>
             <div><dt>{tr("设备", "Devices")}</dt><dd>{detail.snapshot.content.devices.length}</dd></div>
             <div><dt>{tr("发布者 / 时间", "Publisher / time")}</dt><dd>{detail.snapshot.publisher} · {dateLabel(detail.snapshot.published_at_utc)}</dd></div>
-          </dl>
+          </dl></details>
+          <p><StatusPill state={detail.state ?? detail.review?.state ?? "unknown"} /> · {detail.selected ? tr("本机正在使用", "In use on this computer") : tr("尚未在本机启用", "Not selected on this computer")}</p>
           <p>{detail.snapshot.description || tr("无说明", "No description")}</p>
           <div className="save-row">
             <button
               disabled={interactionBlocked || Boolean(busy) || detail.state === "revoked" || detail.selected}
+              title={interactionBlocked ? tr("先结束录制并释放预览设备", "Finish recording and release preview devices first") : detail.selected ? tr("本机已经在使用此配置", "This configuration is already in use") : detail.state === "revoked" ? tr("此版本已撤销，不能再次启用", "This version was revoked and cannot be selected") : busy ? tr("正在处理，请稍候", "An operation is in progress") : ""}
               onClick={() => run("select", () => requestJson("/api/v1/configuration/select", {
                 method: "POST",
                 body: JSON.stringify({ snapshot_id: detail.snapshot.snapshot_id }),
               }), tr(`已选择 ${detail.snapshot.snapshot_id}`, `Selected ${detail.snapshot.snapshot_id}`))}
-            >{busy === "select" ? tr("切换中…", "Switching…") : detail.selected ? tr("正在使用", "In use") : tr("用于之后的采集", "Use for future captures")}</button>
+            >{busy === "select" ? tr("切换中…", "Switching…") : detail.selected ? tr("正在使用", "In use") : tr("使用这个配置", "Use this configuration")}</button>
             <button
-              disabled={interactionBlocked || Boolean(busy) || !status?.manually_pinned}
+              disabled={interactionBlocked || Boolean(busy) || !status?.manually_pinned || !status.current_snapshot_id}
+              title={interactionBlocked ? tr("先结束录制并释放预览设备", "Finish recording and release preview devices first") : !status?.current_snapshot_id ? tr("团队尚未指定推荐版本", "The team has not set a recommendation") : !status.manually_pinned ? tr("本机已在跟随团队推荐", "This computer already follows the recommendation") : busy ? tr("正在处理，请稍候", "An operation is in progress") : ""}
               onClick={() => run("reset", () => requestJson("/api/v1/configuration/reset-current", { method: "POST" }), tr("已恢复跟随团队 Current", "Now following team Current"))}
-            >{tr("恢复跟随 Current", "Follow Current again")}</button>
-            <button disabled={Boolean(busy)} onClick={copySnapshotToWorkspace}>{tr("以此快照创建工作区副本", "Create workspace copy")}</button>
+            >{tr("使用团队推荐版本", "Use the team recommendation")}</button>
+            <button disabled={Boolean(busy)} onClick={copySnapshotToWorkspace}>{tr("复制为可编辑草稿", "Copy to an editable draft")}</button>
           </div>
-          {detail.state !== "approved" && <div className="warning-banner">{tr("该快照不具备正式采集权限；本机快照和待审批快照仅可用于 test，revoked 快照不可新选用。", "This snapshot is not authorized for production capture. Local and candidate snapshots are test-only; revoked snapshots cannot be newly selected.")}</div>}
+          {detail.state !== "approved" && <div className="warning-banner">{tr("此版本仅可测试，不能用于正式采集。提交团队审核并获批后，还需确认设备参数已验证且允许正式采集。", "This version is for testing only. Production requires team approval, verified device parameters and production permission.")}</div>}
         </>}
       </div>
 
       <div className="panel config-workspace-panel">
         <div className="panel-heading-row">
-          <div><div className="panel-title">{tr("配置工作区", "Configuration workspace")}</div><p>{tr("日常配置使用表单；字段校验通过后自动保存。生成快照后内容才冻结。", "Use the form for routine configuration. Valid fields are autosaved; content freezes only when a snapshot is created.")}</p></div>
+          <div><div className="panel-title">{tr("正在编辑的草稿", "Draft being edited")}</div><p>{tr("这里的修改会自动保存为草稿。点击“保存并用于本机测试”才会切换本机配置；提交团队审核不会自动启用正式采集。", "Edits are saved as a draft. Save and use for local testing to apply it here. Submitting for review does not enable production capture.")}</p></div>
           <span className={`workspace-state workspace-${workspaceState}`}>{({
             loading: tr("读取中", "Loading"),
-            saved: tr("已自动保存", "Autosaved"),
+            saved: tr("已保存草稿，尚未应用", "Draft saved; not applied"),
             dirty: tr("等待自动保存", "Waiting to autosave"),
             invalid: tr("字段或高级 JSON 错误", "Invalid fields or advanced JSON"),
             saving: tr("保存中", "Saving"),
           })[workspaceState]}</span>
         </div>
         <div className="config-form-grid">
-          <label>{tr("快照名称", "Snapshot name")}<input
+          <label>{tr("配置名称", "Configuration name")}<input
             value={workspace?.name ?? ""}
             maxLength={120}
             onChange={(event) => patchWorkspace((next) => { next.name = event.target.value; })}
           /></label>
-          <label>{tr("基于 Snapshot", "Based on snapshot")}<input value={workspace?.base_snapshot_id ?? ""} readOnly title={tr("由“以此快照创建工作区副本”确定", "Set by Create workspace copy")} /></label>
+
           <label className="wide">{tr("变更说明", "Change description")}<textarea
             value={workspace?.description ?? ""}
             maxLength={2000}
@@ -711,21 +747,24 @@ export function CaptureSettingsPage({
         </details>
         <div className="save-row">
           <button
-            disabled={Boolean(busy) || workspaceState !== "saved"}
-            onClick={() => workspace && run("local", () => requestJson("/api/v1/configuration/local-snapshots", {
-              method: "POST",
-              body: JSON.stringify(workspace),
-            }), tr("已保存不可变的本机快照", "Immutable local snapshot saved"))}
-          >{busy === "local" ? tr("保存中…", "Saving…") : tr("保存本机快照", "Save local snapshot")}</button>
+            disabled={interactionBlocked || Boolean(busy) || workspaceState !== "saved"}
+            title={interactionBlocked ? tr("先结束录制并释放预览设备", "Finish recording and release preview devices first") : workspaceState !== "saved" ? tr("请等待草稿保存并修正错误", "Wait for the draft to save and fix any errors") : ""}
+            onClick={() => workspace && run("local", async () => {
+              const saved = await requestJson<{ snapshot: { snapshot_id: string } }>("/api/v1/configuration/local-snapshots", { method: "POST", body: JSON.stringify(workspace) });
+              try { await requestJson("/api/v1/configuration/select", { method: "POST", body: JSON.stringify({ snapshot_id: saved.snapshot.snapshot_id }) }); }
+              catch (e) { await refresh(); throw new Error(tr("配置版本已保存，但未切换：", "Version saved, but not selected: ") + (e as Error).message); }
+              return saved;
+            }, tr("已保存并用于本机测试；正式采集仍需团队审批", "Saved and selected for local testing; production still requires team approval"))}
+          >{busy === "local" ? tr("保存中…", "Saving…") : tr("保存并用于本机测试", "Save and use for local testing")}</button>
           <button
             className="primary"
             disabled={Boolean(busy) || workspaceState !== "saved" || remoteUnavailable}
-            title={remoteUnavailable ? remoteReason : ""}
+            title={remoteUnavailable ? remoteReason : busy ? tr("正在处理，请稍候", "An operation is in progress") : ""}
             onClick={() => workspace && run("publish", () => requestJson("/api/v1/configuration/publish", {
               method: "POST",
               body: JSON.stringify(workspace),
             }), tr("已提交团队候选，等待管理员审批", "Team candidate submitted for administrator review"))}
-          >{busy === "publish" ? tr("提交中…", "Submitting…") : tr("发布为团队候选", "Submit team candidate")}</button>
+          >{busy === "publish" ? tr("提交中…", "Submitting…") : tr("提交团队审核", "Submit for team review")}</button>
         </div>
         {remoteUnavailable && <p className="disabled-reason">{tr("团队候选当前不可用：", "Team candidates are currently unavailable: ")}{remoteReason} {cloud?.configured
             ? <button onClick={onOpenPublishing}>{tr("前往“记录与发布”登录", "Open Records & publishing to sign in")}</button>
@@ -736,7 +775,8 @@ export function CaptureSettingsPage({
 
     {tab === "devices" && <section className="settings-split device-editor-layout">
       <div className="panel config-list-panel">
-        <div className="panel-title">{tr(`工作区设备（${devices.length}）`, `Workspace devices (${devices.length})`)}</div>
+        <div className="panel-title">{tr(`草稿中的设备（${devices.length}）`, `Devices in this draft (${devices.length})`)}</div>
+        <p>{tr("选择设备以编辑草稿；不会改变当前采集设备。", "Select a device to edit its draft; this does not switch the capture device.")}</p>
         <div className="config-snapshot-list">
           {devices.map((item) => <button
             key={item.sensor_sn}
@@ -748,7 +788,7 @@ export function CaptureSettingsPage({
           </button>)}
         </div>
         <div className="save-row vertical">
-          <button disabled={Boolean(busy) || remoteUnavailable} title={remoteUnavailable ? remoteReason : ""} onClick={reserveAsset}>{tr("为新物理设备保留 SN", "Reserve SN for new hardware")}</button>
+          <button disabled={Boolean(busy) || remoteUnavailable} title={remoteUnavailable ? remoteReason : busy ? tr("正在处理，请稍候", "An operation is in progress") : ""} onClick={reserveAsset}>{tr("为新物理设备保留 SN", "Reserve SN for new hardware")}</button>
           <button disabled={Boolean(busy) || remoteUnavailable || !selectedDevice || !selectedIsLatestRevision} title={remoteUnavailable ? remoteReason : !selectedIsLatestRevision ? tr("只能从该物理资产的最新 revision 继续分配", "A new revision can only be allocated from this hardware asset's latest revision") : ""} onClick={reserveRevision}>{tr("为所选设备保留新 revision", "Reserve revision for selected device")}</button>
         </div>
         {remoteUnavailable && <div className="disabled-reason">
@@ -800,11 +840,17 @@ export function CaptureSettingsPage({
           </section>
 
           <section className="form-section si-profile-card">
-            <div><span>{tr("派生 SI Profile ID（自动计算）", "Derived SI profile ID (automatic)")}</span><strong>{selectedDevice.si_profile.profile_id}</strong></div>
+            <p>{tr("正在编辑此设备的草稿参数。实验生成的结果会填在这里；确认独立验证结果后，才能声明已验证。团队审批是之后的独立步骤。", "These are this device's draft parameters. Experiment results appear here. Review independent validation before marking them verified; team approval is a separate later step.")}</p>
+            <button onClick={onOpenCalibration}>{tr("通过标定实验生成参数", "Generate parameters with a calibration experiment")}</button>
             <StatusPill state={selectedDevice.si_profile.verified ? "verified" : "unverified"} />
             <div className="config-form-grid">
               <label>{tr("加速度 counts/g", "Acceleration counts/g")}<input type="number" min="0" step="any" value={selectedDevice.si_profile.accel_counts_per_g ?? ""} onChange={(event) => patchDevice((next) => { next.si_profile.accel_counts_per_g = nullableNumber(event.target.value); })} /></label>
               <label>{tr("角速度 counts/(°/s)", "Angular velocity counts/(°/s)")}<input type="number" min="0" step="any" value={selectedDevice.si_profile.gyro_counts_per_dps ?? ""} onChange={(event) => patchDevice((next) => { next.si_profile.gyro_counts_per_dps = nullableNumber(event.target.value); })} /></label>
+            </div>
+            <details className="technical-details">
+              <summary>{tr("高级：偏置、轴映射与验证证据", "Advanced: biases, axis mapping and verification evidence")}</summary>
+              <p><span>{tr("派生 SI Profile ID（自动计算）", "Derived SI profile ID (automatic)")}</span><code>{selectedDevice.si_profile.profile_id}</code></p>
+              <div className="config-form-grid">
               <label className="wide">{tr("校准方法", "Calibration method")}<input value={selectedDevice.si_profile.method} onChange={(event) => patchDevice((next) => { next.si_profile.method = event.target.value; })} /></label>
               <label className="wide">{tr("证据 SHA-256", "Evidence SHA-256")}<input value={selectedDevice.si_profile.evidence_sha256 ?? ""} placeholder={tr("验证后必须填写 64 位小写十六进制", "Verified profiles require 64 lowercase hexadecimal characters")} onChange={(event) => patchDevice((next) => { next.si_profile.evidence_sha256 = nullable(event.target.value); })} /></label>
               <label className="checkbox-label wide"><input
@@ -837,9 +883,10 @@ export function CaptureSettingsPage({
                 {selectedDevice.si_profile.evidence.map((item, index) => <article key={`${item.recording_id}-${index}`}><code>{item.recording_id}</code><span>{item.kind}</span><small>{localizedField(item, "summary") || item.summary_zh || item.summary_en || tr("无摘要", "No summary")}</small></article>)}
               </div>
             </details>
+            </details>
           </section>
 
-          <section className="form-section candidate-editor">
+          <details className="form-section candidate-editor"><summary>{tr("高级：手动测试系数", "Advanced: manual test coefficients")}</summary>
             <div className="panel-heading-row">
               <div><h3>{tr("本机候选 SI", "Local candidate SI")}</h3><p>{tr("候选值用于屏幕诊断；录制 H5 仍保存原始帧，并明确记录候选非权威属性。它不会自动成为正式 SI。", "Candidate values are used for on-screen diagnostics. Capture H5 retains raw frames and explicitly marks the candidate as non-authoritative; it does not automatically become production SI.")}</p></div>
               {selectedRuntimeProfile?.candidate_conversion_source && <span className="config-pill config-pill-unverified">{selectedRuntimeProfile.candidate_conversion_source === "local_override" ? tr("本机覆盖", "Local override") : tr("设备档案候选", "Device profile candidate")}</span>}
@@ -876,7 +923,7 @@ export function CaptureSettingsPage({
                 <button disabled={candidateDirty || workspaceState === "invalid"} title={candidateDirty ? tr("请先保存候选，确保复制的是明确版本", "Save the candidate first so the copied version is explicit") : tr("复制后仍为未验证、仅 test", "The copy remains unverified and test-only")} onClick={promoteCandidate}>{tr("复制到工作区 SI（未验证）", "Copy to workspace SI (unverified)")}</button>
               </div>
             </>}
-          </section>
+          </details>
         </>}
       </div>
     </section>}

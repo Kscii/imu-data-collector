@@ -8,6 +8,7 @@ from pathlib import Path
 _CAPTURE_API_SOURCES = (
     "capture_api.py",
     "calibration_api.py",
+    "calibration_orientation.py",
     "calibration_experiments.py",
     "calibration_cloud.py",
     "coordinator.py",

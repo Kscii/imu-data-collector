@@ -45,6 +45,7 @@ class ExperimentCreate(BaseModel):
     sensor_sn: str = Field(pattern=r"^IMU-[0-9]{4}-R[0-9]{2}$")
     operator_id: str = Field(pattern=r"^[a-z][a-z0-9]{3,15}$")
     directions: dict[str, str]
+    orientation_session_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     notes: str = Field(default="", max_length=2000)
 
     @model_validator(mode="after")
@@ -299,6 +300,15 @@ def analyze_experiment(experiment: dict, sources: dict, warnings: list[str] | No
     if gyro_estimates:
         gyro_scale = float(np.median(gyro_estimates))
 
+    raw_axes = (
+        (experiment.get("orientation_setup") or {}).get("axis_definition") == "raw_accelerometer"
+    )
+    if raw_axes and mapping_available and (order != [0, 1, 2] or signs != [1, 1, 1]):
+        warnings.append("raw_axis_setup_conflicts_with_fitting_faces")
+        # Do not silently reinterpret named housing faces for native-axis experiments.
+        mapping_available = False
+        accel_scale = gyro_scale = None
+
     candidate = {
         "verified": False,
         "accel_counts_per_g": accel_scale,
@@ -366,6 +376,7 @@ def analyze_experiment(experiment: dict, sources: dict, warnings: list[str] | No
         "operator_id": experiment["operator_id"],
         "device": experiment["device"],
         "directions": experiment["directions"],
+        "orientation_setup": experiment.get("orientation_setup"),
         "notes": experiment["notes"],
         "training_eligible": False,
         "data_tier": "test",

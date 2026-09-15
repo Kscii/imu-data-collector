@@ -89,6 +89,7 @@ function readCaptureForm() {
       dataTier?: "test" | "prod";
       cameraId?: string;
       sensorSn?: string;
+      sensorExplicit?: boolean;
     };
   } catch {
     return {};
@@ -998,6 +999,8 @@ export default function App() {
   const [imuLocalDeviceId, setImuLocalDeviceId] = useState("");
   const [imuProfiles, setImuProfiles] = useState<ImuProfile[]>([]);
   const [sensorSn, setSensorSn] = useState(captureForm.sensorSn ?? "");
+  const [sensorExplicit, setSensorExplicit] = useState(Boolean(captureForm.sensorExplicit));
+  const leaveSettings = useRef<(() => Promise<boolean>) | null>(null);
   const [configurationStatus, setConfigurationStatus] = useState<ConfigurationStatus | null>(null);
   const liveRef = useRef<{ t: number[]; values: number[][] }>({ t: [], values: [] });
   const [, redraw] = useState(0);
@@ -1008,14 +1011,16 @@ export default function App() {
   const liveAgeMs = liveReceivedAt > 0 ? Math.max(0, clock - liveReceivedAt) : Number.POSITIVE_INFINITY;
   const liveFresh = liveTransport === "live" && liveAgeMs < 2_500;
 
-  const selectTab = (next: AppTab) => {
+  const selectTab = async (next: AppTab) => {
+    if (leaveSettings.current && !(await leaveSettings.current())) return;
     setTab(next);
     const url = new URL(location.href);
     url.searchParams.set("view", tabView(next));
     history.pushState({}, "", url);
   };
 
-  const openCaptureSettings = (section?: "devices" | "runtime", device?: string) => {
+  const openCaptureSettings = async (section?: "devices" | "runtime", device?: string) => {
+    if (leaveSettings.current && !(await leaveSettings.current())) return;
     setTab("settings");
     const url = new URL(location.href);
     url.searchParams.set("view", "settings");
@@ -1027,7 +1032,13 @@ export default function App() {
   };
 
   useEffect(() => {
-    const onPopState = () => setTab(initialTab(annotationApplication));
+    const onPopState = async () => {
+      if (leaveSettings.current && !(await leaveSettings.current())) {
+        const url = new URL(location.href); url.searchParams.set("view", "settings");
+        history.pushState({}, "", url); return;
+      }
+      setTab(initialTab(annotationApplication));
+    };
     window.addEventListener("popstate", onPopState);
     const url = new URL(location.href);
     if (!url.searchParams.has("view")) {
@@ -1049,9 +1060,9 @@ export default function App() {
     if (annotationApplication) return;
     sessionStorage.setItem(
       CAPTURE_FORM_KEY,
-      JSON.stringify({ collection, dataTier, cameraId, sensorSn })
+      JSON.stringify({ collection, dataTier, cameraId, sensorSn, sensorExplicit })
     );
-  }, [annotationApplication, collection, dataTier, cameraId, sensorSn]);
+  }, [annotationApplication, collection, dataTier, cameraId, sensorSn, sensorExplicit]);
 
   useEffect(() => {
     if (annotationApplication) return;
@@ -1109,6 +1120,7 @@ export default function App() {
   };
 
   const selectSensor = (nextSensorSn: string) => {
+    setSensorExplicit(Boolean(nextSensorSn));
     const profile = imuProfiles.find((item) => item.sensor_sn === nextSensorSn);
     setSensorSn(nextSensorSn);
     setImuBinding(profile?.binding ?? null);
@@ -1322,7 +1334,7 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
+    <div className={`app-shell ${!annotationApplication && (tab === "settings" || tab === "characterize") ? "capture-setup-shell" : ""} ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
       <header className={annotationApplication && tab === "annotate" ? "workbench-header" : ""}>
         <div>
           <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("多设备 IMU · 本机采集", "Multi-device IMU · Local capture")}</span>
@@ -1380,6 +1392,9 @@ export default function App() {
       {!annotationApplication && tab === "settings" && <CaptureSettingsPage
         interactionBlocked={captureInteractionBlocked || live.state !== "idle" || Boolean(live.monitoring_requested)}
         runtimeConfiguration={config?.runtime_configuration}
+        captureSensorSn={sensorSn}
+        onOpenCalibration={() => selectTab("characterize")}
+        registerLeaveGuard={guard => { leaveSettings.current = guard; }}
         imuProfiles={imuProfiles}
         bleCandidates={imuCandidates}
         bleScan={bleScan}
@@ -1391,7 +1406,11 @@ export default function App() {
         <CalibrationExperimentPage
           allowedUnikeys={config?.operator_unikeys ?? []}
           interactionBlocked={captureInteractionBlocked}
-          sensorSn={sensorSn}
+          sensorSn={sensorExplicit ? sensorSn : ""}
+          profiles={imuProfiles}
+          onSelectSensor={selectSensor}
+          onBack={() => selectTab("settings")}
+          onOpenSettings={sn => openCaptureSettings("devices", sn)}
           legacy={<CharacterizationPage live={live} allowedUnikeys={config?.operator_unikeys ?? []} chart={liveRef.current} interactionBlocked={captureInteractionBlocked} sensorSn={sensorSn} />}
         />
       )}

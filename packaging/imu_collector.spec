@@ -30,6 +30,7 @@ if ffmpeg.is_dir():
 for source in (
     "capture_api.py",
     "calibration_api.py",
+    "calibration_orientation.py",
     "calibration_experiments.py",
     "calibration_cloud.py",
     "coordinator.py",

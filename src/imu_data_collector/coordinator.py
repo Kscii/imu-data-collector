@@ -21,6 +21,7 @@ from imu_data_collector.broker_client import (
     read_index_receipt_via_broker,
     refresh_device_registry_via_broker,
 )
+from imu_data_collector.calibration_orientation import OrientationWindow
 from imu_data_collector.catalog import LEGACY_PACKET_RESIDUAL_ISSUE, RecordingCatalog
 from imu_data_collector.characterization import write_characterization_report
 from imu_data_collector.config import Settings, load_activity_taxonomy
@@ -115,6 +116,8 @@ class RecordingCoordinator:
         self._lock = asyncio.Lock()
         self._stop_consumer = asyncio.Event()
         self.latest_raw = np.zeros(6, dtype=np.int16)
+        self.orientation_window = OrientationWindow()
+        self._orientation_device_tick: int | None = None
         self.latest_packet_samples = 0
         self.latest_device_time_ms: int | None = None
         self.packet_count = 0
@@ -720,6 +723,8 @@ class RecordingCoordinator:
         """连接 IMU 与摄像头，只在内存中提供实时预览，不创建采集文件。"""
 
         async with self._lock:
+            if self.mode == "imu_orientation_preview":
+                raise RuntimeError("请先离开方向识别页面 / Finish orientation preview first")
             self._select_session_imu(
                 request.sensor_sn,
                 request.imu_local_device_id,
@@ -890,6 +895,69 @@ class RecordingCoordinator:
                 self._error_message(error, "连接预览设备超时")
             ) from error
         return snapshot
+
+    async def start_orientation_preview(self, request: PreviewStartRequest) -> None:
+        """Reserve the same BLE owner without opening video or a file writer."""
+        async with self._lock:
+            if self.mode is not None or self.ble is not None or self.writer is not None:
+                raise RuntimeError("设备正在使用，请先释放 / Release the device session first")
+            if self._preview_open_in_flight or self.device_state in {
+                DeviceSessionState.CONNECTING, DeviceSessionState.RELEASING,
+            }:
+                raise RuntimeError("设备正在连接或释放，请稍候 / Device connection is changing")
+            self._select_session_imu(request.sensor_sn, request.imu_local_device_id)
+            operation = self._next_device_operation(DeviceSessionState.CONNECTING)
+            self.mode = "imu_orientation_preview"
+            self.state = RecordingState.IDLE
+            self.current = None
+            self._preview_open_in_flight = True
+            self._imu_state = "connecting"
+            self._reset_live_imu_metrics()
+            self.orientation_window.clear()
+            self._orientation_device_tick = None
+        try:
+            ble = await self._open_preview_ble(request.imu_local_device_id)
+        except BaseException:
+            async with self._lock:
+                self._preview_open_in_flight = False
+                if self._device_operation_id == operation:
+                    self.mode = None
+                    self.device_state = DeviceSessionState.ERROR
+                    self._imu_state = "error"
+            raise
+        async with self._lock:
+            self._preview_open_in_flight = False
+            cancelled = (
+                self._device_operation_id != operation or self.mode != "imu_orientation_preview"
+            )
+            if not cancelled:
+                self.ble = ble
+                self._stop_consumer.clear()
+                self._consumer = asyncio.create_task(self._consume_imu())
+                self.device_state = DeviceSessionState.CONNECTED
+                self._imu_state = "connected"
+                self.device_error = self.preview_error = None
+        if cancelled:
+            await self._bounded_cleanup(None, ble, None)
+            raise RuntimeError("方向连接已取消 / Orientation connection cancelled")
+
+    async def stop_orientation_preview(self) -> None:
+        async with self._lock:
+            if self.mode != "imu_orientation_preview":
+                return
+            operation = self._next_device_operation(DeviceSessionState.RELEASING)
+            ble, consumer = self.ble, self._consumer
+            self.ble = self._consumer = None
+            self._stop_consumer.set()
+            self.orientation_window.clear()
+            self._orientation_device_tick = None
+        await self._bounded_cleanup(None, ble, consumer)
+        async with self._lock:
+            if self._device_operation_id == operation:
+                self.mode = None
+                self.device_state = DeviceSessionState.IDLE
+                self._imu_state = "idle"
+                self._reset_live_imu_metrics()
 
     async def switch_preview_camera(
         self, request: PreviewStartRequest
@@ -1288,6 +1356,9 @@ class RecordingCoordinator:
         """服务退出时释放设备；正式会话保留 partial 并明确标记失败。"""
 
         await self.stop_background_jobs()
+        if self.mode == "imu_orientation_preview":
+            await self.stop_orientation_preview()
+            return
 
         async with self._lock:
             mode = self.mode
@@ -1323,6 +1394,8 @@ class RecordingCoordinator:
         await self._consume_imu()
 
     async def start(self, request: RecordingStartRequest) -> RecordingSummary:
+        if self.mode == "imu_orientation_preview":
+            raise RuntimeError("请先结束方向识别 / Finish orientation preview first")
         self._select_session_imu(
             request.sensor_sn,
             configuration_snapshot_id=request.configuration_snapshot_id,
@@ -1330,6 +1403,8 @@ class RecordingCoordinator:
         if request.data_tier == DataTier.PROD and not self.settings.imu.prod_capture_enabled:
             raise ValueError("当前临时 IMU 尚未完成校准，只允许录制 test 数据")
         async with self._lock:
+            if self.mode == "imu_orientation_preview":
+                raise RuntimeError("请先结束方向识别 / Finish orientation preview first")
             if self._preview_open_in_flight:
                 raise RuntimeError("预览设备仍在连接或清理，暂不能开始录制")
             if self.device_state in {
@@ -1569,6 +1644,9 @@ class RecordingCoordinator:
             try:
                 packet = await asyncio.wait_for(ble.queue.get(), timeout=0.25)
             except TimeoutError:
+                if self.mode == "imu_orientation_preview" and not ble.connected:
+                    self.orientation_window.clear()
+                    self._imu_state = "error"
                 if (
                     not self._stop_consumer.is_set()
                     and not ble.connected
@@ -1619,6 +1697,19 @@ class RecordingCoordinator:
                 self.latest_raw = parsed.raw_counts[-1].copy()
                 if parsed.device_time_ms is not None:
                     self.latest_device_time_ms = int(parsed.device_time_ms[-1])
+                if self.mode == "imu_orientation_preview":
+                    for i, raw in enumerate(parsed.raw_counts):
+                        if parsed.device_time_ms is not None:
+                            tick = int(parsed.device_time_ms[i])
+                            if self._orientation_device_tick == tick:
+                                continue
+                            if (
+                                self._orientation_device_tick is not None
+                                and tick < self._orientation_device_tick
+                            ):
+                                self.orientation_window.clear()
+                            self._orientation_device_tick = tick
+                        self.orientation_window.add(raw, packet.receive_time_ns)
 
     async def _fail_running_session_on_disconnect(
         self,
@@ -1833,6 +1924,10 @@ class RecordingCoordinator:
     async def start_characterization(
         self, request: CharacterizationStartRequest
     ) -> dict[str, Any]:
+        if self.mode == "imu_orientation_preview":
+            raise RuntimeError(
+                "请先创建实验并结束认轴 / Create the experiment before starting trials"
+            )
         if self.mode == "devices_preview":
             previous_camera_id = self._preview_camera_id
             await self.stop_preview()
@@ -2034,6 +2129,10 @@ class RecordingCoordinator:
                 "training_eligible": False,
             }
             self.last_characterization = result
+            # The finalized result belongs to history, not an active device session.
+            # Keeping it in `current` prevents selecting the newly fitted configuration.
+            self.current = None
+            self.state = RecordingState.IDLE
             self.mode = None
             self.ble = None
             self.writer = None

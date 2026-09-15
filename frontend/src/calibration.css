@@ -11,3 +11,36 @@
 .calibration-page details { margin: .8rem 0; }
 .calibration-page summary { cursor: pointer; }
 .calibration-page input { max-width: 100%; }
+
+.orientation-readout { margin: 1rem 0; padding: 1.25rem; border: 1px solid #416ca1; border-radius: .75rem; background: #193456; color: #edf5ff; }
+.orientation-readout > span { display: block; opacity: .85; }
+.orientation-readout > strong { display: block; font-size: 1.7rem; margin: .5rem 0; }
+.orientation-description { flex: 1; min-width: 220px; }
+.orientation-faces { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+.orientation-faces article { display: flex; flex-direction: column; gap: .65rem; padding: 1rem; border: 1px solid #52637d; border-radius: .6rem; }
+.orientation-faces article.recorded { border-color: #369475; }
+.orientation-faces article.upward { outline: 2px solid #6aaaff; }
+.orientation-faces .save-row { margin-top: auto; }
+.orientation-setup > label { display: flex; flex-direction: column; margin: .8rem 0; gap: .4rem; }
+.orientation-setup button:disabled { cursor: not-allowed; }
+
+.settings-calibration-entry { display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+
+.orientation-setup.panel { border: 0; padding: 1rem 0 0; box-shadow: none; }
+.orientation-faces article { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  body:has(.capture-setup-shell) { min-width: 0; }
+  .capture-setup-shell { padding: 20px 14px 32px; }
+  .capture-setup-shell > nav { display: flex; flex-wrap: wrap; }
+  .capture-setup-shell .panel, .capture-setup-shell label { min-width: 0; }
+  .capture-setup-shell select { max-width: 100%; }
+  .capture-setup-shell .settings-heading { flex-wrap: wrap; }
+  .capture-setup-shell .settings-page > *, .capture-setup-shell .config-summary-card { min-width: 0; }
+  .capture-setup-shell .settings-split { grid-template-columns: minmax(0, 1fr); }
+  .capture-setup-shell .settings-tabs { display: flex; flex-wrap: wrap; }
+  .capture-setup-shell .config-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .capture-setup-shell .technical-details code { overflow-wrap: anywhere; }
+  .orientation-setup .save-row > label { width: 100%; }
+}
+@media (max-width: 800px) { .orientation-faces { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .orientation-faces { grid-template-columns: minmax(0, 1fr); } }
