@@ -410,6 +410,10 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Google 账号不在团队发布白名单")
         return {"email": email, "unikey": active.identity.email_to_unikey[email]}
 
+    from imu_data_collector.calibration_cloud import register_calibration_broker
+
+    register_calibration_broker(app, bucket, client, actor, _sha256_blob)
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"ok": True, "application": "upload-broker"}
@@ -436,6 +440,7 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
             "server_verifies_sha256_before_manifest": True,
             "device_registry_download": True,
             "device_configuration_v2": True,
+            "calibration_experiments_v1": True,
         }
 
     def registry_json(object_key: str) -> dict[str, Any]:

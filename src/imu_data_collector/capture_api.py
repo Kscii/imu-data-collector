@@ -20,6 +20,7 @@ from imu_data_collector.broker_client import (
     reserve_device_identity_via_broker,
 )
 from imu_data_collector.build_info import CAPTURE_API_BUILD_ID
+from imu_data_collector.calibration_api import register_calibration_api
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.coordinator import RecordingCoordinator
 from imu_data_collector.desktop_auth import oauth_error_english
@@ -178,11 +179,13 @@ def create_capture_app(settings: Settings | None = None) -> FastAPI:
         yield
         if registry_task and not registry_task.done():
             registry_task.cancel()
+        await calibration.close()
         await coordinator.shutdown()
 
     app = FastAPI(title="IMU 数据采集端", version="0.3.0", lifespan=lifespan)
     app.add_exception_handler(HTTPException, structured_http_error_handler)
     app.state.coordinator = coordinator
+    calibration = register_calibration_api(app, coordinator, configuration_manager, candidate_store)
 
     @app.middleware("http")
     async def static_cache_policy(request: Request, call_next):

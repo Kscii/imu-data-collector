@@ -1,9 +1,9 @@
+import { CalibrationExperimentPage, CalibrationDeviceManagement } from "./CalibrationExperiments";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
 import {
   type BleScanSummary,
   CaptureSettingsPage,
-  DeviceConfigurationAdminPage,
   type ConfigurationStatus,
   type RuntimeConfiguration,
 } from "./DeviceConfigurationPages";
@@ -1388,19 +1388,18 @@ export default function App() {
         onOpenPublishing={() => selectTab("library")}
       />}
       {tab === "characterize" && (
-        <CharacterizationPage
-          live={live}
+        <CalibrationExperimentPage
           allowedUnikeys={config?.operator_unikeys ?? []}
-          chart={liveRef.current}
           interactionBlocked={captureInteractionBlocked}
           sensorSn={sensorSn}
+          legacy={<CharacterizationPage live={live} allowedUnikeys={config?.operator_unikeys ?? []} chart={liveRef.current} interactionBlocked={captureInteractionBlocked} sensorSn={sensorSn} />}
         />
       )}
       {annotationApplication && tab === "annotate" && taxonomy && session && (
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
-      {annotationApplication && tab === "deviceConfig" && <DeviceConfigurationAdminPage canManage={Boolean(config?.can_manage_device_configuration)} />}
+      {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
       {annotationApplication && tab === "delivery" && <SnapshotDeliveryViewer />}

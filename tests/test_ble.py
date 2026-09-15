@@ -164,9 +164,12 @@ async def test_scan_timeout_reports_target_not_advertising(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["linux", "windows", "macos"])
 async def test_registry_scan_returns_registered_and_commissioning_candidates(
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
+    monkeypatch.setattr(ble_module, "platform_id", lambda: platform)
     class FakeScanner:
         @staticmethod
         async def discover(**_kwargs: Any):
@@ -221,8 +224,14 @@ async def test_registry_scan_returns_registered_and_commissioning_candidates(
         "IMU-0002-R01"
     ]
     assert by_address["AA:BB:CC:DD:EE:FF"]["registration_state"] == "unregistered"
-    assert by_address["E8:3D:C1:8A:FF:FF"]["matched_sensor_sns"] == []
-    assert by_address["E8:3D:C1:8A:FF:FF"]["registration_state"] == "unregistered"
+    # CoreBluetooth uses host UUIDs, so same-name devices are possible matches.
+    # Connection selection still rejects multiple matching advertisements.
+    assert by_address["E8:3D:C1:8A:FF:FF"]["matched_sensor_sns"] == (
+        ["IMU-0002-R01"] if platform == "macos" else []
+    )
+    assert by_address["E8:3D:C1:8A:FF:FF"]["registration_state"] == (
+        "registered" if platform == "macos" else "unregistered"
+    )
 
 
 def test_connection_signature_is_verified_only_by_a_protocol_frame() -> None:

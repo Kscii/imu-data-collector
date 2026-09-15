@@ -1,1 +1,4 @@
 docs/contracts/*.md text eol=lf
+# Bootstrap lock hashes are byte-exact on Windows, macOS and Linux.
+configs/*.yaml text eol=lf
+configs/*.json text eol=lf
