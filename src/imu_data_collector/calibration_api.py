@@ -130,6 +130,13 @@ class CalibrationController:
             end_ns = (
                 time.monotonic_ns() - writer.recording_start_monotonic_ns if writer else start_ns
             )
+            if end_ns <= start_ns:
+                # Python 3.12 on Windows can report the same monotonic tick for
+                # a stage started and cancelled immediately. Retain the trial,
+                # but do not leave an unwritable zero-length H5 stage active.
+                self.coordinator.current_stage = None
+                trial["phases"][name] = {"start_ns": start_ns, "end_ns": end_ns}
+                raise RuntimeError("Clock did not advance; trial interrupted")
             if self.coordinator.current_stage is not None:
                 await self.coordinator.stop_characterization_stage()
             trial["phases"][name] = {"start_ns": start_ns, "end_ns": end_ns}

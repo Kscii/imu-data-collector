@@ -7,7 +7,7 @@ Keep the device, firmware and mounting conditions consistent throughout an exper
 ## Install and open
 
 Download the matching installer and its SHA-256 file from the
-[desktop preview release](https://github.com/Kscii/imu-data-collector/releases/tag/desktop-v0.3.1-rc.1):
+[desktop preview release](https://github.com/Kscii/imu-data-collector/releases/tag/desktop-v0.3.1-rc.2):
 
 - Windows 10/11 x64: the `.exe` installer. This internal installer is unsigned;
   Windows may show SmartScreen. Check the release source and hash before opening it.

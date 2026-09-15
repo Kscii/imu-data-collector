@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import itertools
+import time
 
 import h5py
 import numpy as np
@@ -248,14 +249,15 @@ async def test_server_timing_cancellation_and_continued_capture(tmp_path, monkey
 
     async def wait(seconds):
         durations.append(seconds)
-        await asyncio.sleep(0)
+        # Keep a positive interval even with Windows' coarse monotonic clock.
+        await asyncio.sleep(0.02)
 
     monkeypatch.setattr(controller, "_wait_seconds", wait)
     await controller.start(experiment_id)
     spec = TrialCreate(kind="accel", role="fit", axis="X", sign=1)
     await controller.start_trial(experiment_id, spec)
     await controller.task
-    assert durations == [5, 10]
+    assert durations == [5, 10], controller.detail(experiment_id)["trials"]
     first = controller.detail(experiment_id)["trials"][0]
     assert first["status"] == "complete"
     assert set(first["phases"]) == {"settle", "measure"}
@@ -265,6 +267,7 @@ async def test_server_timing_cancellation_and_continued_capture(tmp_path, monkey
     while controller.phase != "measure":
         await asyncio.sleep(0)
     assert not controller.task.done()
+    await asyncio.sleep(0.02)
     controller.rotation_done.set()
     await controller.task
     assert durations == [5, 10, 5, 5]
@@ -274,6 +277,20 @@ async def test_server_timing_cancellation_and_continued_capture(tmp_path, monkey
     await controller.start_trial(experiment_id, spec)
     await controller.cancel_trial(experiment_id)
     assert controller.detail(experiment_id)["trials"][-1]["status"] == "interrupted"
+
+    with monkeypatch.context() as frozen_clock:
+        now = time.monotonic_ns()
+        frozen_clock.setattr(time, "monotonic_ns", lambda: now)
+        await controller.start_trial(experiment_id, spec)
+        await controller.task
+        interrupted = controller.detail(experiment_id)["trials"][-1]
+        assert interrupted["status"] == "interrupted"
+        assert "Clock did not advance" in interrupted["error"]
+        assert controller.coordinator.current_stage is None
+    # A zero-duration interrupted stage must not prevent the next real trial.
+    await controller.start_trial(experiment_id, spec)
+    await controller.task
+    assert controller.detail(experiment_id)["trials"][-1]["status"] == "complete"
     await controller.stop(experiment_id)
     old = controller.store.source_path(controller.detail(experiment_id)["sources"][0])
     old_bytes = old.read_bytes()
