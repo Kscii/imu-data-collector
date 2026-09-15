@@ -105,7 +105,8 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
     gap_threshold = max(1.5, median_packet_interval * 1.5)
     stage_metrics: dict[str, Any] = {}
     stage_medians: dict[str, np.ndarray] = {}
-    for row in stage_rows:
+    repeated_medians: dict[str, list[np.ndarray]] = {}
+    for stage_index, row in enumerate(stage_rows):
         mask = (sample_times >= row["start_ns"]) & (sample_times < row["end_ns"])
         values = raw[mask]
         window_stats: list[dict[str, Any]] = []
@@ -135,8 +136,12 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
             )
             for axis in AXES
         } if window_stats else {}
-        stage_metrics[row["stage_code"]] = {
+        stage_key = row["stage_code"]
+        if stage_key in stage_metrics:
+            stage_key = f"{stage_key}#{stage_index + 1}"
+        stage_metrics[stage_key] = {
             **row,
+            "trial_index": stage_index,
             "sample_count": int(len(values)),
             "axes": _axis_stats(values.astype(np.float64)),
             "window_seconds": 60,
@@ -144,7 +149,9 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
             "window_median_span_counts": median_span,
         }
         if len(values):
-            stage_medians[row["stage_code"]] = np.median(values, axis=0)
+            repeated_medians.setdefault(row["stage_code"], []).append(np.median(values, axis=0))
+
+    stage_medians = {code: np.median(values, axis=0) for code, values in repeated_medians.items()}
 
     candidates: dict[str, Any] = {}
     for axis, (positive, negative) in POSE_PAIRS.items():
@@ -274,6 +281,7 @@ def analyze_characterization(path: Path) -> dict[str, Any]:
             ),
         },
         "stage_metrics": stage_metrics,
+        "stage_trials": list(stage_metrics.values()),
         "accel_calibration_candidates": candidates,
         "trailer_metrics": trailer_metrics,
         "device_clock_metrics": device_clock_metrics,

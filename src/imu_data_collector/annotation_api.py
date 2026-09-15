@@ -30,6 +30,7 @@ from imu_data_collector.auth import (
 )
 from imu_data_collector.broker_models import ModelPublicationRestoreRequest
 from imu_data_collector.build_info import ANNOTATION_API_BUILD_ID
+from imu_data_collector.calibration_cloud import register_calibration_catalog
 from imu_data_collector.config import Settings, load_settings
 from imu_data_collector.dataset_catalog import DatasetCatalog
 from imu_data_collector.device_configuration import (
@@ -120,6 +121,7 @@ def create_annotation_app(
     app.state.authenticator = authenticator
     app.state.model_catalog = model_catalog
     app.state.device_configuration_store = configuration_store
+    register_calibration_catalog(app, object_store)
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next):

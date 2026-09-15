@@ -632,6 +632,7 @@ class SyncExperimentDocument(BaseModel):
 
 
 class CharacterizationStage(StrEnum):
+    CALIBRATION = "calibration"
     PIPELINE_SMOKE_UNCONTROLLED = "pipeline_smoke_uncontrolled"
     LONG_STATIC_BUTTON_UP = "long_static_button_up"
     BUTTON_FACE_UP = "button_face_up"

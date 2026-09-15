@@ -29,6 +29,9 @@ if ffmpeg.is_dir():
 # build_info.py 需要与 Vite 构建时读取完全相同的源文件，才能继续阻止前后端混版。
 for source in (
     "capture_api.py",
+    "calibration_api.py",
+    "calibration_experiments.py",
+    "calibration_cloud.py",
     "coordinator.py",
     "models.py",
     "annotation_api.py",

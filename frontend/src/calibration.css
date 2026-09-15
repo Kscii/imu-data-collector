@@ -1,0 +1,13 @@
+.calibration-page { display: grid; gap: 1rem; }
+.calibration-page h2 { margin-top: 0; font-size: 1.15rem; }
+.calibration-directions { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: .75rem; margin: 1rem 0; }
+.calibration-directions label { display: flex; flex-direction: column; gap: .35rem; }
+.calibration-summary { display: flex; flex-wrap: wrap; gap: 1.25rem; padding: 1rem 0; }
+.calibration-phase { padding: 1.2rem; display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; background: #e9f3ff; color: #173b65; border-radius: .6rem; }
+.calibration-phase > span { font-size: 1.8rem; font-variant-numeric: tabular-nums; }
+.calibration-table-scroll { overflow: auto; margin-top: 1rem; }
+.calibration-table-scroll table { width: 100%; border-collapse: collapse; }
+.calibration-table-scroll td, .calibration-table-scroll th { padding: .55rem; text-align: left; border-bottom: 1px solid #cbd5e1; }
+.calibration-page details { margin: .8rem 0; }
+.calibration-page summary { cursor: pointer; }
+.calibration-page input { max-width: 100%; }

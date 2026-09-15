@@ -87,7 +87,7 @@ jobs:
           enable-cache: true
       - name: 构建采集 WebUI
         working-directory: frontend
-        run: npm ci && npm run build:capture
+        run: npm ci && npm test && npm run build:capture
       - name: 准备固定版本 FFmpeg
         shell: pwsh
         run: ./packaging/windows/prepare-ffmpeg.ps1
@@ -103,20 +103,8 @@ jobs:
           if (-not $env:OAUTH_CLIENT_ID) { throw "缺少仓库变量 DESKTOP_GOOGLE_OAUTH_CLIENT_ID" }
           uv run python scripts/prepare_desktop_config.py --output build/desktop-config --broker-url $env:BROKER_URL --oauth-client-id $env:OAUTH_CLIENT_ID
           "IMU_DESKTOP_CONFIG_DIR=$((Resolve-Path build/desktop-config).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Windows 桌面打包冒烟测试
-        run: >-
-          uv run pytest -q
-          tests/test_ble.py
-          tests/test_cli.py
-          tests/test_desktop_cloud.py
-          tests/test_device_configuration.py
-          tests/test_device_registry.py
-          tests/test_api.py
-          tests/test_hdf5_store.py
-          tests/test_preflight.py
-          tests/test_host.py
-          tests/test_tray.py
-          tests/test_video.py
+      - name: Windows full backend regression
+        run: uv run pytest -q
       - name: 解析安装器版本
         shell: pwsh
         run: |
@@ -179,7 +167,7 @@ jobs:
         run: test "$(uname -m)" = "${{ matrix.arch }}"
       - name: 构建采集 WebUI
         working-directory: frontend
-        run: npm ci && npm run build:capture
+        run: npm ci && npm test && npm run build:capture
       - name: 安装锁定依赖
         run: uv sync --frozen --dev --group package
       - name: 生成团队桌面配置
@@ -210,20 +198,8 @@ jobs:
           key: macos-ffmpeg-${{ matrix.arch }}-n8.1.2-b35605ace3ddf7c1a5d67a2eb553f034aef41d55-nasm2.16.03-v2
       - name: 从锁定源码构建 FFmpeg 与 x264
         run: ./packaging/macos/prepare-ffmpeg.sh
-      - name: macOS 桌面打包冒烟测试
-        run: >-
-          uv run pytest -q
-          tests/test_ble.py
-          tests/test_cli.py
-          tests/test_desktop_cloud.py
-          tests/test_device_configuration.py
-          tests/test_device_registry.py
-          tests/test_api.py
-          tests/test_hdf5_store.py
-          tests/test_preflight.py
-          tests/test_host.py
-          tests/test_tray.py
-          tests/test_video.py
+      - name: macOS full backend regression
+        run: uv run pytest -q
       - name: 生成应用图标
         run: uv run python packaging/macos/prepare-icon.py
       - name: 构建菜单栏应用
@@ -264,23 +240,37 @@ jobs:
           path: dist-installer/*
 
   release:
-    name: 发布 Windows 与 macOS 稳定 GitHub Release
+    name: Publish Windows and macOS GitHub release
     if: startsWith(github.ref, 'refs/tags/')
     needs: [windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@v8
         with:
           pattern: imu-data-collector-*
           path: release-artifacts
           merge-multiple: true
-      - name: 创建稳定 Release
+      - name: Hash downloadable installers
+        working-directory: release-artifacts
+        run: sha256sum -- *.exe *.dmg > SHA256SUMS.txt
+      - name: Create desktop release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}" release-artifacts/*
-          --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}"
-          --latest
-          --notes "Windows 10/11 x64 与 macOS 13+（Apple Silicon、Intel）小组内部稳定版。当前安装包采用未公证的 ad-hoc 签名；Windows 首次安装可能出现 SmartScreen，macOS 首次启动请右键应用并选择‘打开’。"
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          flags=(--latest)
+          if [[ "${version}" == *-* ]]; then
+            flags=(--prerelease --latest=false)
+          fi
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ -f "${notes}" ]]; then
+            flags+=(--notes-file "${notes}")
+          else
+            flags+=(--generate-notes)
+          fi
+          gh release create "${GITHUB_REF_NAME}" release-artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" "${flags[@]}"
