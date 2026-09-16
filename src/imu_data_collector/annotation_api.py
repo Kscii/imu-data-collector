@@ -60,6 +60,7 @@ from imu_data_collector.storage import (
     ObjectStore,
     create_object_store,
 )
+from imu_data_collector.synthetic_motion import register_synthetic_motion
 
 logger = logging.getLogger(__name__)
 MODEL_VIEWERS = frozenset({"xfan0282"})
@@ -192,11 +193,21 @@ def create_annotation_app(
             "can_view_models": actor.unikey in MODEL_VIEWERS,
             "can_manage_device_configuration": actor.is_admin,
             "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
+            "synthetic_run_id": active.annotation.synthetic_run_id,
             "storage": {
                 "backend": active.storage.backend,
                 "bucket": active.storage.bucket,
             },
         }
+
+    synthetic_store = (
+        create_object_store("gcs", active.storage.root,
+                            active.annotation.synthetic_bucket, active.storage.project)
+        if active.annotation.synthetic_run_id and active.annotation.synthetic_bucket
+        else object_store
+    )
+    register_synthetic_motion(
+        app, synthetic_store, active.annotation.synthetic_run_id, current_actor)
 
     @app.get("/api/v1/device-config/snapshots")
     def device_configuration_snapshots(request: Request) -> dict[str, Any]:

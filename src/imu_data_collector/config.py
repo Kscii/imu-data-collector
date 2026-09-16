@@ -170,6 +170,8 @@ class AnnotationSettings:
         default_factory=lambda: user_data_dir("imu-annotation") / "catalog.sqlite3"
     )
     catalog_refresh_interval_s: float = 10.0
+    synthetic_run_id: str | None = None
+    synthetic_bucket: str | None = None
 
 
 @dataclass(slots=True)
