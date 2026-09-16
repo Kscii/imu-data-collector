@@ -1,6 +1,7 @@
 import { CalibrationExperimentPage, CalibrationDeviceManagement } from "./CalibrationExperiments";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
+import { SyntheticMotionPage } from "./SyntheticMotionPage";
 import {
   type BleScanSummary,
   CaptureSettingsPage,
@@ -30,7 +31,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数据采集", "IMU Data Capture");
 
-type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
+type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -71,7 +72,7 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
+    ? { annotate: "annotate", synthetic: "synthetic", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
     : { capture: "capture", records: "library", settings: "settings", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -297,6 +298,7 @@ type AppConfig = {
   video?: { width: number; height: number; requested_fps: number; bitrate: string };
   local_actor_id?: string;
   catalog_refresh_interval_s?: number;
+  synthetic_run_id?: string | null;
   publish?: {
     mode: "disabled" | "local" | "broker" | "direct_gcs";
     backend: "local" | "gcs" | "broker";
@@ -1331,7 +1333,7 @@ export default function App() {
         <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_run_id && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}</button>}<button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
           <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
@@ -1398,6 +1400,7 @@ export default function App() {
       {annotationApplication && tab === "annotate" && taxonomy && session && (
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
+      {annotationApplication && tab === "synthetic" && config?.synthetic_run_id && <SyntheticMotionPage />}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}

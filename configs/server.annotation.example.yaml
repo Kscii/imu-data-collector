@@ -31,6 +31,8 @@ auth:
   iap_audience: "/projects/123456789/global/backendServices/123456789"
 
 annotation:
+  # synthetic_run_id: pilot-20260916  # Local-only synthetic-motion review pilot.
+  # synthetic_bucket: soft3888-label  # Synthetic namespace remains separate.
   # 只允许负载均衡来源访问 8766；应用本身仍校验 IAP 签名 JWT。
   server_host: "0.0.0.0"
   server_port: 8766
