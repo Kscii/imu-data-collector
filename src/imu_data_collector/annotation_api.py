@@ -61,6 +61,7 @@ from imu_data_collector.storage import (
     create_object_store,
 )
 from imu_data_collector.synthetic_motion import register_synthetic_motion
+from imu_data_collector.synthetic_labels import SyntheticLabelRegistry
 
 logger = logging.getLogger(__name__)
 MODEL_VIEWERS = frozenset({"xfan0282"})
@@ -70,6 +71,7 @@ def create_annotation_app(
     settings: Settings | None = None,
     store: ObjectStore | None = None,
     token_verifier: TokenVerifier | None = None,
+    synthetic_store_override: ObjectStore | None = None,
 ) -> FastAPI:
     active = settings or load_settings()
     object_store = store or create_object_store(
@@ -200,14 +202,18 @@ def create_annotation_app(
             },
         }
 
-    synthetic_store = (
+    synthetic_store = synthetic_store_override or (
         create_object_store("gcs", active.storage.root,
                             active.annotation.synthetic_bucket, active.storage.project)
         if active.annotation.synthetic_run_id and active.annotation.synthetic_bucket
         else object_store
     )
     register_synthetic_motion(
-        app, synthetic_store, active.annotation.synthetic_run_id, current_actor)
+        app, synthetic_store, active.annotation.synthetic_run_id, current_actor,
+        SyntheticLabelRegistry(object_store, service.taxonomies)
+        if active.annotation.synthetic_run_id else None,
+        active.annotation.catalog_path.with_name("synthetic-catalog.sqlite3")
+        if active.annotation.synthetic_run_id else None)
 
     @app.get("/api/v1/device-config/snapshots")
     def device_configuration_snapshots(request: Request) -> dict[str, Any]:
