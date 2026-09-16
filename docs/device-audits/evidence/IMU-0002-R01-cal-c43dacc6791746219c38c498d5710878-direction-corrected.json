@@ -1,0 +1,5271 @@
+{
+  "accel_axis_counts_per_g": {
+    "X": 16366.0,
+    "Y": 16256.5,
+    "Z": 16649.0
+  },
+  "axis_mapping_available": true,
+  "candidate": {
+    "accel_bias_counts": [
+      7.0,
+      -259.5,
+      220.0
+    ],
+    "accel_counts_per_g": 16366.0,
+    "axis_signs": [
+      1,
+      1,
+      1
+    ],
+    "coordinate_system": {
+      "+X": "BMI160正放面",
+      "+Y": "接口所在背面",
+      "+Z": "芯片面",
+      "-X": "BMI160倒放面",
+      "-Y": "接口所在面",
+      "-Z": "芯片背面"
+    },
+    "gyro_bias_counts": [
+      -6.0,
+      3.0,
+      3.0
+    ],
+    "gyro_counts_per_dps": 16.401,
+    "method": "six_face_medians_and_device_clock_known_angle_direction_corrected_v2",
+    "raw_axis_order": [
+      0,
+      1,
+      2
+    ],
+    "verified": false
+  },
+  "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+  "completed_counts": {
+    "accel_fit_+X": 3,
+    "accel_fit_+Y": 3,
+    "accel_fit_+Z": 3,
+    "accel_fit_-X": 3,
+    "accel_fit_-Y": 3,
+    "accel_fit_-Z": 3,
+    "accel_validation_+X": 1,
+    "accel_validation_+Y": 1,
+    "accel_validation_+Z": 1,
+    "accel_validation_-X": 1,
+    "accel_validation_-Y": 1,
+    "accel_validation_-Z": 1,
+    "gyro_fit_+X": 5,
+    "gyro_fit_+Y": 6,
+    "gyro_fit_+Z": 5,
+    "gyro_fit_-X": 5,
+    "gyro_fit_-Y": 5,
+    "gyro_fit_-Z": 5,
+    "gyro_validation_+X": 2,
+    "gyro_validation_+Y": 2,
+    "gyro_validation_+Z": 2,
+    "gyro_validation_-X": 2,
+    "gyro_validation_-Y": 2,
+    "gyro_validation_-Z": 2
+  },
+  "created_at_utc": "2026-09-16T02:21:23.032699+00:00",
+  "data_tier": "test",
+  "device": {
+    "allowed_data_tiers": [
+      "test"
+    ],
+    "audit_document": "../docs/device-audits/IMU-0002-R01-2026-09-08.md",
+    "display_name": "acce&gyro_C18A0F78",
+    "expected_rate_hz": 50.0,
+    "expected_rate_status": "observed_abf2_device_clock_2026-09-08",
+    "firmware": {
+      "artifact_sha256": null,
+      "evidence_status": "user_confirmed_not_v0.0.4",
+      "version": "stock-unknown"
+    },
+    "hardware_asset_id": "IMU-0002",
+    "identity": {
+      "address_type": "public",
+      "advertised_name": "acce&gyro_C18A0F78",
+      "advertised_service_uuid": "0000abf0-0000-1000-8000-00805f9b34fb",
+      "gatt_fingerprint_sha256": "d9d38ad67a7299f9f1c08f123c4a715fc350d43f3b2ec93aa43dd99fda93e285",
+      "public_address": "E8:3D:C1:8A:0F:7A"
+    },
+    "lifecycle": "active",
+    "protocol_id": "acce_gyro_abf0_v1",
+    "revision": 1,
+    "sensor_sn": "IMU-0002-R01",
+    "si_profile": {
+      "accel_bias_counts": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "accel_counts_per_g": 16384.0,
+      "axis_signs": [
+        1,
+        1,
+        1
+      ],
+      "coordinate_system": {},
+      "evidence": [],
+      "evidence_sha256": null,
+      "gyro_bias_counts": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "gyro_counts_per_dps": null,
+      "method": "single_stationary_orientation_hypothesis",
+      "profile_id": "si-318e8c8ac1455aa6c0ac910a",
+      "raw_axis_order": [
+        0,
+        1,
+        2
+      ],
+      "verified": false
+    },
+    "supersedes_sn": null
+  },
+  "directions": {
+    "+X": "BMI160正放面",
+    "+Y": "接口所在背面",
+    "+Z": "芯片面",
+    "-X": "BMI160倒放面",
+    "-Y": "接口所在面",
+    "-Z": "芯片背面"
+  },
+  "experiment_id": "cal-c43dacc6791746219c38c498d5710878",
+  "gyro_bias_available": true,
+  "gyro_scale_spread_counts_per_dps": 0.150290404149,
+  "minimums_per_axis_direction": {
+    "accel_fit": 3,
+    "accel_validation": 1,
+    "gyro_fit": 5,
+    "gyro_validation": 2
+  },
+  "notes": "test parameters: No.2",
+  "operator_id": "jzho8728",
+  "orientation_setup": {
+    "axis_definition": "raw_accelerometer",
+    "faces": {
+      "+X": {
+        "description": "BMI160正放面",
+        "sample": {
+          "direction": "+X",
+          "dominance": 0.9981686030830597,
+          "end_ns": 6501031000000,
+          "median_counts": [
+            16380.0,
+            -963.0,
+            241.0,
+            -6.0,
+            4.0,
+            3.0
+          ],
+          "reason": "ready",
+          "relative_scatter": 0.007208766236328521,
+          "sample_count": 101,
+          "start_ns": 6499062000000
+        }
+      },
+      "+Y": {
+        "description": "接口所在背面",
+        "sample": {
+          "direction": "+Y",
+          "dominance": 0.9910933408518606,
+          "end_ns": 6482046000000,
+          "median_counts": [
+            2150.5,
+            16007.0,
+            -35.5,
+            -6.0,
+            3.0,
+            3.0
+          ],
+          "reason": "ready",
+          "relative_scatter": 0.00539144560903052,
+          "sample_count": 100,
+          "start_ns": 6480078000000
+        }
+      },
+      "+Z": {
+        "description": "芯片面",
+        "sample": {
+          "direction": "+Z",
+          "dominance": 0.9999660843194627,
+          "end_ns": 6404390000000,
+          "median_counts": [
+            -130.0,
+            49.0,
+            16868.0,
+            -6.0,
+            3.0,
+            3.0
+          ],
+          "reason": "ready",
+          "relative_scatter": 0.005598572049788009,
+          "sample_count": 100,
+          "start_ns": 6402421000000
+        }
+      },
+      "-X": {
+        "description": "BMI160倒放面",
+        "sample": {
+          "direction": "-X",
+          "dominance": 0.9993008328975221,
+          "end_ns": 6518671000000,
+          "median_counts": [
+            -16344.0,
+            600.0,
+            118.0,
+            -6.0,
+            3.0,
+            3.0
+          ],
+          "reason": "ready",
+          "relative_scatter": 0.008935122368376552,
+          "sample_count": 99,
+          "start_ns": 6516703000000
+        }
+      },
+      "-Y": {
+        "description": "接口所在面",
+        "sample": {
+          "direction": "-Y",
+          "dominance": 0.9983661702992016,
+          "end_ns": 6444078000000,
+          "median_counts": [
+            -816.0,
+            -16497.0,
+            475.0,
+            -5.0,
+            3.0,
+            3.0
+          ],
+          "reason": "ready",
+          "relative_scatter": 0.004142282172231335,
+          "sample_count": 101,
+          "start_ns": 6442093000000
+        }
+      },
+      "-Z": {
+        "description": "芯片背面",
+        "sample": {
+          "direction": "-Z",
+          "dominance": 0.9994423073598336,
+          "end_ns": 6422890000000,
+          "median_counts": [
+            -47.0,
+            -547.0,
+            -16432.0,
+            -6.0,
+            3.0,
+            3.0
+          ],
+          "reason": "ready",
+          "relative_scatter": 0.004031325864933346,
+          "sample_count": 101,
+          "start_ns": 6420921000000
+        }
+      }
+    }
+  },
+  "schema_version": "imu_calibration_experiment_direction_corrected_v1",
+  "sensor_sn": "IMU-0002-R01",
+  "sources": [
+    {
+      "interrupted": true,
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "sha256": "75a46ac3e2999f631db684e1c613f6a93d95f80f052a20470666233e135b6a91",
+      "size_bytes": 6051247
+    },
+    {
+      "interrupted": true,
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "sha256": "6033e3e7c70df9296534610392029f74c942f0c8471555f1efb50c5d55508137",
+      "size_bytes": 4509622
+    },
+    {
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "sha256": "0b63f99f773a3869b919269c3c702b4e07c7ad0aa2583994b1ee46bf6202743c",
+      "size_bytes": 6215846
+    },
+    {
+      "recording_id": "20260916T032739.372330Z_jzho8728_imu_characterization",
+      "sha256": "35173aa01658e1613733a118ae1f867f215dd1a94a7c53ea14c4a262a7b40eb4",
+      "size_bytes": 2166138
+    },
+    {
+      "recording_id": "20260916T033642.274594Z_jzho8728_imu_characterization",
+      "sha256": "8b9f479b14fb00343c5e68f9654e4ecf2ecb846fe7f079606cf0cd7b4ab326fd",
+      "size_bytes": 1110885
+    },
+    {
+      "recording_id": "20260916T034019.180859Z_jzho8728_imu_characterization",
+      "sha256": "4211d8b18e9ffd9e1e61ca9bdc6f082d14ecfd4030b24f72f8fbb0e2f31fc561",
+      "size_bytes": 724877
+    },
+    {
+      "recording_id": "20260916T034223.538724Z_jzho8728_imu_characterization",
+      "sha256": "4c9b37335e82da6ae0de86ee17dc21a82049246a6a10b465792df099072c6809",
+      "size_bytes": 3351573
+    },
+    {
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "sha256": "a4b8551fd460d39fe354f2951820dc6af79e83418eb56d3c039920fc95733865",
+      "size_bytes": 6313278
+    },
+    {
+      "recording_id": "20260916T041827.454173Z_jzho8728_imu_characterization",
+      "sha256": "ba7d42e201dcfd9c341844d4b1596e9f4b0aba7eba0cae10f4ae47d87964fd4a",
+      "size_bytes": 789269
+    }
+  ],
+  "training_eligible": false,
+  "trials": [
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:22:45.175394+00:00",
+      "ended_at_utc": "2026-09-16T02:23:00.186407+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 33547000000,
+          "start_ns": 23547000000
+        },
+        "settle": {
+          "end_ns": 23547000000,
+          "start_ns": 18547000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          1.0000611022852255,
+          -0.04371868507882195,
+          0.002505193694244165
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          16374.0,
+          -975.0,
+          261.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          14.979911348202316,
+          16.812083273645765,
+          20.52429233859233,
+          0.9361538335124218,
+          1.0197568337598923,
+          0.7178189186696037
+        ],
+        "vector_error_g": 0.04379044592095574
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "daf5d2a3c7204cd7a1ca5f7761a72a18",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:23:12.974719+00:00",
+      "ended_at_utc": "2026-09-16T02:23:27.980883+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 61344000000,
+          "start_ns": 51344000000
+        },
+        "settle": {
+          "end_ns": 51344000000,
+          "start_ns": 46344000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          1.0,
+          -0.049034583893437615,
+          0.012220457045093487
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          16373.0,
+          -1062.0,
+          420.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 498,
+        "std_counts": [
+          15.690162352829583,
+          19.698988818751147,
+          21.094184351948186,
+          0.8601224611736115,
+          0.9434952161252579,
+          0.7351838644799679
+        ],
+        "vector_error_g": 0.05053444358052779
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "e135a49f5a2944b99e938d133622b94c",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:23:38.662079+00:00",
+      "ended_at_utc": "2026-09-16T02:23:53.658314+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 87016000000,
+          "start_ns": 77031000000
+        },
+        "settle": {
+          "end_ns": 77031000000,
+          "start_ns": 72031000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          0.999877795429549,
+          -0.04885127703776121,
+          0.008034950507148968
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          16371.0,
+          -1059.0,
+          351.5,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 498,
+        "std_counts": [
+          15.088004529404918,
+          17.330833464783375,
+          20.488204802364027,
+          0.8950531510605939,
+          0.9778271159131455,
+          0.7459319088702178
+        ],
+        "vector_error_g": 0.04950780374677783
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "8c58c5b5d2ee40c196da2dd34981fc06",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:24:08.962272+00:00",
+      "ended_at_utc": "2026-09-16T02:24:23.972823+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 117328000000,
+          "start_ns": 107328000000
+        },
+        "settle": {
+          "end_ns": 107328000000,
+          "start_ns": 102328000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.9996333862886472,
+          0.05013442502749603,
+          -0.0023218868385677625
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -16353.0,
+          561.0,
+          182.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 499,
+        "std_counts": [
+          15.779900157317444,
+          18.403915387491697,
+          21.064843879794832,
+          0.9146403235250378,
+          0.9167586508508896,
+          0.6687263948617357
+        ],
+        "vector_error_g": 0.05018950225836162
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "5cc40b9454b745c9bd3c42e0257d49bc",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:24:32.537471+00:00",
+      "ended_at_utc": "2026-09-16T02:24:47.523291+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 140891000000,
+          "start_ns": 130906000000
+        },
+        "settle": {
+          "end_ns": 130906000000,
+          "start_ns": 125906000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -1.0000611022852255,
+          0.0477514359037028,
+          -0.005193694244164731
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -16360.0,
+          522.0,
+          135.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          16.207482099326747,
+          17.35518954088372,
+          22.096063359793295,
+          0.8983785393696796,
+          0.9086253353280442,
+          0.7067531393633851
+        ],
+        "vector_error_g": 0.04803309092965564
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "3a9e683914a14915bfb543c28279d613",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:24:55.441195+00:00",
+      "ended_at_utc": "2026-09-16T02:25:10.471377+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 163828000000,
+          "start_ns": 153828000000
+        },
+        "settle": {
+          "end_ns": 153828000000,
+          "start_ns": 148812000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -1.0,
+          0.04738482219235,
+          -0.00238298912379323
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -16359.0,
+          516.0,
+          181.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          15.620604943203627,
+          17.083450923073297,
+          20.289466026087975,
+          0.8908593066594349,
+          1.0314051379450508,
+          0.733885206055654
+        ],
+        "vector_error_g": 0.04744470477687412
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "5a0e6ce63ccc498faa8f099c644bac62",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:25:27.056700+00:00",
+      "ended_at_utc": "2026-09-16T02:25:42.073045+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 195437000000,
+          "start_ns": 185422000000
+        },
+        "settle": {
+          "end_ns": 185422000000,
+          "start_ns": 180422000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          0.12391543443724795,
+          0.9933092997678113,
+          -0.028412562629842358
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          2035.0,
+          15997.0,
+          -245.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          17.874542927398373,
+          17.95987464828426,
+          24.029662991545194,
+          1.256784647966366,
+          0.9065656443330462,
+          1.3204192508366746
+        ],
+        "vector_error_g": 0.12730700717778115
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "512afb47ad3c4307b357faedb20784d1",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:25:52.051082+00:00",
+      "ended_at_utc": "2026-09-16T02:26:07.058294+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 220422000000,
+          "start_ns": 210422000000
+        },
+        "settle": {
+          "end_ns": 210422000000,
+          "start_ns": 205422000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          0.138366124893071,
+          0.9915373334962727,
+          -0.032689722595625074
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          2271.5,
+          15968.0,
+          -315.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          16.329527121138547,
+          18.18562113319193,
+          25.02048888411257,
+          1.2083443217891163,
+          0.9248653956117081,
+          1.0924028560929337
+        ],
+        "vector_error_g": 0.1424268907392742
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "9f151e8c85424c62a3997013d9ddca92",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:26:16.112862+00:00",
+      "ended_at_utc": "2026-09-16T02:26:31.114904+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 244469000000,
+          "start_ns": 234484000000
+        },
+        "settle": {
+          "end_ns": 234484000000,
+          "start_ns": 229484000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          0.0078821947940853,
+          1.0000305511426126,
+          -0.04860686789685934
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          136.0,
+          16107.0,
+          -575.5,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 498,
+        "std_counts": [
+          18.211717396717276,
+          16.5999759234179,
+          19.97960777541051,
+          0.9135575216511524,
+          0.7621983174083251,
+          0.7663556689122941
+        ],
+        "vector_error_g": 0.04924182708721272
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "542a621fa95e4e6dbad316f9ebe12284",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:26:48.707655+00:00",
+      "ended_at_utc": "2026-09-16T02:27:03.713051+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 277078000000,
+          "start_ns": 267078000000
+        },
+        "settle": {
+          "end_ns": 267078000000,
+          "start_ns": 262078000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.04900403275082488,
+          -0.9937370157643896,
+          0.012220457045093487
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -795.0,
+          -16523.0,
+          420.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          16.120471457125557,
+          18.013803152027613,
+          20.856200516872672,
+          0.8972045474695283,
+          0.7870832230456954,
+          0.7222188034107098
+        ],
+        "vector_error_g": 0.05089164732812642
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "0bc3ac705aa54069a776d48f4594e85a",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:27:25.837731+00:00",
+      "ended_at_utc": "2026-09-16T02:27:40.851962+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 314219000000,
+          "start_ns": 304203000000
+        },
+        "settle": {
+          "end_ns": 304203000000,
+          "start_ns": 299203000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.049126237321275815,
+          -0.9933092997678113,
+          0.012648173041671758
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -797.0,
+          -16516.0,
+          427.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          16.246409110349305,
+          17.951227832405003,
+          21.244463321154935,
+          0.9676090048085063,
+          0.7615287101551266,
+          0.7432604160531681
+        ],
+        "vector_error_g": 0.05116765525442215
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "7a5358c279754d26b78204d261442021",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:27:44.853461+00:00",
+      "ended_at_utc": "2026-09-16T02:27:59.866910+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 333234000000,
+          "start_ns": 323234000000
+        },
+        "settle": {
+          "end_ns": 323234000000,
+          "start_ns": 318219000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.04930954417695222,
+          -0.9932481974825859,
+          0.012648173041671758
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -800.0,
+          -16515.0,
+          427.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          15.035704173732592,
+          17.759771507539202,
+          19.965638882840686,
+          0.8976658621112885,
+          0.7701921838086911,
+          0.7455038564621922
+        ],
+        "vector_error_g": 0.05135167246998908
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "e2749fd77655429baa0de1d0008e03c8",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:28:11.035643+00:00",
+      "ended_at_utc": "2026-09-16T02:28:26.038343+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 359406000000,
+          "start_ns": 349391000000
+        },
+        "settle": {
+          "end_ns": 349391000000,
+          "start_ns": 344406000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.0054381033850666016,
+          0.0160393498716852,
+          1.0166198215813271
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -82.0,
+          3.0,
+          16858.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          15.521156245911428,
+          17.37549793973315,
+          20.154136903024142,
+          0.9290296889569768,
+          0.7527940870214307,
+          0.7624227965918025
+        ],
+        "vector_error_g": 0.02372872061717926
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "34de34e6e5414103bdb56fe6e5b2bbae",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:28:30.312895+00:00",
+      "ended_at_utc": "2026-09-16T02:28:45.302002+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 378672000000,
+          "start_ns": 368672000000
+        },
+        "settle": {
+          "end_ns": 368672000000,
+          "start_ns": 363672000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.005377001099841134,
+          0.0160393498716852,
+          1.0173530490040328
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -81.0,
+          3.0,
+          16870.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          15.811595673517518,
+          18.33431110126349,
+          21.108137103455586,
+          0.8991345807224983,
+          0.7736069642837426,
+          0.7196930566460085
+        ],
+        "vector_error_g": 0.024234297903392706
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "edf213e83d334ba79ce371c715f921bf",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:28:49.984981+00:00",
+      "ended_at_utc": "2026-09-16T02:29:04.984214+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 398344000000,
+          "start_ns": 388359000000
+        },
+        "settle": {
+          "end_ns": 388359000000,
+          "start_ns": 383344000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.005377001099841134,
+          0.016161554442136135,
+          1.0172919467188073
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -81.0,
+          5.0,
+          16869.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 499,
+        "std_counts": [
+          16.232165810351717,
+          16.76046685938014,
+          20.636274466874944,
+          0.8729611655402443,
+          0.739009034365673,
+          0.7162920107621933
+        ],
+        "vector_error_g": 0.02427178205529815
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "7d905d78347b45c88ae6f520cdef3483",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:29:15.785701+00:00",
+      "ended_at_utc": "2026-09-16T02:29:17.913505+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "settle": {
+          "end_ns": 411281000000,
+          "start_ns": 409156000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "interrupted",
+      "trial_id": "52449638bbfe49c9b1611379b55067ca",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:29:30.918302+00:00",
+      "ended_at_utc": "2026-09-16T02:29:45.918594+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 439281000000,
+          "start_ns": 429281000000
+        },
+        "settle": {
+          "end_ns": 429281000000,
+          "start_ns": 424281000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.005682512525968471,
+          -0.026732249786142002,
+          -1.0171697421483563
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -86.0,
+          -697.0,
+          -16427.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          15.783016188295571,
+          19.164577636879976,
+          19.953724865297687,
+          0.921466222929526,
+          0.7761443164772902,
+          0.7423503216137247
+        ],
+        "vector_error_g": 0.032275442253786715
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "54a326f73ce146b1901dcee7fea404d3",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:31:11.705325+00:00",
+      "ended_at_utc": "2026-09-16T02:31:26.716705+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 540078000000,
+          "start_ns": 530078000000
+        },
+        "settle": {
+          "end_ns": 530078000000,
+          "start_ns": 525062000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.006599046804350483,
+          -0.02746547720884761,
+          -1.0172919467188073
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -101.0,
+          -709.0,
+          -16429.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          16.913939643310567,
+          18.70720103809755,
+          18.870323241709997,
+          0.9462130532574656,
+          0.795022783854461,
+          0.7209762090369081
+        ],
+        "vector_error_g": 0.03311965093961297
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "64533e6e573b43b7851ef30f78402723",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:31:31.749649+00:00",
+      "ended_at_utc": "2026-09-16T02:31:46.728465+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 560094000000,
+          "start_ns": 550109000000
+        },
+        "settle": {
+          "end_ns": 550109000000,
+          "start_ns": 545109000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.0067212513748014175,
+          -0.02770988634974948,
+          -1.0173530490040328
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -103.0,
+          -713.0,
+          -16430.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 499,
+        "std_counts": [
+          16.15190728363561,
+          17.84341504004555,
+          20.07505665164287,
+          0.8571393191883936,
+          0.7622715443973773,
+          0.7651165084304519
+        ],
+        "vector_error_g": 0.03337875568824676
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "612778dadaac4fdfb851ccae02199430",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:32:02.774545+00:00",
+      "ended_at_utc": "2026-09-16T02:32:17.781322+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 591141000000,
+          "start_ns": 581141000000
+        },
+        "settle": {
+          "end_ns": 581141000000,
+          "start_ns": 576141000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          0.9996333862886472,
+          -0.04973726017353049,
+          0.005682512525968471
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          16367.0,
+          -1073.5,
+          313.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 500,
+        "std_counts": [
+          15.55462362129027,
+          18.026782186513486,
+          19.51544660006529,
+          0.8954886933959568,
+          0.9078854553301319,
+          0.7245301926075977
+        ],
+        "vector_error_g": 0.050062165392545724
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "1831d699b68644a3811a588c1e6bb6f8",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:32:38.724711+00:00",
+      "ended_at_utc": "2026-09-16T02:32:53.742013+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 627109000000,
+          "start_ns": 617094000000
+        },
+        "settle": {
+          "end_ns": 617094000000,
+          "start_ns": 612094000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.9997555908590982,
+          0.052578516436514726,
+          -0.0070267628009287545
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -16355.0,
+          601.0,
+          105.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          15.531120639024998,
+          16.512981410560535,
+          19.741520169811277,
+          0.9114568900041348,
+          0.8292974808930067,
+          0.7453960801303172
+        ],
+        "vector_error_g": 0.0530465410932091
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "3d931a004bb6409fbc1109086c682177",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:33:31.233756+00:00",
+      "ended_at_utc": "2026-09-16T02:33:46.241347+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 679609000000,
+          "start_ns": 669594000000
+        },
+        "settle": {
+          "end_ns": 669594000000,
+          "start_ns": 664594000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          0.11823292191127949,
+          0.9938592203348405,
+          0.008493217646339974
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          1942.0,
+          16006.0,
+          359.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          18.14359356056257,
+          18.666795792057343,
+          22.88969461937942,
+          1.038645534662869,
+          0.8494978088875054,
+          0.9724472237472291
+        ],
+        "vector_error_g": 0.11869653636295732
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "aff5360ce47d4a2689546d03d9ccef74",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:34:05.464927+00:00",
+      "ended_at_utc": "2026-09-16T02:34:20.468502+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 713828000000,
+          "start_ns": 703828000000
+        },
+        "settle": {
+          "end_ns": 703828000000,
+          "start_ns": 698828000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.05114261273371624,
+          -0.9947757546132225,
+          0.013870218746181107
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -830.0,
+          -16540.0,
+          447.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 499,
+        "std_counts": [
+          16.339845232028903,
+          18.115579377094384,
+          24.521795459067338,
+          1.3196023781213857,
+          0.7197207233969793,
+          0.7351896717162034
+        ],
+        "vector_error_g": 0.05324699564444038
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "d37d7b7279ba4ebba89d4c017fcb08f7",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:35:27.248468+00:00",
+      "ended_at_utc": "2026-09-16T02:35:42.231577+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 795594000000,
+          "start_ns": 785594000000
+        },
+        "settle": {
+          "end_ns": 785594000000,
+          "start_ns": 780609000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.008126603934987169,
+          0.013686911890504704,
+          1.0172308444335818
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -126.0,
+          -35.5,
+          16868.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 498,
+        "std_counts": [
+          15.78013054316584,
+          17.525975579205376,
+          20.79466843183017,
+          0.8364797618361238,
+          0.7679613800282,
+          0.7332919838608771
+        ],
+        "vector_error_g": 0.0234579463830252
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "5fdb4911f39e49a59d8900df856b14c5",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:35:54.754331+00:00",
+      "ended_at_utc": "2026-09-16T02:36:09.777927+00:00",
+      "excluded": false,
+      "kind": "accel",
+      "notes": "",
+      "phases": {
+        "measure": {
+          "end_ns": 823141000000,
+          "start_ns": 813141000000
+        },
+        "settle": {
+          "end_ns": 813141000000,
+          "start_ns": 808125000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": null,
+      "result": {
+        "acceleration_g": [
+          -0.006843455945252352,
+          0.018483441280703897,
+          -1.0175363558597093
+        ],
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -105.0,
+          43.0,
+          -16433.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 501,
+        "std_counts": [
+          16.332263337510636,
+          17.956438165153966,
+          19.01060414892933,
+          0.9677654539323075,
+          0.7370109136993858,
+          0.751512247594295
+        ],
+        "vector_error_g": 0.026381703275000987
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "4a48abb4d13f4e1caa65814d30d18be4",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:44:28.402602+00:00",
+      "ended_at_utc": "2026-09-16T02:44:48.477281+00:00",
+      "error": "Capture stopped before the phase finished",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "before": {
+          "end_ns": 1326766000000,
+          "start_ns": 1321766000000
+        }
+      },
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "interrupted",
+      "trial_id": "1fbeb1ddfd3143a38c1288d84bf3670a",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:45:34.867496+00:00",
+      "ended_at_utc": "2026-09-16T02:45:34.869655+00:00",
+      "error": "当前没有正在进行的 IMU 表征",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {},
+      "recording_id": "20260916T022226.630246Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "interrupted",
+      "trial_id": "b837ff898c66426090059b567c070fa1",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:47:37.778241+00:00",
+      "ended_at_utc": "2026-09-16T02:47:58.110746+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 24407000000,
+          "start_ns": 19407000000
+        },
+        "before": {
+          "end_ns": 9094000000,
+          "start_ns": 4079000000
+        },
+        "measure": {
+          "end_ns": 19407000000,
+          "start_ns": 9094000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "58e2f8a8c2354c1b87f6b3fa1d0f5601",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:48:28.315475+00:00",
+      "ended_at_utc": "2026-09-16T02:48:48.067345+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 74360000000,
+          "start_ns": 69360000000
+        },
+        "before": {
+          "end_ns": 59625000000,
+          "start_ns": 54625000000
+        },
+        "measure": {
+          "end_ns": 69360000000,
+          "start_ns": 59625000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "93bdb304a9b84b5592fef14ba8933864",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:48:56.616400+00:00",
+      "ended_at_utc": "2026-09-16T02:49:16.029225+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 102329000000,
+          "start_ns": 97344000000
+        },
+        "before": {
+          "end_ns": 87938000000,
+          "start_ns": 82922000000
+        },
+        "measure": {
+          "end_ns": 97329000000,
+          "start_ns": 87938000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "e00e2ffdcaf749ada7cff20844204cff",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:49:21.098027+00:00",
+      "ended_at_utc": "2026-09-16T02:49:40.712928+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 127016000000,
+          "start_ns": 122016000000
+        },
+        "before": {
+          "end_ns": 112422000000,
+          "start_ns": 107407000000
+        },
+        "measure": {
+          "end_ns": 122016000000,
+          "start_ns": 112422000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "f60c8adf23034bca80553b5419524ea6",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:49:45.016273+00:00",
+      "ended_at_utc": "2026-09-16T02:50:04.838844+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 151141000000,
+          "start_ns": 146141000000
+        },
+        "before": {
+          "end_ns": 136329000000,
+          "start_ns": 131313000000
+        },
+        "measure": {
+          "end_ns": 146141000000,
+          "start_ns": 136329000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "b10034d347f6442cb29049dd33cdce3a",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:50:19.877496+00:00",
+      "ended_at_utc": "2026-09-16T02:50:41.421472+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 187719000000,
+          "start_ns": 182704000000
+        },
+        "before": {
+          "end_ns": 171188000000,
+          "start_ns": 166188000000
+        },
+        "measure": {
+          "end_ns": 182704000000,
+          "start_ns": 171188000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "2925f7b1dd5d4f2795af7eef84fcd57f",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:50:45.444221+00:00",
+      "ended_at_utc": "2026-09-16T02:51:05.667078+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 211969000000,
+          "start_ns": 206969000000
+        },
+        "before": {
+          "end_ns": 196735000000,
+          "start_ns": 191750000000
+        },
+        "measure": {
+          "end_ns": 206969000000,
+          "start_ns": 196735000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "3580cebf5cbf4d98b07d35be60043301",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:51:17.853896+00:00",
+      "ended_at_utc": "2026-09-16T02:51:38.740417+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 245032000000,
+          "start_ns": 240032000000
+        },
+        "before": {
+          "end_ns": 229157000000,
+          "start_ns": 224157000000
+        },
+        "measure": {
+          "end_ns": 240032000000,
+          "start_ns": 229157000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "f572214ff2e44895a5100b1a1677a563",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:51:44.783182+00:00",
+      "ended_at_utc": "2026-09-16T02:52:05.912074+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 272219000000,
+          "start_ns": 267204000000
+        },
+        "before": {
+          "end_ns": 256079000000,
+          "start_ns": 251079000000
+        },
+        "measure": {
+          "end_ns": 267188000000,
+          "start_ns": 256079000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "cbdf32b572054759a32bd93458a7871c",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T02:52:09.294156+00:00",
+      "ended_at_utc": "2026-09-16T02:52:29.896758+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 296204000000,
+          "start_ns": 291219000000
+        },
+        "before": {
+          "end_ns": 280594000000,
+          "start_ns": 275594000000
+        },
+        "measure": {
+          "end_ns": 291219000000,
+          "start_ns": 280610000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "eb482683ebf24668b25406a1753be144",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:52:54.986093+00:00",
+      "ended_at_utc": "2026-09-16T02:53:18.889742+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 345188000000,
+          "start_ns": 340172000000
+        },
+        "before": {
+          "end_ns": 326282000000,
+          "start_ns": 321282000000
+        },
+        "measure": {
+          "end_ns": 340157000000,
+          "start_ns": 326282000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "6e260658eaca464b9f9e16a58a3df441",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:53:23.534952+00:00",
+      "ended_at_utc": "2026-09-16T02:53:44.350564+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 370657000000,
+          "start_ns": 365641000000
+        },
+        "before": {
+          "end_ns": 354860000000,
+          "start_ns": 349844000000
+        },
+        "measure": {
+          "end_ns": 365641000000,
+          "start_ns": 354860000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "eef4e96fbe6e4a4e9a858a2f7da4c1d8",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:53:49.169567+00:00",
+      "ended_at_utc": "2026-09-16T02:54:12.632472+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 398938000000,
+          "start_ns": 393938000000
+        },
+        "before": {
+          "end_ns": 380454000000,
+          "start_ns": 375469000000
+        },
+        "measure": {
+          "end_ns": 393938000000,
+          "start_ns": 380454000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "ae0a924dca134f8a8e0481f7e11c5874",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:54:18.436156+00:00",
+      "ended_at_utc": "2026-09-16T02:54:39.432326+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 425735000000,
+          "start_ns": 420735000000
+        },
+        "before": {
+          "end_ns": 409766000000,
+          "start_ns": 404735000000
+        },
+        "measure": {
+          "end_ns": 420735000000,
+          "start_ns": 409766000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "d0707e6fdf3640e497691049751dcd27",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:54:44.782460+00:00",
+      "ended_at_utc": "2026-09-16T02:55:05.733603+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 452032000000,
+          "start_ns": 447032000000
+        },
+        "before": {
+          "end_ns": 436094000000,
+          "start_ns": 431094000000
+        },
+        "measure": {
+          "end_ns": 447032000000,
+          "start_ns": 436094000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "99871ce59f89476e9e02c7a65b12208a",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:55:29.400062+00:00",
+      "ended_at_utc": "2026-09-16T02:55:55.817657+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 502110000000,
+          "start_ns": 497110000000
+        },
+        "before": {
+          "end_ns": 480704000000,
+          "start_ns": 475704000000
+        },
+        "measure": {
+          "end_ns": 497110000000,
+          "start_ns": 480704000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "59de562c2ac24f8c876f94a4f02ed630",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:55:59.479400+00:00",
+      "ended_at_utc": "2026-09-16T02:56:23.907590+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 530204000000,
+          "start_ns": 525204000000
+        },
+        "before": {
+          "end_ns": 510782000000,
+          "start_ns": 505782000000
+        },
+        "measure": {
+          "end_ns": 525204000000,
+          "start_ns": 510782000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "ffe07e7cd7a34ce9844c8e142874f571",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:56:26.467523+00:00",
+      "ended_at_utc": "2026-09-16T02:56:48.850228+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 555157000000,
+          "start_ns": 550157000000
+        },
+        "before": {
+          "end_ns": 537782000000,
+          "start_ns": 532766000000
+        },
+        "measure": {
+          "end_ns": 550157000000,
+          "start_ns": 537782000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "029d26e661b24835abac5ce36afac172",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:56:51.741274+00:00",
+      "ended_at_utc": "2026-09-16T02:57:14.690000+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 580985000000,
+          "start_ns": 575985000000
+        },
+        "before": {
+          "end_ns": 563063000000,
+          "start_ns": 558047000000
+        },
+        "measure": {
+          "end_ns": 575985000000,
+          "start_ns": 563063000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "0cbc1707a62b4a50987f6047a8bfffef",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T02:57:18.003671+00:00",
+      "ended_at_utc": "2026-09-16T02:57:42.958501+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 609250000000,
+          "start_ns": 604250000000
+        },
+        "before": {
+          "end_ns": 589313000000,
+          "start_ns": 584313000000
+        },
+        "measure": {
+          "end_ns": 604250000000,
+          "start_ns": 589313000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "2619ca4119fc4494aa71b3db24d9f8fc",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:57:55.219375+00:00",
+      "ended_at_utc": "2026-09-16T02:58:15.249791+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 641547000000,
+          "start_ns": 636547000000
+        },
+        "before": {
+          "end_ns": 626532000000,
+          "start_ns": 621516000000
+        },
+        "measure": {
+          "end_ns": 636547000000,
+          "start_ns": 626532000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "cff39b92ea474383aafc671b0067c46f",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:58:19.852537+00:00",
+      "ended_at_utc": "2026-09-16T02:58:40.102759+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 666407000000,
+          "start_ns": 661422000000
+        },
+        "before": {
+          "end_ns": 651157000000,
+          "start_ns": 646157000000
+        },
+        "measure": {
+          "end_ns": 661422000000,
+          "start_ns": 651157000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "f4e5ede2bbae457da791648d5126d23c",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:58:46.919673+00:00",
+      "ended_at_utc": "2026-09-16T02:59:06.484021+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 692782000000,
+          "start_ns": 687797000000
+        },
+        "before": {
+          "end_ns": 678204000000,
+          "start_ns": 673219000000
+        },
+        "measure": {
+          "end_ns": 687797000000,
+          "start_ns": 678204000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "7e5b17bc37624c2384fbe2ba573b8a41",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T02:59:10.793371+00:00",
+      "ended_at_utc": "2026-09-16T02:59:30.451906+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 716750000000,
+          "start_ns": 711750000000
+        },
+        "before": {
+          "end_ns": 702094000000,
+          "start_ns": 697094000000
+        },
+        "measure": {
+          "end_ns": 711750000000,
+          "start_ns": 702094000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "67024af9e91046e1bde1fc7448c43142",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:00:32.389419+00:00",
+      "ended_at_utc": "2026-09-16T03:00:51.895903+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 798204000000,
+          "start_ns": 793188000000
+        },
+        "before": {
+          "end_ns": 783688000000,
+          "start_ns": 778688000000
+        },
+        "measure": {
+          "end_ns": 793188000000,
+          "start_ns": 783688000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "de7a75eab11345c8a47125b73d6062e8",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:01:20.678554+00:00",
+      "ended_at_utc": "2026-09-16T03:01:40.657367+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 846954000000,
+          "start_ns": 841954000000
+        },
+        "before": {
+          "end_ns": 831985000000,
+          "start_ns": 826985000000
+        },
+        "measure": {
+          "end_ns": 841954000000,
+          "start_ns": 831985000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "0a740508851d47fbb4e813565c7aa5aa",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:01:44.737416+00:00",
+      "ended_at_utc": "2026-09-16T03:02:02.661972+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 868969000000,
+          "start_ns": 863954000000
+        },
+        "before": {
+          "end_ns": 856047000000,
+          "start_ns": 851047000000
+        },
+        "measure": {
+          "end_ns": 863954000000,
+          "start_ns": 856047000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "00971b2228674055af65c822f7913f17",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:02:06.349289+00:00",
+      "ended_at_utc": "2026-09-16T03:02:25.501490+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 891797000000,
+          "start_ns": 886797000000
+        },
+        "before": {
+          "end_ns": 877672000000,
+          "start_ns": 872657000000
+        },
+        "measure": {
+          "end_ns": 886797000000,
+          "start_ns": 877672000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "c053058af4a348a7a0994b75311fc647",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:02:27.629263+00:00",
+      "ended_at_utc": "2026-09-16T03:02:48.208791+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 914516000000,
+          "start_ns": 909516000000
+        },
+        "before": {
+          "end_ns": 898938000000,
+          "start_ns": 893938000000
+        },
+        "measure": {
+          "end_ns": 909516000000,
+          "start_ns": 898938000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "3a9132fb4e3e43b796ca3820e06a07e0",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:02:50.729139+00:00",
+      "ended_at_utc": "2026-09-16T03:03:10.606801+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 936907000000,
+          "start_ns": 931922000000
+        },
+        "before": {
+          "end_ns": 922032000000,
+          "start_ns": 917032000000
+        },
+        "measure": {
+          "end_ns": 931922000000,
+          "start_ns": 922032000000
+        }
+      },
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "f59084ce351e4349bacb22c617587ac6",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:04:34.115000+00:00",
+      "ended_at_utc": "2026-09-16T03:04:34.119089+00:00",
+      "error": "当前没有正在进行的 IMU 表征",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {},
+      "recording_id": "20260916T024733.704476Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "interrupted",
+      "trial_id": "a019fcfc91bb46ad97378813ba8e2dd3",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:05:06.861170+00:00",
+      "ended_at_utc": "2026-09-16T03:05:33.060593+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 44969000000,
+          "start_ns": 39969000000
+        },
+        "before": {
+          "end_ns": 23781000000,
+          "start_ns": 18766000000
+        },
+        "measure": {
+          "end_ns": 39969000000,
+          "start_ns": 23781000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "c35a17240e3d4be3942620fd03449aba",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:05:36.953996+00:00",
+      "ended_at_utc": "2026-09-16T03:06:02.544377+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 74453000000,
+          "start_ns": 69453000000
+        },
+        "before": {
+          "end_ns": 53875000000,
+          "start_ns": 48875000000
+        },
+        "measure": {
+          "end_ns": 69438000000,
+          "start_ns": 53875000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "596d8c995bce4f4c8d7d7cb4e108c2f6",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:06:12.494835+00:00",
+      "ended_at_utc": "2026-09-16T03:06:38.943931+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 110859000000,
+          "start_ns": 105859000000
+        },
+        "before": {
+          "end_ns": 89406000000,
+          "start_ns": 84406000000
+        },
+        "measure": {
+          "end_ns": 105859000000,
+          "start_ns": 89406000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {},
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "1bc28e65344041b89b698f8e96b16dbd",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:06:42.554678+00:00",
+      "ended_at_utc": "2026-09-16T03:07:08.653255+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 140563000000,
+          "start_ns": 135578000000
+        },
+        "before": {
+          "end_ns": 119469000000,
+          "start_ns": 114469000000
+        },
+        "measure": {
+          "end_ns": 135578000000,
+          "start_ns": 119469000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {},
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "8f0942b72615410f918d43cf8b0bc849",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T03:07:27.950069+00:00",
+      "ended_at_utc": "2026-09-16T03:07:54.448065+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 186359000000,
+          "start_ns": 181359000000
+        },
+        "before": {
+          "end_ns": 164844000000,
+          "start_ns": 159859000000
+        },
+        "measure": {
+          "end_ns": 181359000000,
+          "start_ns": 164844000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "fac7a10f1de14b0ab3e220ee9af8f3a3",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T03:07:59.628250+00:00",
+      "ended_at_utc": "2026-09-16T03:08:29.151697+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 221063000000,
+          "start_ns": 216047000000
+        },
+        "before": {
+          "end_ns": 196563000000,
+          "start_ns": 191547000000
+        },
+        "measure": {
+          "end_ns": 216047000000,
+          "start_ns": 196563000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "7d7070cedca443cca5d5a8111b99b742",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T03:08:42.240171+00:00",
+      "ended_at_utc": "2026-09-16T03:09:05.729284+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 257641000000,
+          "start_ns": 252641000000
+        },
+        "before": {
+          "end_ns": 239156000000,
+          "start_ns": 234156000000
+        },
+        "measure": {
+          "end_ns": 252641000000,
+          "start_ns": 239156000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {},
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "6946778d0c0547dc881a8f034edafc1e",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T03:09:08.114085+00:00",
+      "ended_at_utc": "2026-09-16T03:09:32.152214+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 284063000000,
+          "start_ns": 279047000000
+        },
+        "before": {
+          "end_ns": 265031000000,
+          "start_ns": 260031000000
+        },
+        "measure": {
+          "end_ns": 279047000000,
+          "start_ns": 265031000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {},
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "0c271c16c3e44888af23c224020e2c45",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:09:43.930589+00:00",
+      "ended_at_utc": "2026-09-16T03:10:07.233324+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 319141000000,
+          "start_ns": 314141000000
+        },
+        "before": {
+          "end_ns": 300844000000,
+          "start_ns": 295844000000
+        },
+        "measure": {
+          "end_ns": 314141000000,
+          "start_ns": 300844000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "4111f4a7c1154bf69101463b25c6725c",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:10:13.061881+00:00",
+      "ended_at_utc": "2026-09-16T03:10:37.675381+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 349578000000,
+          "start_ns": 344578000000
+        },
+        "before": {
+          "end_ns": 329984000000,
+          "start_ns": 324969000000
+        },
+        "measure": {
+          "end_ns": 344578000000,
+          "start_ns": 329984000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {},
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "6c6dc89cb1214bbf98d817727fb5b119",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:10:48.518767+00:00",
+      "ended_at_utc": "2026-09-16T03:11:11.852992+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 383766000000,
+          "start_ns": 378750000000
+        },
+        "before": {
+          "end_ns": 365438000000,
+          "start_ns": 360438000000
+        },
+        "measure": {
+          "end_ns": 378750000000,
+          "start_ns": 365438000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {},
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "9c3f0c9c4ed34c0b87fc03383438040c",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T03:11:15.029226+00:00",
+      "ended_at_utc": "2026-09-16T03:11:37.109414+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 409016000000,
+          "start_ns": 404000000000
+        },
+        "before": {
+          "end_ns": 391953000000,
+          "start_ns": 386938000000
+        },
+        "measure": {
+          "end_ns": 404000000000,
+          "start_ns": 391953000000
+        }
+      },
+      "recording_id": "20260916T030448.083746Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {},
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "67ac383fa164430b9c543f82706c480d",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:38:16.648988+00:00",
+      "ended_at_utc": "2026-09-16T03:38:37.647427+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 115375000000,
+          "start_ns": 110359000000
+        },
+        "before": {
+          "end_ns": 99390000000,
+          "start_ns": 94375000000
+        },
+        "measure": {
+          "end_ns": 110359000000,
+          "start_ns": 99390000000
+        }
+      },
+      "recording_id": "20260916T033642.274594Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "0bffd4dde1154fb19f2349825c0b1201",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:38:40.072025+00:00",
+      "ended_at_utc": "2026-09-16T03:39:00.746364+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 138468000000,
+          "start_ns": 133468000000
+        },
+        "before": {
+          "end_ns": 122796000000,
+          "start_ns": 117796000000
+        },
+        "measure": {
+          "end_ns": 133468000000,
+          "start_ns": 122812000000
+        }
+      },
+      "recording_id": "20260916T033642.274594Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "856934b9cd1f40e7a941affb5560478d",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:40:28.264302+00:00",
+      "ended_at_utc": "2026-09-16T03:40:47.015153+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 27828000000,
+          "start_ns": 22828000000
+        },
+        "before": {
+          "end_ns": 14094000000,
+          "start_ns": 9078000000
+        },
+        "measure": {
+          "end_ns": 22812000000,
+          "start_ns": 14094000000
+        }
+      },
+      "recording_id": "20260916T034019.180859Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "966c67d6dbc44d6bb67b0bc620056254",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:40:49.760016+00:00",
+      "ended_at_utc": "2026-09-16T03:41:08.059434+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 48875000000,
+          "start_ns": 43859000000
+        },
+        "before": {
+          "end_ns": 35578000000,
+          "start_ns": 30578000000
+        },
+        "measure": {
+          "end_ns": 43859000000,
+          "start_ns": 35578000000
+        }
+      },
+      "recording_id": "20260916T034019.180859Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "0345b4da3deb41ec89289731ab2b1e65",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:43:09.484208+00:00",
+      "ended_at_utc": "2026-09-16T03:43:37.775509+00:00",
+      "excluded": true,
+      "exclusion_reason": "角速度全部排出",
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 74235000000,
+          "start_ns": 69235000000
+        },
+        "before": {
+          "end_ns": 50953000000,
+          "start_ns": 45953000000
+        },
+        "measure": {
+          "end_ns": 69235000000,
+          "start_ns": 50953000000
+        }
+      },
+      "recording_id": "20260916T034223.538724Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {},
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "c9841ea2816d42c98dec40d1c77b05ee",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:55:57.117298+00:00",
+      "ended_at_utc": "2026-09-16T03:56:16.884021+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 40953000000,
+          "start_ns": 35953000000
+        },
+        "before": {
+          "end_ns": 26187000000,
+          "start_ns": 21187000000
+        },
+        "measure": {
+          "end_ns": 35953000000,
+          "start_ns": 26203000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.213416666666653,
+        "median_counts": [
+          16363.0,
+          -1174.0,
+          494.0,
+          -56.5,
+          7.5,
+          2.0
+        ],
+        "sample_count": 488,
+        "std_counts": [
+          658.7056387433834,
+          886.7592243557316,
+          758.8896597776134,
+          850.5380871665154,
+          251.11325847018696,
+          200.0729574061399
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "25f15fbe6a154ec287f2940dc23a0ea7",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:56:19.948885+00:00",
+      "ended_at_utc": "2026-09-16T03:56:41.160209+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 65219000000,
+          "start_ns": 60219000000
+        },
+        "before": {
+          "end_ns": 49000000000,
+          "start_ns": 44015000000
+        },
+        "measure": {
+          "end_ns": 60219000000,
+          "start_ns": 49000000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.575000000000006,
+        "median_counts": [
+          16373.0,
+          -1135.0,
+          546.0,
+          -8.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 561,
+        "std_counts": [
+          426.63699168837996,
+          504.0467896502184,
+          654.3742876216699,
+          783.9998220362312,
+          264.36334658256806,
+          104.94799366191369
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "93ef302fb0114be28d551ef40357f08d",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:56:45.494650+00:00",
+      "ended_at_utc": "2026-09-16T03:57:08.417417+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 92484000000,
+          "start_ns": 87484000000
+        },
+        "before": {
+          "end_ns": 74547000000,
+          "start_ns": 69562000000
+        },
+        "measure": {
+          "end_ns": 87484000000,
+          "start_ns": 74547000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.356499999999986,
+        "median_counts": [
+          16367.0,
+          -1123.0,
+          411.0,
+          -8.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 647,
+        "std_counts": [
+          715.0346453290169,
+          966.5698310823009,
+          814.2949279760384,
+          704.9092801385294,
+          269.9730397301338,
+          265.4734501407543
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "b4400fb851c34328a394d07cdeeb0dd2",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:57:10.846793+00:00",
+      "ended_at_utc": "2026-09-16T03:57:32.243134+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 116312000000,
+          "start_ns": 111297000000
+        },
+        "before": {
+          "end_ns": 99922000000,
+          "start_ns": 94922000000
+        },
+        "measure": {
+          "end_ns": 111297000000,
+          "start_ns": 99922000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.71216666666666,
+        "median_counts": [
+          16356.0,
+          -1143.0,
+          408.0,
+          -7.0,
+          6.0,
+          3.0
+        ],
+        "sample_count": 569,
+        "std_counts": [
+          679.6574544155869,
+          1076.1474880394715,
+          883.9156086120448,
+          991.9782048260388,
+          242.14791630142315,
+          198.30387269364346
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "0cc8301eaf2843f09fb29b3777239167",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:57:35.140970+00:00",
+      "ended_at_utc": "2026-09-16T03:57:57.512077+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 141578000000,
+          "start_ns": 136578000000
+        },
+        "before": {
+          "end_ns": 124219000000,
+          "start_ns": 119219000000
+        },
+        "measure": {
+          "end_ns": 136578000000,
+          "start_ns": 124219000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.22644444444443,
+        "median_counts": [
+          16364.5,
+          -1142.0,
+          82.5,
+          -110.5,
+          5.5,
+          3.0
+        ],
+        "sample_count": 618,
+        "std_counts": [
+          536.1569080682756,
+          724.8626017722509,
+          700.0260636157874,
+          671.9987359746583,
+          199.3229447782628,
+          196.29318098979033
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "d30fda0a174e4ebfadf8107da733d95e",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:58:14.222155+00:00",
+      "ended_at_utc": "2026-09-16T03:58:32.650909+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "before": {
+          "end_ns": 163297000000,
+          "start_ns": 158297000000
+        },
+        "measure": {
+          "end_ns": 176719000000,
+          "start_ns": 163297000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {},
+      "role": "fit",
+      "sign": 1,
+      "status": "interrupted",
+      "trial_id": "06f744ab84174c9aa4d44ead12a5fb52",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:58:35.265088+00:00",
+      "ended_at_utc": "2026-09-16T03:58:55.078166+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 199140000000,
+          "start_ns": 194140000000
+        },
+        "before": {
+          "end_ns": 184344000000,
+          "start_ns": 179328000000
+        },
+        "measure": {
+          "end_ns": 194140000000,
+          "start_ns": 184344000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.55363888888892,
+        "median_counts": [
+          -16360.0,
+          525.5,
+          -5.5,
+          227.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 490,
+        "std_counts": [
+          763.3864900960325,
+          942.3383792524205,
+          1011.2433970925421,
+          790.2872488517224,
+          272.4269535084912,
+          240.54595718427913
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "6f5b88c42b0a4a5abc83b53d4ef954a0",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:58:57.839700+00:00",
+      "ended_at_utc": "2026-09-16T03:59:17.611566+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 221672000000,
+          "start_ns": 216687000000
+        },
+        "before": {
+          "end_ns": 206922000000,
+          "start_ns": 201906000000
+        },
+        "measure": {
+          "end_ns": 216687000000,
+          "start_ns": 206922000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.457638888888898,
+        "median_counts": [
+          -16357.0,
+          563.0,
+          3.5,
+          59.0,
+          2.0,
+          3.0
+        ],
+        "sample_count": 488,
+        "std_counts": [
+          612.3424653988958,
+          818.2354209896973,
+          724.8393564872239,
+          811.1081887573674,
+          286.359734430648,
+          252.50398960051405
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "6310fbbb96ec4a3e93be210220459529",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:59:24.198561+00:00",
+      "ended_at_utc": "2026-09-16T03:59:44.477711+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 248547000000,
+          "start_ns": 243562000000
+        },
+        "before": {
+          "end_ns": 233265000000,
+          "start_ns": 228265000000
+        },
+        "measure": {
+          "end_ns": 243562000000,
+          "start_ns": 233265000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.305750000000025,
+        "median_counts": [
+          -16361.0,
+          550.0,
+          -131.0,
+          115.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 515,
+        "std_counts": [
+          696.7680314131792,
+          715.5430843540952,
+          753.4254508432267,
+          743.6807435536755,
+          277.42913052176146,
+          210.9969950989943
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "887f84d57bc047a080af3672059d35ad",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T03:59:48.646481+00:00",
+      "ended_at_utc": "2026-09-16T04:00:07.441235+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 271500000000,
+          "start_ns": 266500000000
+        },
+        "before": {
+          "end_ns": 257719000000,
+          "start_ns": 252719000000
+        },
+        "measure": {
+          "end_ns": 266500000000,
+          "start_ns": 257734000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.299527777777786,
+        "median_counts": [
+          -16354.5,
+          595.5,
+          -88.5,
+          103.5,
+          3.0,
+          2.0
+        ],
+        "sample_count": 438,
+        "std_counts": [
+          933.7436832185044,
+          1036.6772924683862,
+          1415.1262656824208,
+          854.4590099246288,
+          376.7553868294028,
+          271.5742088763114
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "f5dfca5e1cc84ba19b2fbc8b1cefdbd8",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T04:00:11.503445+00:00",
+      "ended_at_utc": "2026-09-16T04:00:29.407019+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 293469000000,
+          "start_ns": 288453000000
+        },
+        "before": {
+          "end_ns": 280594000000,
+          "start_ns": 275578000000
+        },
+        "measure": {
+          "end_ns": 288453000000,
+          "start_ns": 280594000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.368305555555555,
+        "median_counts": [
+          -16360.0,
+          567.0,
+          -113.0,
+          229.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 393,
+        "std_counts": [
+          727.3137220017549,
+          764.2319011996674,
+          1010.8579344611616,
+          951.0902577017075,
+          307.1128959203783,
+          265.960728937681
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "f2d910c519db423b93e9695697db417c",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:00:40.136229+00:00",
+      "ended_at_utc": "2026-09-16T04:00:58.674855+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 322734000000,
+          "start_ns": 317734000000
+        },
+        "before": {
+          "end_ns": 309203000000,
+          "start_ns": 304203000000
+        },
+        "measure": {
+          "end_ns": 317719000000,
+          "start_ns": 309203000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.0662222222222,
+        "median_counts": [
+          663.5,
+          16058.5,
+          -403.0,
+          -7.0,
+          2.0,
+          3.0
+        ],
+        "sample_count": 426,
+        "std_counts": [
+          1404.2983671525446,
+          283.1616889485759,
+          814.198972436936,
+          180.3612211636069,
+          1240.6481145257717,
+          150.43580647498428
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "d52880b13d884b109bb6d45bae77f5f3",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:01:01.363233+00:00",
+      "ended_at_utc": "2026-09-16T04:01:19.357054+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 343422000000,
+          "start_ns": 338406000000
+        },
+        "before": {
+          "end_ns": 330437000000,
+          "start_ns": 325437000000
+        },
+        "measure": {
+          "end_ns": 338406000000,
+          "start_ns": 330437000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.447222222222198,
+        "median_counts": [
+          -190.5,
+          16087.5,
+          -221.0,
+          -6.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 398,
+        "std_counts": [
+          1034.5005182036316,
+          157.09829525446574,
+          590.9856844845525,
+          165.06899576937204,
+          1252.7246288923327,
+          152.7466611504608
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "4486e76596f1445e912851f1ee3f23eb",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:01:23.115391+00:00",
+      "ended_at_utc": "2026-09-16T04:01:41.233280+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 365297000000,
+          "start_ns": 360312000000
+        },
+        "before": {
+          "end_ns": 352187000000,
+          "start_ns": 347187000000
+        },
+        "measure": {
+          "end_ns": 360312000000,
+          "start_ns": 352187000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.30405555555554,
+        "median_counts": [
+          52.0,
+          16085.0,
+          144.0,
+          -7.0,
+          2.0,
+          3.0
+        ],
+        "sample_count": 407,
+        "std_counts": [
+          899.1358174125021,
+          166.87713010724863,
+          671.658151342518,
+          180.62465923427627,
+          1196.8489221102323,
+          111.41437948088159
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "4ee1ad6ba6c2458fa62d12032bc79f75",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:01:44.160341+00:00",
+      "ended_at_utc": "2026-09-16T04:02:01.590786+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 385656000000,
+          "start_ns": 380656000000
+        },
+        "before": {
+          "end_ns": 373234000000,
+          "start_ns": 368234000000
+        },
+        "measure": {
+          "end_ns": 380656000000,
+          "start_ns": 373234000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.400999999999996,
+        "median_counts": [
+          26.0,
+          16080.0,
+          -82.0,
+          -6.0,
+          2.0,
+          3.0
+        ],
+        "sample_count": 371,
+        "std_counts": [
+          1190.8757665947244,
+          199.09215274020286,
+          633.4588723442049,
+          172.79971570712027,
+          1278.0641701935915,
+          125.49816449826908
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "dd22991107294197ae376db6308a1d56",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:02:04.041730+00:00",
+      "ended_at_utc": "2026-09-16T04:02:21.715630+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 405781000000,
+          "start_ns": 400781000000
+        },
+        "before": {
+          "end_ns": 393094000000,
+          "start_ns": 388109000000
+        },
+        "measure": {
+          "end_ns": 400781000000,
+          "start_ns": 393109000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.294833333333298,
+        "median_counts": [
+          158.0,
+          16074.0,
+          -283.0,
+          -7.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 383,
+        "std_counts": [
+          978.1290868189939,
+          206.05256032326386,
+          663.3739381309831,
+          190.99112531817553,
+          1229.8731519477365,
+          125.53736954238016
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "e56a1223481145689abde92d211c8e8d",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:02:33.198702+00:00",
+      "ended_at_utc": "2026-09-16T04:02:49.280753+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 433344000000,
+          "start_ns": 428359000000
+        },
+        "before": {
+          "end_ns": 422265000000,
+          "start_ns": 417265000000
+        },
+        "measure": {
+          "end_ns": 428359000000,
+          "start_ns": 422265000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.261027777777805,
+        "median_counts": [
+          -863.0,
+          -16579.0,
+          297.0,
+          -5.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 305,
+        "std_counts": [
+          1142.5377348753443,
+          433.1320345021976,
+          934.1281242862985,
+          245.47786128614155,
+          1889.5206327237752,
+          91.88279425225542
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "c87c495cf0434403bc63fec3371586f7",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:02:52.044201+00:00",
+      "ended_at_utc": "2026-09-16T04:03:09.160726+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 453219000000,
+          "start_ns": 448219000000
+        },
+        "before": {
+          "end_ns": 441109000000,
+          "start_ns": 436109000000
+        },
+        "measure": {
+          "end_ns": 448219000000,
+          "start_ns": 441109000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.595472222222227,
+        "median_counts": [
+          -860.0,
+          -16576.0,
+          306.0,
+          -5.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 355,
+        "std_counts": [
+          736.6242535287096,
+          298.7958245705543,
+          686.1930304460486,
+          199.4387866119251,
+          1422.8009473062716,
+          54.24292702203927
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "f3dd66fdf48c4fb88e5febc6bf270063",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:04:23.414492+00:00",
+      "ended_at_utc": "2026-09-16T04:04:41.929236+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 546000000000,
+          "start_ns": 541015000000
+        },
+        "before": {
+          "end_ns": 532484000000,
+          "start_ns": 527484000000
+        },
+        "measure": {
+          "end_ns": 541015000000,
+          "start_ns": 532484000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.224027777777813,
+        "median_counts": [
+          -862.0,
+          -16571.0,
+          392.0,
+          -5.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 427,
+        "std_counts": [
+          604.9329576622223,
+          223.21608992552208,
+          681.2742460858561,
+          199.1423862740279,
+          1262.7947427701904,
+          71.80297498679273
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "8b5cb5685cc64c289d08ddacceb8f165",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:04:45.269979+00:00",
+      "ended_at_utc": "2026-09-16T04:05:03.179133+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 567250000000,
+          "start_ns": 562250000000
+        },
+        "before": {
+          "end_ns": 554359000000,
+          "start_ns": 549344000000
+        },
+        "measure": {
+          "end_ns": 562250000000,
+          "start_ns": 554359000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.34791666666667,
+        "median_counts": [
+          -865.0,
+          -16580.0,
+          405.0,
+          -5.0,
+          7.0,
+          3.0
+        ],
+        "sample_count": 395,
+        "std_counts": [
+          736.5306917269585,
+          252.6611680151598,
+          668.9490337881658,
+          207.07082316628234,
+          1043.9431887586368,
+          26.629368296835
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "93848df0f51d4e9cb0d4c880dc3bcd97",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:05:06.085397+00:00",
+      "ended_at_utc": "2026-09-16T04:05:28.375315+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 592437000000,
+          "start_ns": 587437000000
+        },
+        "before": {
+          "end_ns": 575172000000,
+          "start_ns": 570156000000
+        },
+        "measure": {
+          "end_ns": 587437000000,
+          "start_ns": 575172000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.549666666666667,
+        "median_counts": [
+          -865.0,
+          -16573.0,
+          423.0,
+          -5.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 613,
+        "std_counts": [
+          468.51145858383467,
+          176.31461588223897,
+          422.13611797865536,
+          132.02649113301945,
+          731.1047809657631,
+          16.63468536040174
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "e2f24b09650f47f3bc085f31ea4efad3",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:05:41.136506+00:00",
+      "ended_at_utc": "2026-09-16T04:06:03.730156+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 627797000000,
+          "start_ns": 622797000000
+        },
+        "before": {
+          "end_ns": 610219000000,
+          "start_ns": 605203000000
+        },
+        "measure": {
+          "end_ns": 622797000000,
+          "start_ns": 610219000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.507527777777806,
+        "median_counts": [
+          -133.0,
+          -18.0,
+          16855.0,
+          -5.0,
+          3.0,
+          -6.0
+        ],
+        "sample_count": 629,
+        "std_counts": [
+          648.0329715136489,
+          520.811161534102,
+          260.9865969184926,
+          156.34495164282106,
+          70.5490580420016,
+          799.9256943029349
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "fcb7e5c918894d369f677a3e21777dc8",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:06:06.242146+00:00",
+      "ended_at_utc": "2026-09-16T04:06:30.304009+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 654375000000,
+          "start_ns": 649375000000
+        },
+        "before": {
+          "end_ns": 635297000000,
+          "start_ns": 630312000000
+        },
+        "measure": {
+          "end_ns": 649375000000,
+          "start_ns": 635297000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.566555555555585,
+        "median_counts": [
+          -175.0,
+          -18.0,
+          16860.0,
+          -5.0,
+          3.0,
+          2.0
+        ],
+        "sample_count": 704,
+        "std_counts": [
+          836.9194807874132,
+          603.2380298572026,
+          456.6518272350042,
+          142.72714305843095,
+          131.71268082145892,
+          754.0278355943034
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "1b110fbf76a14d1aa79e6fe2aa62a57d",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:06:35.871951+00:00",
+      "ended_at_utc": "2026-09-16T04:06:55.179353+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 679250000000,
+          "start_ns": 674265000000
+        },
+        "before": {
+          "end_ns": 664937000000,
+          "start_ns": 659937000000
+        },
+        "measure": {
+          "end_ns": 674265000000,
+          "start_ns": 664937000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.59083333333334,
+        "median_counts": [
+          -178.5,
+          -19.5,
+          16854.0,
+          -5.0,
+          3.0,
+          2.0
+        ],
+        "sample_count": 466,
+        "std_counts": [
+          650.8145527809576,
+          496.1839279698431,
+          295.11454100318065,
+          45.437418591625004,
+          104.40073158655001,
+          833.9505859405383
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "ff0a88aa9d7347988aad8749eca0bb82",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:06:57.548001+00:00",
+      "ended_at_utc": "2026-09-16T04:07:15.789348+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 699859000000,
+          "start_ns": 694844000000
+        },
+        "before": {
+          "end_ns": 686640000000,
+          "start_ns": 681625000000
+        },
+        "measure": {
+          "end_ns": 694844000000,
+          "start_ns": 686640000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.602861111111093,
+        "median_counts": [
+          -177.0,
+          -14.5,
+          16852.5,
+          -5.0,
+          3.0,
+          2.0
+        ],
+        "sample_count": 410,
+        "std_counts": [
+          551.5709680341309,
+          377.0983991260617,
+          100.65974468416367,
+          34.627189356236734,
+          71.19720620450353,
+          871.8910573002322
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "06e14002e4ae461385f503bccc673f6e",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:07:18.955765+00:00",
+      "ended_at_utc": "2026-09-16T04:07:38.508700+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 722578000000,
+          "start_ns": 717578000000
+        },
+        "before": {
+          "end_ns": 708047000000,
+          "start_ns": 703031000000
+        },
+        "measure": {
+          "end_ns": 717562000000,
+          "start_ns": 708047000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.397500000000033,
+        "median_counts": [
+          -180.0,
+          -20.0,
+          16849.0,
+          -5.0,
+          3.0,
+          2.0
+        ],
+        "sample_count": 475,
+        "std_counts": [
+          703.697997940748,
+          517.616729978333,
+          220.1595158388672,
+          48.46350294815199,
+          110.72141565552961,
+          818.5895414989884
+        ]
+      },
+      "role": "fit",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "5b0fb75a00e744bbbe0ff6c60aafe384",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:07:52.254035+00:00",
+      "ended_at_utc": "2026-09-16T04:08:13.580546+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 757640000000,
+          "start_ns": 752640000000
+        },
+        "before": {
+          "end_ns": 741344000000,
+          "start_ns": 736328000000
+        },
+        "measure": {
+          "end_ns": 752640000000,
+          "start_ns": 741344000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.48647222222221,
+        "median_counts": [
+          -65.0,
+          -833.0,
+          -16433.0,
+          -5.0,
+          3.0,
+          4.0
+        ],
+        "sample_count": 565,
+        "std_counts": [
+          903.9145559756524,
+          409.7053819648505,
+          305.5740681237837,
+          31.625207764572885,
+          124.50285356195671,
+          864.5715892668137
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "b5339be9f45642209ae04cfb09208bfe",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:08:15.990043+00:00",
+      "ended_at_utc": "2026-09-16T04:08:37.345478+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 781406000000,
+          "start_ns": 776406000000
+        },
+        "before": {
+          "end_ns": 765047000000,
+          "start_ns": 760062000000
+        },
+        "measure": {
+          "end_ns": 776406000000,
+          "start_ns": 765047000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.425777777777746,
+        "median_counts": [
+          -55.5,
+          -872.0,
+          -16431.0,
+          -5.0,
+          4.0,
+          5.0
+        ],
+        "sample_count": 568,
+        "std_counts": [
+          606.743910316114,
+          323.78153551664985,
+          181.32761988966055,
+          27.916204402380135,
+          89.59087167974009,
+          833.9662291096557
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "ca11c7b02ad14495a0a8cfd25188ba20",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:08:39.656500+00:00",
+      "ended_at_utc": "2026-09-16T04:09:01.590548+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 805656000000,
+          "start_ns": 800656000000
+        },
+        "before": {
+          "end_ns": 788719000000,
+          "start_ns": 783734000000
+        },
+        "measure": {
+          "end_ns": 800656000000,
+          "start_ns": 788719000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.561416666666652,
+        "median_counts": [
+          -71.0,
+          -884.0,
+          -16427.0,
+          -5.0,
+          4.0,
+          9.0
+        ],
+        "sample_count": 597,
+        "std_counts": [
+          719.8392335504728,
+          385.65033487900945,
+          158.45480016208813,
+          29.761218750157806,
+          98.21777238398691,
+          799.1359819669958
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "3b8d2381cfb3450eacc85bf13f0f2daa",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:09:04.930695+00:00",
+      "ended_at_utc": "2026-09-16T04:09:25.127956+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 829187000000,
+          "start_ns": 824187000000
+        },
+        "before": {
+          "end_ns": 814015000000,
+          "start_ns": 809000000000
+        },
+        "measure": {
+          "end_ns": 824187000000,
+          "start_ns": 814015000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.457111111111093,
+        "median_counts": [
+          -197.0,
+          -889.0,
+          -16432.0,
+          -5.0,
+          4.0,
+          8.0
+        ],
+        "sample_count": 509,
+        "std_counts": [
+          810.3317052085151,
+          370.11819636778324,
+          239.9972276367293,
+          30.797327611435165,
+          103.1126778776806,
+          913.2836520400255
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "3942cee2bb46452aa38ad94b021c2f64",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:09:28.565875+00:00",
+      "ended_at_utc": "2026-09-16T04:09:49.230592+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 853297000000,
+          "start_ns": 848297000000
+        },
+        "before": {
+          "end_ns": 837640000000,
+          "start_ns": 832640000000
+        },
+        "measure": {
+          "end_ns": 848297000000,
+          "start_ns": 837640000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.322555555555557,
+        "median_counts": [
+          -140.0,
+          -904.0,
+          -16432.0,
+          -5.0,
+          3.0,
+          5.0
+        ],
+        "sample_count": 533,
+        "std_counts": [
+          1027.9274746168826,
+          472.8291051815206,
+          236.38488133181747,
+          38.610648680076935,
+          94.49967179447299,
+          974.4637209093291
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "b06ed1d07985458d9e7cf0f3f20f43b3",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T04:10:04.946017+00:00",
+      "ended_at_utc": "2026-09-16T04:10:30.487528+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 894547000000,
+          "start_ns": 889547000000
+        },
+        "before": {
+          "end_ns": 874031000000,
+          "start_ns": 869015000000
+        },
+        "measure": {
+          "end_ns": 889547000000,
+          "start_ns": 874031000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          16379.0,
+          -1054.0,
+          479.0,
+          -20.0,
+          4.0,
+          2.0
+        ],
+        "sample_count": 776,
+        "std_counts": [
+          748.4892077591686,
+          671.4106264982711,
+          816.3123726612292,
+          1098.2888677635265,
+          308.340266567926,
+          31.161273632925905
+        ]
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "1292e44774f84f4d8f2ec49474b72545",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T04:10:34.579892+00:00",
+      "ended_at_utc": "2026-09-16T04:11:03.214189+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 927281000000,
+          "start_ns": 922281000000
+        },
+        "before": {
+          "end_ns": 903656000000,
+          "start_ns": 898656000000
+        },
+        "measure": {
+          "end_ns": 922281000000,
+          "start_ns": 903656000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          16376.0,
+          -1057.0,
+          521.0,
+          -303.0,
+          11.0,
+          2.0
+        ],
+        "sample_count": 931,
+        "std_counts": [
+          676.3262579214194,
+          545.124395209454,
+          962.6483640170071,
+          777.055191161343,
+          309.52819959707904,
+          29.570638025392103
+        ]
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "7f76fdaa421e41a2a9ef6519f1e0eb88",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T04:11:14.638934+00:00",
+      "ended_at_utc": "2026-09-16T04:11:44.011945+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 968078000000,
+          "start_ns": 963078000000
+        },
+        "before": {
+          "end_ns": 943719000000,
+          "start_ns": 938703000000
+        },
+        "measure": {
+          "end_ns": 963078000000,
+          "start_ns": 943719000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -16364.5,
+          421.0,
+          -48.5,
+          260.0,
+          2.0,
+          3.0
+        ],
+        "sample_count": 968,
+        "std_counts": [
+          660.3488739454116,
+          648.5639818475277,
+          1173.4694939543756,
+          780.0884303045148,
+          390.89333488544344,
+          57.51715851486166
+        ]
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "326a4bbfc7d94674bcde1dba038ad1a0",
+      "warnings": []
+    },
+    {
+      "axis": "X",
+      "created_at_utc": "2026-09-16T04:11:46.329348+00:00",
+      "ended_at_utc": "2026-09-16T04:12:14.700679+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 998765000000,
+          "start_ns": 993765000000
+        },
+        "before": {
+          "end_ns": 975406000000,
+          "start_ns": 970406000000
+        },
+        "measure": {
+          "end_ns": 993765000000,
+          "start_ns": 975406000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -16367.0,
+          444.0,
+          -14.0,
+          34.0,
+          2.0,
+          2.0
+        ],
+        "sample_count": 918,
+        "std_counts": [
+          810.3089298435304,
+          692.6154283159506,
+          1125.6479113850369,
+          899.2617280529844,
+          364.1002086564209,
+          61.586655302302965
+        ]
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "55e4a217872e45f59006aaf9570aeb9f",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:12:25.043740+00:00",
+      "ended_at_utc": "2026-09-16T04:12:50.946823+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1035015000000,
+          "start_ns": 1030015000000
+        },
+        "before": {
+          "end_ns": 1014109000000,
+          "start_ns": 1009109000000
+        },
+        "measure": {
+          "end_ns": 1030015000000,
+          "start_ns": 1014109000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          48.0,
+          16062.0,
+          -95.0,
+          -8.0,
+          -108.0,
+          3.0
+        ],
+        "sample_count": 795,
+        "std_counts": [
+          1287.941744476,
+          258.2636716604202,
+          947.1766644535629,
+          200.1502428438556,
+          988.8943268779643,
+          149.53698895332525
+        ]
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "a8266b80b9044623b44be12534fc5ade",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:12:54.070354+00:00",
+      "ended_at_utc": "2026-09-16T04:13:17.972220+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1062031000000,
+          "start_ns": 1057031000000
+        },
+        "before": {
+          "end_ns": 1043125000000,
+          "start_ns": 1038140000000
+        },
+        "measure": {
+          "end_ns": 1057031000000,
+          "start_ns": 1043125000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -17.0,
+          16077.0,
+          61.0,
+          -8.0,
+          -33.0,
+          3.0
+        ],
+        "sample_count": 695,
+        "std_counts": [
+          1272.3612146873834,
+          254.80134263557548,
+          703.5700309683372,
+          180.6147932914595,
+          1254.2519939369474,
+          141.84892990491701
+        ]
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "f8b15ddee74d43db9a7b852ae22cbf65",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:13:28.448713+00:00",
+      "ended_at_utc": "2026-09-16T04:13:49.851637+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1093922000000,
+          "start_ns": 1088906000000
+        },
+        "before": {
+          "end_ns": 1077515000000,
+          "start_ns": 1072515000000
+        },
+        "measure": {
+          "end_ns": 1088906000000,
+          "start_ns": 1077515000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -864.0,
+          -16578.0,
+          436.0,
+          -2.0,
+          8.0,
+          3.0
+        ],
+        "sample_count": 570,
+        "std_counts": [
+          1086.605786663662,
+          346.7024700774022,
+          924.1589176468369,
+          259.9972399881919,
+          1583.5281259386093,
+          89.63106729292554
+        ]
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "5d3da117f57741ebb1fbc3527529f15d",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:13:52.748269+00:00",
+      "ended_at_utc": "2026-09-16T04:14:15.654466+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1119719000000,
+          "start_ns": 1114719000000
+        },
+        "before": {
+          "end_ns": 1101797000000,
+          "start_ns": 1096812000000
+        },
+        "measure": {
+          "end_ns": 1114719000000,
+          "start_ns": 1101797000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -857.0,
+          -16580.0,
+          418.0,
+          -4.0,
+          5.0,
+          3.0
+        ],
+        "sample_count": 646,
+        "std_counts": [
+          610.7867601391031,
+          227.31865855510728,
+          685.020259234523,
+          163.89678614084846,
+          1467.8699876545804,
+          46.34687488996069
+        ]
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "57ba647c7e07475a9ee41cd176230ee4",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:14:35.158181+00:00",
+      "ended_at_utc": "2026-09-16T04:15:03.181030+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1167250000000,
+          "start_ns": 1162234000000
+        },
+        "before": {
+          "end_ns": 1144234000000,
+          "start_ns": 1139234000000
+        },
+        "measure": {
+          "end_ns": 1162234000000,
+          "start_ns": 1144234000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -207.0,
+          63.0,
+          16854.0,
+          -5.0,
+          2.0,
+          -37.0
+        ],
+        "sample_count": 900,
+        "std_counts": [
+          879.5172977552048,
+          342.37625177248725,
+          172.0897001638075,
+          14.92608864445814,
+          57.92306403250422,
+          923.7635719539612
+        ]
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "85d514d3fded4707b14e499b4066ad77",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:15:07.463535+00:00",
+      "ended_at_utc": "2026-09-16T04:15:37.352824+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1201422000000,
+          "start_ns": 1196422000000
+        },
+        "before": {
+          "end_ns": 1176531000000,
+          "start_ns": 1171531000000
+        },
+        "measure": {
+          "end_ns": 1196422000000,
+          "start_ns": 1176531000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": -720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -199.0,
+          57.0,
+          16856.0,
+          -5.0,
+          2.0,
+          -49.5
+        ],
+        "sample_count": 994,
+        "std_counts": [
+          713.3610589633611,
+          291.893785604524,
+          207.35962264815575,
+          24.667008310312205,
+          100.69744046454561,
+          854.3617820061174
+        ]
+      },
+      "role": "validation",
+      "sign": -1,
+      "status": "complete",
+      "trial_id": "2a1c8376a8204856bee8e7ede7cc743b",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:15:47.187797+00:00",
+      "ended_at_utc": "2026-09-16T04:16:14.473136+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1238531000000,
+          "start_ns": 1233531000000
+        },
+        "before": {
+          "end_ns": 1216250000000,
+          "start_ns": 1211265000000
+        },
+        "measure": {
+          "end_ns": 1233531000000,
+          "start_ns": 1216250000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -43.0,
+          -913.0,
+          -16430.0,
+          -6.0,
+          5.0,
+          37.5
+        ],
+        "sample_count": 864,
+        "std_counts": [
+          863.5856055297712,
+          441.8357689078439,
+          269.6061813225549,
+          39.74407662465982,
+          125.07317885376979,
+          988.0564694633721
+        ]
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "b9475ed755c84d228038f2043db12faa",
+      "warnings": []
+    },
+    {
+      "axis": "Z",
+      "created_at_utc": "2026-09-16T04:16:17.420083+00:00",
+      "ended_at_utc": "2026-09-16T04:16:43.542915+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 1267609000000,
+          "start_ns": 1262609000000
+        },
+        "before": {
+          "end_ns": 1246484000000,
+          "start_ns": 1241484000000
+        },
+        "measure": {
+          "end_ns": 1262609000000,
+          "start_ns": 1246484000000
+        }
+      },
+      "recording_id": "20260916T035535.929337Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 720,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "median_counts": [
+          -55.0,
+          -936.0,
+          -16432.0,
+          -5.0,
+          4.0,
+          96.5
+        ],
+        "sample_count": 806,
+        "std_counts": [
+          1011.5090382976384,
+          419.95949461946213,
+          303.00842350087413,
+          49.70358587137032,
+          160.7099674352836,
+          961.1792412106445
+        ]
+      },
+      "role": "validation",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "7630d5b947f748aa85b9b6a01712180a",
+      "warnings": []
+    },
+    {
+      "axis": "Y",
+      "created_at_utc": "2026-09-16T04:18:53.713974+00:00",
+      "ended_at_utc": "2026-09-16T04:19:10.697948+00:00",
+      "excluded": false,
+      "kind": "gyro",
+      "notes": "",
+      "phases": {
+        "after": {
+          "end_ns": 43250000000,
+          "start_ns": 38250000000
+        },
+        "before": {
+          "end_ns": 31282000000,
+          "start_ns": 26266000000
+        },
+        "measure": {
+          "end_ns": 38250000000,
+          "start_ns": 31282000000
+        }
+      },
+      "recording_id": "20260916T041827.454173Z_jzho8728_imu_characterization",
+      "reference_angle_deg": 360,
+      "result": {
+        "candidate_sha256": "7f0d564a5e9e623850928ad94ee6ce42eb44de957ff51998104129399ea7d6b2",
+        "gyro_counts_per_dps_estimate": 16.170750000000005,
+        "median_counts": [
+          -817.0,
+          -16589.0,
+          478.0,
+          -5.0,
+          4.0,
+          3.0
+        ],
+        "sample_count": 348,
+        "std_counts": [
+          619.667696693323,
+          284.23219946743717,
+          685.1884205728708,
+          182.246581260011,
+          1652.0437473834022,
+          63.303601142103005
+        ]
+      },
+      "role": "fit",
+      "sign": 1,
+      "status": "complete",
+      "trial_id": "bb5dd471ba574ff799f0a6402519292b",
+      "warnings": []
+    }
+  ],
+  "warnings": [
+    "interrupted_capture_review_raw_evidence",
+    "derived_direction_correction_from_report_only",
+    "raw_h5_unavailable_for_recomputation",
+    "gyro_validation_not_recomputed",
+    "fixture_taped_to_power_bank"
+  ],
+  "derivation": {
+    "derived_from_schema_version": "imu_calibration_experiment_v1",
+    "derived_from_sha256": "995357669a77cde2a5b59c2e21a7a7179c0e8a237bba6f4d25480ebe2b986fa6",
+    "correction": "For every gyro trial, negate sign and reference_angle_deg. For retained complete gyro fit trials, also negate the stored gyro_counts_per_dps_estimate. Runtime axis mapping is unchanged.",
+    "corrected_gyro_fit_count": 31,
+    "raw_h5_available_to_current_reviewer": false,
+    "gyro_validation_recomputed": false,
+    "experiment_upload_compatible": false
+  }
+}
