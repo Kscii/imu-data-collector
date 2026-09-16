@@ -2,6 +2,8 @@ import { CalibrationExperimentPage, CalibrationDeviceManagement } from "./Calibr
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
 import { SyntheticMotionPage } from "./SyntheticMotionPage";
+import { SyntheticSnapshots } from "./SyntheticSnapshots";
+import { SyntheticLabelManagement } from "./SyntheticLabelManagement";
 import {
   type BleScanSummary,
   CaptureSettingsPage,
@@ -1403,8 +1405,8 @@ export default function App() {
       {annotationApplication && tab === "synthetic" && config?.synthetic_run_id && <SyntheticMotionPage />}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
-      {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
-      {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
+      {annotationApplication && tab === "taxonomy" && taxonomy && session && <LabelManagementWorkspace taxonomy={taxonomy} onChanged={setTaxonomy} isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_run_id)} />}
+      {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} syntheticEnabled={Boolean(config?.synthetic_run_id)} />}
       {annotationApplication && tab === "delivery" && <SnapshotDeliveryViewer />}
       {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
       {annotationApplication && tab === "models" && config?.can_view_models && session && <ModelCatalogPage session={session} />}
@@ -1749,6 +1751,22 @@ function CharacterizationPage({ live, allowedUnikeys, chart, interactionBlocked,
 
 function Metric({ label, value, warn = false }: { label: string; value: string | number; warn?: boolean }) {
   return <div className={`metric ${warn ? "warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function LabelManagementWorkspace({taxonomy, onChanged, isAdmin, syntheticEnabled}: {
+  taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void;
+  isAdmin: boolean; syntheticEnabled: boolean;
+}) {
+  const [domain, setDomain] = useState<"real" | "synthetic">("real");
+  return <main>
+    {syntheticEnabled && <nav className="synthetic-tabs">
+      <button className={domain === "real" ? "active" : ""} onClick={() => setDomain("real")}>{tr("真实 IMU 标签", "Real IMU labels")}</button>
+      <button className={domain === "synthetic" ? "active" : ""} onClick={() => setDomain("synthetic")}>{tr("合成运动标签", "Synthetic motion labels")}</button>
+    </nav>}
+    {domain === "synthetic" && syntheticEnabled
+      ? <SyntheticLabelManagement isAdmin={isAdmin} />
+      : <TaxonomyManagementPage taxonomy={taxonomy} onChanged={onChanged} />}
+  </main>;
 }
 
 function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
@@ -3396,7 +3414,8 @@ function SnapshotDeliveryViewer() {
   </main>;
 }
 
-function TrainingSnapshotsPage({ session }: { session: Session }) {
+function TrainingSnapshotsPage({ session, syntheticEnabled }: { session: Session; syntheticEnabled: boolean }) {
+  const [domain, setDomain] = useState<"real" | "synthetic">("real");
   const [snapshots, setSnapshots] = useState<TrainingSnapshot[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -3499,6 +3518,11 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
   const otherSnapshots = snapshots.filter((item) => item !== currentSnapshot);
 
   return <main>
+    {syntheticEnabled && <nav className="synthetic-tabs">
+      <button className={domain === "real" ? "active" : ""} onClick={() => setDomain("real")}>{tr("真实 IMU · HDF5 3.2", "Real IMU · HDF5 3.2")}</button>
+      <button className={domain === "synthetic" ? "active" : ""} onClick={() => setDomain("synthetic")}>{tr("合成 IMU · HDF5 3.3", "Synthetic IMU · HDF5 3.3")}</button>
+    </nav>}
+    {domain === "synthetic" && syntheticEnabled ? <SyntheticSnapshots /> : <>
     {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
@@ -3520,6 +3544,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
         </details>}
       </>}
     </section>
+    </>}
   </main>;
 }
 
