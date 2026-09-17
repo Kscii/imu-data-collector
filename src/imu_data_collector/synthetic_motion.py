@@ -653,7 +653,13 @@ class SyntheticReviewService:
             entries.append(entry)
         if not entries:
             raise ValueError("No accepted synthetic candidate is available")
-        snapshot_id = "synthetic-" + uuid4().hex
+        entries.sort(key=lambda entry: (entry["candidate_id"], entry["version_id"]))
+        # The frozen inputs, rather than the click time, identify a snapshot.
+        # A retry or a second reviewer must not queue the same expensive build.
+        snapshot_id = "synthetic-" + hashlib.sha256(_canonical({
+            "schema": "imu_annotation.synthetic_snapshot_selection.v1",
+            "entries": entries,
+        })).hexdigest()[:32]
         intent = {
             "schema": "imu_motion_simulator.snapshot_intent.v1",
             "snapshot_id": snapshot_id, "created_by": actor,
@@ -661,8 +667,19 @@ class SyntheticReviewService:
             "entries": entries,
         }
         key = f"{self.prefix}/snapshots/requests/{snapshot_id}.json"
-        self.store.write_json(key, intent, if_generation_match=0)
-        return {"snapshot_id": snapshot_id, "state": "queued", "candidate_count": len(entries)}
+        try:
+            self.store.write_json(key, intent, if_generation_match=0)
+        except ObjectConflictError:
+            existing, _ = self.store.read_json(key)
+            if (existing.get("schema") != intent["schema"]
+                    or existing.get("snapshot_id") != snapshot_id
+                    or existing.get("entries") != entries):
+                raise ValueError("Snapshot identity conflicts with frozen inputs")
+            return {"snapshot_id": snapshot_id,
+                    "state": self.snapshot(snapshot_id)["result"]["state"],
+                    "candidate_count": len(entries), "already_exists": True}
+        return {"snapshot_id": snapshot_id, "state": "queued",
+                "candidate_count": len(entries), "already_exists": False}
 
     def snapshot(self, snapshot_id: str) -> dict:
         if not SAFE_ID.fullmatch(snapshot_id):
