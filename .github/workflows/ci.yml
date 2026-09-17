@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      confirmation:
+        description: '输入 DEPLOY PRODUCTION 才构建并部署 main 当前提交'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -161,7 +166,7 @@ jobs:
         working-directory: frontend
         run: npm run build
       - uses: actions/upload-artifact@v7
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY PRODUCTION'
         with:
           name: annotation-frontend
           path: frontend/dist-annotation
@@ -170,7 +175,7 @@ jobs:
   bundle:
     name: 生成已验证生产包
     needs: [scope, backend, frontend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY PRODUCTION'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -213,7 +218,7 @@ jobs:
   deploy:
     name: 部署生产环境
     needs: [scope, bundle]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.service == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY PRODUCTION'
     runs-on: ubuntu-latest
     permissions:
       contents: read

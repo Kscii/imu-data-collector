@@ -57,8 +57,10 @@ class AnnotationCatalog:
             }.items():
                 if name not in columns:
                     connection.execute(f"ALTER TABLE recordings ADD COLUMN {name} {definition}")
-            connection.execute("CREATE INDEX IF NOT EXISTS annotation_work_items_idx "
-                               "ON recordings(deletion_state, workflow_state, annotator_id, captured_at_utc DESC)")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS annotation_work_items_idx "
+                "ON recordings(deletion_state, workflow_state, annotator_id, "
+                "captured_at_utc DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS annotation_collection_idx "
                                "ON recordings(deletion_state, collection_id, captured_at_utc DESC)")
             connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS recording_search "
@@ -111,8 +113,9 @@ class AnnotationCatalog:
     def index_review(self, review: ReviewDocument, generation: int) -> None:
         """Keep queue fields in the local read model after a review is read or written."""
         with self._connect() as connection:
-            row = connection.execute("SELECT review_generation FROM recordings WHERE recording_id=?",
-                                     (review.recording_id,)).fetchone()
+            row = connection.execute(
+                "SELECT review_generation FROM recordings WHERE recording_id=?",
+                (review.recording_id,)).fetchone()
             if row is None or row[0] == generation:
                 return
             assignment = review.participant_assignment
@@ -159,7 +162,8 @@ class AnnotationCatalog:
         clauses = ["r.deletion_state='active'"]
         params: list[object] = []
         if view == "mine":
-            clauses.append("r.review_generation>=0 AND r.workflow_state='in_progress' AND r.annotator_id=?")
+            clauses.append("r.review_generation>=0 AND "
+                           "r.workflow_state='in_progress' AND r.annotator_id=?")
             params.append(actor)
         elif view == "claimable":
             clauses.append("r.review_generation>=0 AND r.workflow_state='unassigned' "
@@ -179,7 +183,8 @@ class AnnotationCatalog:
             params.append(status)
         words = [part.replace('"', "") for part in search.split() if part.strip('"')]
         if words:
-            clauses.append("r.recording_id IN (SELECT recording_id FROM recording_search WHERE recording_search MATCH ?)")
+            clauses.append("r.recording_id IN (SELECT recording_id FROM "
+                           "recording_search WHERE recording_search MATCH ?)")
             params.append(" ".join('"' + word + '"*' for word in words))
         where = " AND ".join(clauses)
         joins = " LEFT JOIN claim_pauses AS p ON p.collection_id=r.collection_id"

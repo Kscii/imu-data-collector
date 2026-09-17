@@ -41,11 +41,17 @@ function openItem(item: WorkItem) {
   if (item.domain === "real") {
     url.searchParams.set("view", "annotate");
     url.searchParams.set("recording", item.item_id);
+    for (const key of ["candidate", "version", "stage", "review_filter", "domain"])
+      url.searchParams.delete(key);
   } else {
     url.searchParams.set("view", "synthetic");
     url.searchParams.set("candidate", item.item_id);
     url.searchParams.set("version", item.version_id ?? "");
     url.searchParams.set("stage", item.stage === "label" ? "label" : "quality");
+    url.searchParams.delete("review_filter");
+    url.searchParams.delete("recording");
+    url.searchParams.delete("task");
+    url.searchParams.delete("domain");
   }
   location.assign(url);
 }
@@ -76,6 +82,11 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
   const [scrollTop, setScrollTop] = useState(0);
   const list = useRef<HTMLDivElement>(null);
   const generation = useRef(0);
+
+  useEffect(() => {
+    if (syntheticEnabled && new URLSearchParams(location.search).get("domain") === "synthetic")
+      setDomain("synthetic");
+  }, [syntheticEnabled]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchInput.trim()), 250);

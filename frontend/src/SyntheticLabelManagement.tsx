@@ -10,8 +10,9 @@ type MappingOptions = {datasets: {name: string; count: number}[];
   values: {value: string; count: number}[]};
 type Estimate = {matched_count: number; sample_candidates: {candidate_id: string}[]};
 
-export function SyntheticLabelManagement({isAdmin, section}: {
-  isAdmin: boolean; section: "concepts" | "mappings";
+export function SyntheticLabelManagement({isAdmin, section, refreshKey, onChanged}: {
+  isAdmin: boolean; section: "create" | "concepts" | "mappings";
+  refreshKey?: number; onChanged?: () => void;
 }) {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [code, setCode] = useState(""); const [name, setName] = useState("");
@@ -31,7 +32,7 @@ export function SyntheticLabelManagement({isAdmin, section}: {
   const [error, setError] = useState("");
   const load = () => syntheticRequest<Catalog>(`${syntheticRoot}/labels`)
     .then(setCatalog).catch(error => setError(String(error)));
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [refreshKey]);
   useEffect(() => {
     if (section !== "mappings") return;
     const controller = new AbortController();
@@ -64,7 +65,7 @@ export function SyntheticLabelManagement({isAdmin, section}: {
     try {
       await syntheticRequest(`${syntheticRoot}/labels/concepts`, {method: "POST",
         body: JSON.stringify({code, name, is_fall: isFall})});
-      setCode(""); setName(""); await load();
+      setCode(""); setName(""); await load(); onChanged?.();
     } catch (error) { setError(String(error)); }
   };
   const updateConcept = async () => {
@@ -75,7 +76,7 @@ export function SyntheticLabelManagement({isAdmin, section}: {
         method: "PATCH", body: JSON.stringify({expected_revision: catalog.motion_revision,
           name: editName, active: editActive}),
       });
-      setEditCode(""); await load();
+      setEditCode(""); await load(); onChanged?.();
     } catch (reason) { setError(String(reason)); }
   };
   const toggleConcept = async (item: NonNullable<Catalog["concepts"]>[number]) => {
@@ -86,7 +87,7 @@ export function SyntheticLabelManagement({isAdmin, section}: {
         method: "PATCH", body: JSON.stringify({expected_revision: catalog.motion_revision,
           name: item.name, active: !item.active}),
       });
-      await load();
+      await load(); onChanged?.();
     } catch (reason) { setError(String(reason)); }
   };
   const addRule = async () => {
@@ -117,12 +118,14 @@ export function SyntheticLabelManagement({isAdmin, section}: {
   };
   const sample = preview?.sample_candidates[selectedSample];
   return <section id={section === "concepts" ? "motion-only-concepts" : undefined}
-    className="panel synthetic-label-management">
-    <div className="panel-title">{section === "concepts"
-      ? tr("仅合成运动标签", "Synthetic-only labels") : tr("合成运动自动映射", "Synthetic motion mappings")}</div>
+    className={`panel synthetic-label-management synthetic-label-${section}`}>
+    <div className="panel-title">{section === "create"
+      ? tr("新增合成数据标签", "Add synthetic data label")
+      : section === "concepts" ? tr("合成数据标签", "Synthetic data labels")
+        : tr("合成运动自动映射", "Synthetic motion mappings")}</div>
     {error && <div className="error-banner">{error}</div>}
     {section === "concepts" && <>
-      <p>{tr("仅在合成运动中可选；每个标签仍属于跌倒或非跌倒。共用标签在左侧两组维护。", "Only selectable for synthetic motion; each remains a fall or non-fall label. Shared labels are managed in the other two groups.")}</p>
+      <p>{tr("仅在合成运动中可选；每个标签仍属于跌倒或非跌倒。共用标签在上方两组维护。", "Only selectable for synthetic motion; each remains a fall or non-fall label. Shared labels are managed in the two groups above.")}</p>
       <div className="synthetic-concept-list">{catalog?.concepts.filter(item => item.scope === "motion" && item.active)
         .map(item => <div key={item.code} className="taxonomy-row">
           <button className="taxonomy-name-tag" disabled={!isAdmin}
@@ -152,8 +155,9 @@ export function SyntheticLabelManagement({isAdmin, section}: {
         <button disabled={!editName.trim()} onClick={updateConcept}>{tr("保存概念", "Save concept")}</button>
         <button onClick={() => setEditCode("")}>{tr("取消", "Cancel")}</button>
       </div>}
+    </>}
+    {section === "create" && <>
       {isAdmin && <div className="synthetic-form synthetic-concept-create">
-        <strong>{tr("新增专用标签", "Add synthetic-only label")}</strong>
         <label>{tr("标签类型", "Label type")}<select value={isFall ? "fall" : "non_fall"}
           onChange={event => setIsFall(event.target.value === "fall")}>
           <option value="non_fall">{tr("非跌倒", "Non-fall")}</option>
@@ -161,7 +165,8 @@ export function SyntheticLabelManagement({isAdmin, section}: {
         </select></label>
         <label>{tr("稳定 code", "Stable code")}<input value={code} onChange={event => setCode(event.target.value)} placeholder="code" /></label>
         <label>{tr("显示名称", "Display name")}<input value={name} onChange={event => setName(event.target.value)} placeholder={tr("名称", "Name")} /></label>
-        <button disabled={!code || !name} onClick={addConcept}>{tr("新增专用标签", "Add synthetic-only label")}</button>
+        <button disabled={!code.trim() || !name.trim()} onClick={addConcept}>
+          {tr("新增标签", "Add label")}</button>
       </div>}
     </>}
     {section === "mappings" && <>

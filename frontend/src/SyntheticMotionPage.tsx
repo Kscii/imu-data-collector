@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { tr } from "./i18n";
-import { SyntheticIMUChart, type IMUReadout } from "./SyntheticIMUChart";
+import { SyntheticIMUChart, type IMUReadout, type PlaybackMetadata } from "./SyntheticIMUChart";
 
 export type FormalLabel = {
   code: string; name: string; is_fall: boolean;
@@ -105,17 +105,24 @@ function sourceSuggestions(item: Candidate) {
     other.name.toLowerCase() === value.name.toLowerCase()) === index);
 }
 
-export function SyntheticMotionPage() {
-  const deepLink = new URLSearchParams(location.search);
+export function SyntheticMotionPage({target = "dev"}: {target?: "dev" | "prod"}) {
+  const deepLink = useRef(new URLSearchParams(location.search)).current;
+  // A fresh URL avoids reusing a player cached before the bridge was updated.
+  const viewerCacheKey = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`).current;
   const deepCandidate = deepLink.get("candidate") ?? "";
   const deepVersion = deepLink.get("version") ?? "";
+  const restoreKey = useRef(deepCandidate && deepVersion ? `${deepCandidate}/${deepVersion}` : "");
   const [view, setView] = useState<"quality" | "labels">(
     deepLink.get("stage") === "label" ? "labels" : "quality");
   const [items, setItems] = useState<Candidate[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [selected, setSelected] = useState("");
-  const [filter, setFilter] = useState(deepCandidate ? "all" : "unreviewed");
-  const [search, setSearch] = useState(deepCandidate);
+  const [filter, setFilter] = useState(() => {
+    const saved = deepLink.get("review_filter");
+    return saved && ["unreviewed", "pass", "reject", "all"].includes(saved)
+      ? saved : deepCandidate ? "all" : "unreviewed";
+  });
+  const [search, setSearch] = useState("");
   const [highRisk, setHighRisk] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -136,6 +143,7 @@ export function SyntheticMotionPage() {
   const [bridgeStatus, setBridgeStatus] = useState<"loading" | "ready" | "lost" | "outdated">("loading");
   const [maxFrame, setMaxFrame] = useState(0);
   const [imuReadout, setImuReadout] = useState<IMUReadout | null>(null);
+  const [playbackMetadata, setPlaybackMetadata] = useState<PlaybackMetadata | null>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const bridgeLastSeen = useRef(0);
   const bridgeVersion = useRef(0);
@@ -151,18 +159,28 @@ export function SyntheticMotionPage() {
   const release = (lease_token: string, skip = false) =>
     syntheticRequest(`${syntheticRoot}/queue/release`, {method: "POST",
       body: JSON.stringify({lease_token, skip})});
-  const claim = async (generation = loadGeneration.current) => {
-    const params = new URLSearchParams({search, high_risk: String(highRisk)});
+  const claim = async (generation = loadGeneration.current, exact?: Candidate) => {
+    const params = new URLSearchParams({search: exact?.candidate_id ?? search,
+      high_risk: String(exact ? false : highRisk)});
     const value = await syntheticRequest<{candidates: Candidate[]}>(
       `${syntheticRoot}/queue/claim?${params}`, {method: "POST"});
     // A stale response must not release tokens owned by a newer page load.
     if (generation !== loadGeneration.current) return;
-    leases.current.push(...value.candidates.flatMap(item => item.lease_token ? [item.lease_token] : []));
-    setItems(value.candidates); setHasMore(false);
-    setSelected(value.candidates[0] ? candidateKey(value.candidates[0]) : "");
+    const restored = exact && value.candidates.find(item => candidateKey(item) === candidateKey(exact));
+    if (exact) await Promise.allSettled(value.candidates
+      .filter(item => item !== restored && item.lease_token)
+      .map(item => release(item.lease_token!)));
+    if (generation !== loadGeneration.current) return;
+    const claimed = exact ? restored ? [restored] : [] : value.candidates;
+    leases.current.push(...claimed.flatMap(item => item.lease_token ? [item.lease_token] : []));
+    setItems(exact ? restored ? [restored] : [exact] : value.candidates);
+    setHasMore(false);
+    setSelected(exact ? candidateKey(exact)
+      : value.candidates[0] ? candidateKey(value.candidates[0]) : "");
+    if (exact && !restored) setMessage(tr("当前片段尚未领取，可在右侧重新领取", "This clip is not claimed; reclaim it on the right"));
   };
   const browse = async (offset = 0, generation = loadGeneration.current,
-                        preferred = "") => {
+                        preferred = "", pinned?: Candidate) => {
     const params = new URLSearchParams({
       decision: view === "labels" ? "pass" : filter,
       search, high_risk: String(highRisk), limit: "100", offset: String(offset),
@@ -172,11 +190,13 @@ export function SyntheticMotionPage() {
     const value = await syntheticRequest<{candidates: Candidate[]}>(
       `${syntheticRoot}/candidates?${params}`);
     if (generation !== loadGeneration.current) return;
-    setItems(previous => offset ? [...previous, ...value.candidates] : value.candidates);
+    const page = pinned && !value.candidates.some(item => candidateKey(item) === candidateKey(pinned))
+      ? [pinned, ...value.candidates] : value.candidates;
+    setItems(previous => offset ? [...previous, ...value.candidates.filter(item =>
+      !previous.some(loaded => candidateKey(loaded) === candidateKey(item)))] : page);
     setHasMore(value.candidates.length === 100);
     if (!offset) {
-      const next = value.candidates.find(item => candidateKey(item) === preferred)
-        ?? value.candidates[0];
+      const next = page.find(item => candidateKey(item) === preferred) ?? page[0];
       setSelected(next ? candidateKey(next) : "");
     }
   };
@@ -196,8 +216,34 @@ export function SyntheticMotionPage() {
     const load = async () => {
       await Promise.allSettled(previous.map(token => release(token)));
       if (generation !== loadGeneration.current) return;
-      await (queueMode ? claim(generation) : browse(0, generation,
-        deepCandidate && deepVersion ? `${deepCandidate}/${deepVersion}` : ""));
+      const target = restoreKey.current;
+      restoreKey.current = "";
+      if (target) {
+        const [candidateId, versionId] = target.split("/");
+        try {
+          const exact = await syntheticRequest<Candidate>(
+            `${syntheticRoot}/candidates/${encodeURIComponent(candidateId)}/${encodeURIComponent(versionId)}/entry`);
+          if (generation !== loadGeneration.current) return;
+          const nextView = view === "labels" && exact.decision !== "pass" ? "quality" : view;
+          const matchesFilter = nextView === "labels" ? filter === "all"
+            || (filter === "unreviewed" ? !exact.label : Boolean(exact.label))
+            : filter === "all" || filter === exact.decision;
+          if (nextView !== view || !matchesFilter) {
+            restoreKey.current = target;
+            if (nextView !== view) setView(nextView);
+            setFilter(nextView === "labels" ? exact.label ? "pass" : "unreviewed"
+              : exact.decision);
+            return;
+          }
+          if (queueMode) await claim(generation, exact);
+          else await browse(0, generation, target, exact);
+        } catch (reason) {
+          if (generation === loadGeneration.current) setError(
+            `${tr("无法恢复当前片段，请从数据管理重新打开", "Could not restore this clip; reopen it from Data management")}: ${String(reason)}`);
+        }
+        return;
+      }
+      await (queueMode ? claim(generation) : browse(0, generation));
     };
     load().catch(error => { if (generation === loadGeneration.current) setError(String(error)); });
     return () => { loadGeneration.current++; };
@@ -243,6 +289,20 @@ export function SyntheticMotionPage() {
   const current = visible.find(item => candidateKey(item) === selected) ?? visible[0];
   const base = current ? `${syntheticRoot}/candidates/${encodeURIComponent(current.candidate_id)}/${current.version_id}` : "";
   const canDecide = view === "quality" && Boolean(current?.lease_token) && !summary?.read_only;
+
+  useEffect(() => {
+    if (!selected || !current || candidateKey(current) !== selected) return;
+    const url = new URL(location.href);
+    if (url.searchParams.get("view") !== "synthetic") return;
+    url.searchParams.set("candidate", current.candidate_id);
+    url.searchParams.set("version", current.version_id);
+    url.searchParams.set("stage", view === "labels" ? "label" : "quality");
+    url.searchParams.set("review_filter", filter);
+    url.searchParams.delete("domain");
+    url.searchParams.delete("recording");
+    url.searchParams.delete("task");
+    history.replaceState({}, "", url);
+  }, [selected, current, view, filter]);
 
   useEffect(() => {
     setLabelRevision(0); setChosenCode(current?.label?.code ?? "");
@@ -307,6 +367,27 @@ export function SyntheticMotionPage() {
       await browse(0, loadGeneration.current, candidateKey(current))
         .catch(refreshError => setError(String(refreshError)));
     } finally { setWorking(false); }
+  };
+  const reclaimCurrent = async () => {
+    if (!current || current.decision !== "unreviewed" || working || summary?.read_only) return;
+    setWorking(true); setError("");
+    try {
+      const params = new URLSearchParams({search: current.candidate_id});
+      const result = await syntheticRequest<{candidates: Candidate[]}>(
+        `${syntheticRoot}/queue/claim?${params}`, {method: "POST"});
+      const found = result.candidates.find(item => candidateKey(item) === candidateKey(current));
+      await Promise.allSettled(result.candidates.filter(item => item !== found && item.lease_token)
+        .map(item => release(item.lease_token!)));
+      if (!found) {
+        setError(tr("当前片段暂时无法领取，可能已由其他审核员领取", "This clip cannot be claimed now; another reviewer may hold it"));
+        return;
+      }
+      if (found.lease_token) leases.current.push(found.lease_token);
+      setItems(previous => previous.map(item => candidateKey(item) === candidateKey(found)
+        ? found : item));
+      setMessage(tr("已重新领取当前片段", "Current clip reclaimed"));
+    } catch (reason) { setError(String(reason)); }
+    finally { setWorking(false); }
   };
   const decide = async (decision: "pass" | "reject" | "unreviewed") => {
     if (!current || !canDecide || working || decision === current.decision ||
@@ -472,6 +553,9 @@ export function SyntheticMotionPage() {
         {tr("待审核", "Pending")} {summary.unreviewed} · {tr("待标签", "Labels")} {summary.label_pending}
       </span>}
     </section>
+    {target === "dev" && <div className="warning-banner synthetic-mode-banner">
+      {tr("测试环境：这里的审核和快照不会进入正式数据", "Test environment: reviews and snapshots do not enter production")}
+    </div>}
     {(summary?.read_only || summary?.preview_mode) && <div className="warning-banner synthetic-mode-banner">
       {summary.read_only ? tr("只读预览：审核决定不会保存", "Read-only preview: decisions are disabled")
         : tr("本地试用：决定只保存在本机", "Local trial: decisions stay on this machine")}
@@ -527,10 +611,11 @@ export function SyntheticMotionPage() {
       <section className="panel synthetic-viewer-pane">
         {current ? <>
           <iframe ref={frame} key={base} title={tr("动作与 IMU 同源回放", "Motion and IMU replay")}
-            src={`${base}/files/index.html?bridge=2`} className="synthetic-frame"
+            src={`${base}/files/index.html?bridge=2&viewer=${viewerCacheKey}`} className="synthetic-frame"
             onLoad={() => { if (chartReady) control("chart-ready", {ready: true}); }} />
           <SyntheticIMUChart base={base} cursorFrame={cursorFrame}
-            onReady={setChartReady} onInspect={setImuReadout} onSeek={index => {
+            onReady={setChartReady} onInspect={setImuReadout}
+            onMetadata={setPlaybackMetadata} onSeek={index => {
               if (bridgeStatus !== "ready") return;
               setCursorFrame(index); control("seek", {frame: index});
             }} />
@@ -594,6 +679,13 @@ export function SyntheticMotionPage() {
                   ? tr("来源映射", "Source mapping") : tr("人工选择", "Human selected")}</p>}
             </>}
             <details className="synthetic-details"><summary>{tr("来源与技术详情", "Source and technical details")}</summary>
+              <p>{tr("SMPL+H 运动学回放", "SMPL+H kinematic replay")}
+                {playbackMetadata?.frameCount ? ` · ${playbackMetadata.frameCount} ${tr("帧", "frames")}` : ""}
+                {playbackMetadata?.layoutId ? ` · ${playbackMetadata.layoutId}` : ""}
+                {playbackMetadata?.dmplAvailable !== undefined
+                  ? ` · ${playbackMetadata.dmplAvailable ? tr("来源 DMPL", "Source DMPL") : tr("无来源 DMPL", "No source DMPL")}` : ""}
+                {playbackMetadata?.qaPassed !== undefined
+                  ? ` · ${tr("机器 QA", "Machine QA")} ${playbackMetadata.qaPassed ? tr("通过", "pass") : tr("待核查", "review")}` : ""}</p>
               <p>{current.source_dataset} · {current.source_member} · {current.candidate_id} · revision {current.revision}</p>
               <strong>{tr("来源候选描述，仅供参考", "Source suggestions, for reference only")}</strong>
               {current.label_candidates.length === 0 ? <p>{tr("来源没有提供标签", "No source labels")}</p>
@@ -606,9 +698,12 @@ export function SyntheticMotionPage() {
           </>}
         </div>
         {current && <div className="synthetic-action-bar">
-          {view === "quality" ? current.decision !== "unreviewed" && !current.lease_token
+          {view === "quality" ? !current.lease_token
             ? <button className="primary" disabled={working || summary?.read_only}
-                onClick={() => void claimReviewed()}>{tr("领取复审", "Claim re-review")}</button>
+                onClick={() => void (current.decision === "unreviewed"
+                  ? reclaimCurrent() : claimReviewed())}>{current.decision === "unreviewed"
+                  ? tr("领取当前片段", "Claim current clip")
+                  : tr("领取复审", "Claim re-review")}</button>
             : <>
               {current.decision !== "pass" && <button className="primary"
                 disabled={working || !canDecide} onClick={() => void decide("pass")}>

@@ -5,13 +5,16 @@ import { extremumIndices } from "./syntheticTraceSampling";
 
 type ArraySpec = {path: string; dtype: string; shape: number[]};
 type Manifest = {
-  frame_period_s: number; sensor_rate_hz: number;
-  layout: {mounts: {sensor_id?: string; mount_id?: string; joint?: string}[]};
+  frame_period_s: number; sensor_rate_hz: number; frame_count?: number;
+  layout: {layout_id?: string; mounts: {sensor_id?: string; mount_id?: string; joint?: string}[]};
+  dynamic_shape?: {source_available?: boolean}; qa?: {passed?: boolean};
   sensors: {specific_force_m_s2: ArraySpec; angular_velocity_rad_s: ArraySpec};
 };
 type ChartData = {manifest: Manifest; force: Float32Array; gyro: Float32Array;
   samples: number; mounts: number};
 export type IMUReadout = {sensor: string; time_s: number; force: number; gyro: number};
+export type PlaybackMetadata = {frameCount?: number; layoutId?: string;
+  dmplAvailable?: boolean; qaPassed?: boolean};
 
 async function loadChart(base: string, signal: AbortSignal): Promise<ChartData> {
   const root = `${base}/files/`;
@@ -36,9 +39,10 @@ async function loadChart(base: string, signal: AbortSignal): Promise<ChartData> 
   return {manifest, force, gyro, samples: a.shape[0], mounts: a.shape[1]};
 }
 
-export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect}: {
+export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect, onMetadata}: {
   base: string; cursorFrame: number; onSeek: (frame: number) => void;
   onReady: (ready: boolean) => void; onInspect: (value: IMUReadout | null) => void;
+  onMetadata?: (value: PlaybackMetadata | null) => void;
 }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [error, setError] = useState("");
@@ -46,15 +50,21 @@ export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect
   const [viewMode, setViewMode] = useState<"magnitude" | "axes">("magnitude");
   const onReadyRef = useRef(onReady);
   const onInspectRef = useRef(onInspect);
+  const onMetadataRef = useRef(onMetadata);
   onReadyRef.current = onReady;
   onInspectRef.current = onInspect;
+  onMetadataRef.current = onMetadata;
 
   useEffect(() => {
     const controller = new AbortController();
     setData(null); setError(""); setMount(0);
-    onReadyRef.current(false); onInspectRef.current(null);
+    onReadyRef.current(false); onInspectRef.current(null); onMetadataRef.current?.(null);
     void loadChart(base, controller.signal).then(value => {
       setData(value); onReadyRef.current(true);
+      onMetadataRef.current?.({frameCount: value.manifest.frame_count,
+        layoutId: value.manifest.layout.layout_id,
+        dmplAvailable: value.manifest.dynamic_shape?.source_available,
+        qaPassed: value.manifest.qa?.passed});
     }).catch(reason => {
       if (controller.signal.aborted) return;
       setError(String(reason)); onReadyRef.current(false);

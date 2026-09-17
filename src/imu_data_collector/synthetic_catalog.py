@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -86,7 +86,8 @@ class SyntheticCatalog:
             db.execute("CREATE INDEX IF NOT EXISTS synthetic_label_idx "
                        "ON candidates(decision, effective_label_code, published_at_utc)")
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS candidate_search "
-                       "USING fts5(item_key UNINDEXED, candidate_id, source_dataset, source_member)")
+                       "USING fts5(item_key UNINDEXED, candidate_id, "
+                       "source_dataset, source_member)")
             if (db.execute("SELECT COUNT(*) FROM candidate_search").fetchone()[0]
                     != db.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]):
                 db.execute("DELETE FROM candidate_search")
@@ -114,8 +115,10 @@ class SyntheticCatalog:
         imported = 0
         now_utc = datetime.now(UTC)
         with self._connect() as db:
-            last_full = db.execute("SELECT value FROM catalog_meta WHERE key='last_full_scan_at_utc'").fetchone()
-            feed_cursor = db.execute("SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone()
+            last_full = db.execute(
+                "SELECT value FROM catalog_meta WHERE key='last_full_scan_at_utc'").fetchone()
+            feed_cursor = db.execute(
+                "SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone()
         full_scan = last_full is None or (
             now_utc - datetime.fromisoformat(last_full[0]) >= timedelta(days=1))
         identities: list[tuple[str, str, str | None]] = []
@@ -232,7 +235,8 @@ class SyntheticCatalog:
             query = self._fts_query(search)
             if query:
                 clauses.append("candidate_id || '/' || version_id IN "
-                               "(SELECT item_key FROM candidate_search WHERE candidate_search MATCH ?)")
+                               "(SELECT item_key FROM candidate_search "
+                               "WHERE candidate_search MATCH ?)")
                 params.append(query)
         if high_risk:
             clauses.append("risk_tier='high'")
@@ -287,7 +291,8 @@ class SyntheticCatalog:
                 SUM(decision='pass' AND effective_label_code IS NULL) AS label_pending,
                 SUM(decision='pass' AND effective_label_code IS NOT NULL) AS snapshot_eligible,
                 MAX(published_at_utc) AS latest_published_at_utc FROM candidates""").fetchone()
-            scan = db.execute("SELECT value FROM catalog_meta WHERE key='last_scan_at_utc'").fetchone()
+            scan = db.execute(
+                "SELECT value FROM catalog_meta WHERE key='last_scan_at_utc'").fetchone()
         return {**{key: (row[key] or 0) if key != "latest_published_at_utc" else row[key]
                    for key in row.keys()}, "indexed_at_utc": scan[0] if scan else None}
 
@@ -375,7 +380,8 @@ class SyntheticCatalog:
         """Recompute auto-map eligibility only when rules or concepts change."""
         fingerprint = hashlib.sha256(json.dumps(label_catalog, sort_keys=True).encode()).hexdigest()
         with self._connect() as db:
-            previous = db.execute("SELECT value FROM catalog_meta WHERE key='label_fingerprint'").fetchone()
+            previous = db.execute(
+                "SELECT value FROM catalog_meta WHERE key='label_fingerprint'").fetchone()
             if not force and previous and previous[0] == fingerprint:
                 return
             last_id = ""
@@ -386,7 +392,8 @@ class SyntheticCatalog:
                 (last_id, last_version)).fetchall():
                 for row in batch:
                     saved = json.loads(row["label_json"]) if row["label_json"] else None
-                    auto = None if saved else resolver(json.loads(row["commit_json"]), label_catalog)
+                    auto = (None if saved else resolver(
+                        json.loads(row["commit_json"]), label_catalog))
                     db.execute("""UPDATE candidates SET effective_label_code=?
                         WHERE candidate_id=? AND version_id=?""",
                         ((saved or auto or {}).get("code"), row["candidate_id"], row["version_id"]))
