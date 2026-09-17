@@ -56,6 +56,7 @@ class SyntheticLabelRegistry:
         return {
             "taxonomy_id": "motion-actions",
             "version": f"{real.version}.motion-r{motion['revision']}",
+            "motion_revision": motion["revision"],
             "concepts": shared + motion["concepts"],
             "rules": motion["rules"],
         }
@@ -81,6 +82,36 @@ class SyntheticLabelRegistry:
                 "active": True, "scope": "motion", "created_by": actor,
                 "created_at_utc": datetime.now(UTC).isoformat(),
             })
+            return state
+
+        return self._update(change)
+
+    def update_concept(self, code: str, *, expected_revision: int,
+                       name: str | None, active: bool | None, actor: str) -> dict:
+        if not CODE.fullmatch(code) or (name is None and active is None):
+            raise ValueError("Invalid motion concept update")
+        if name is not None and not name.strip():
+            raise ValueError("Concept name cannot be empty")
+        if active is not None and type(active) is not bool:
+            raise ValueError("Concept active state is invalid")
+
+        def change(state):
+            if state["revision"] != expected_revision:
+                raise ObjectConflictError("动捕标签版本已变化，请刷新后重试")
+            found = False
+            concepts = []
+            for item in state["concepts"]:
+                if item["code"] == code:
+                    found = True
+                    item = {**item,
+                            "name": name.strip() if name is not None else item["name"],
+                            "active": active if active is not None else item["active"],
+                            "updated_by": actor,
+                            "updated_at_utc": datetime.now(UTC).isoformat()}
+                concepts.append(item)
+            if not found:
+                raise FileNotFoundError(code)
+            state["concepts"] = concepts
             return state
 
         return self._update(change)

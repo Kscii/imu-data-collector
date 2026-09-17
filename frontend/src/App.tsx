@@ -1757,15 +1757,23 @@ function LabelManagementWorkspace({taxonomy, onChanged, isAdmin, syntheticEnable
   taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void;
   isAdmin: boolean; syntheticEnabled: boolean;
 }) {
-  const [domain, setDomain] = useState<"real" | "synthetic">("real");
+  const [section, setSection] = useState<"concepts" | "mappings">("concepts");
   return <main>
     {syntheticEnabled && <nav className="synthetic-tabs">
-      <button className={domain === "real" ? "active" : ""} onClick={() => setDomain("real")}>{tr("真实 IMU 标签", "Real IMU labels")}</button>
-      <button className={domain === "synthetic" ? "active" : ""} onClick={() => setDomain("synthetic")}>{tr("合成运动标签", "Synthetic motion labels")}</button>
+      <button className={section === "concepts" ? "active" : ""} onClick={() => setSection("concepts")}>{tr("概念库", "Concepts")}</button>
+      <button className={section === "mappings" ? "active" : ""} onClick={() => setSection("mappings")}>{tr("自动映射", "Mappings")}</button>
     </nav>}
-    {domain === "synthetic" && syntheticEnabled
-      ? <SyntheticLabelManagement isAdmin={isAdmin} />
-      : <TaxonomyManagementPage taxonomy={taxonomy} onChanged={onChanged} />}
+    {section === "concepts" && <>
+      {syntheticEnabled && <div className="synthetic-scope-links">
+        <span>{tr("按使用范围定位", "Jump by usage scope")}</span>
+        <a href="#shared-concepts">{tr("真实 IMU 共用概念", "Shared real IMU concepts")}</a>
+        <a href="#motion-only-concepts">{tr("动捕专用概念", "Motion-only concepts")}</a>
+      </div>}
+      <div id="shared-concepts"><TaxonomyManagementPage taxonomy={taxonomy} onChanged={onChanged} /></div>
+      {syntheticEnabled && <SyntheticLabelManagement isAdmin={isAdmin} section="concepts" />}
+    </>}
+    {section === "mappings" && syntheticEnabled
+      && <SyntheticLabelManagement isAdmin={isAdmin} section="mappings" />}
   </main>;
 }
 

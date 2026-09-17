@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -55,6 +56,12 @@ class RuleStateInput(BaseModel):
     checked_candidate_ids: list[str] = Field(default_factory=list)
 
 
+class MotionConceptUpdateInput(BaseModel):
+    expected_revision: int
+    name: str | None = None
+    active: bool | None = None
+
+
 class LeaseInput(BaseModel):
     lease_token: str
     skip: bool = False
@@ -99,7 +106,28 @@ VIEWER_BRIDGE = b"""<script>
       if (slider) { slider.value = '0'; slider.dispatchEvent(new Event('input')); }
       play?.click();
     }
+    if (event.data.action === 'seek' && Number.isInteger(event.data.frame)) {
+      const slider = document.querySelector('#time');
+      if (slider) {
+        slider.value = String(Math.max(0, Math.min(Number(slider.max), event.data.frame)));
+        slider.dispatchEvent(new Event('input'));
+      }
+    }
+    if (event.data.action === 'chart-ready') {
+      const plot = document.querySelector('#plot');
+      if (plot) plot.style.display = event.data.ready ? 'none' : '';
+    }
   });
+  let sentFrame = -1;
+  setInterval(() => {
+    const slider = document.querySelector('#time');
+    if (!slider || parent === window) return;
+    const frame = Number(slider.value);
+    if (frame !== sentFrame) {
+      sentFrame = frame;
+      parent.postMessage({type: 'imu-synthetic-review-frame', frame}, location.origin);
+    }
+  }, 80);
   setTimeout(() => {
     if (window.__imuReviewViewerVersion) return;
     document.querySelector('#view canvas')?.dispatchEvent(new WheelEvent('wheel', {
@@ -386,6 +414,8 @@ class SyntheticReviewService:
         pointer = {"revision": current_revision + 1, "decision": body.decision,
                    "revision_key": revision_key, "revision_sha256": digest,
                    "candidate_id": candidate_id, "version_id": version_id}
+        if body.decision == "unreviewed":
+            pointer["returned_at_utc"] = revision["created_at_utc"]
         self.store.write_json(pointer_key, pointer, if_generation_match=generation)
         if self.catalog:
             self.catalog.set_review(
@@ -442,21 +472,41 @@ class SyntheticReviewService:
             self.catalog.set_label(candidate_id, version_id, label)
         return pointer
 
-    def mapping_preview(self, rule_id: str) -> dict:
-        if self.labels is None:
-            raise ValueError("Synthetic label registry is unavailable")
-        rule = next((item for item in self.labels.catalog()["rules"]
-                     if item["rule_id"] == rule_id), None)
-        if rule is None:
-            raise FileNotFoundError(rule_id)
-        matched_by_id = {}
+    def _mapping_commits(self):
         if self.catalog:
             self.catalog.refresh(self.store, self.prefix, self._commit)
-            commits = (row["commit"] for row in self.catalog.rows(limit=1_000_000_000))
-        else:
-            commits = (self._commit(row["candidate_id"], row["version_id"])
-                       for row in self.list_candidates())
-        for commit in commits:
+            return (row["commit"] for row in self.catalog.rows(limit=1_000_000_000))
+        return (self._commit(row["candidate_id"], row["version_id"])
+                for row in self.list_candidates())
+
+    def mapping_options(self, origin: str, source_dataset: str = "",
+                        search: str = "", limit: int = 50) -> dict:
+        if origin not in {"babel-1.0", "stageii-source-member"}:
+            raise ValueError("Invalid mapping source")
+        datasets: Counter[str] = Counter()
+        values: Counter[str] = Counter()
+        for commit in self._mapping_commits():
+            dataset = commit["source_dataset"]
+            datasets[dataset] += 1
+            if source_dataset and dataset != source_dataset:
+                continue
+            for label in commit.get("label_candidates") or []:
+                if label.get("origin") != origin or label.get("kind") != "recording-candidate":
+                    continue
+                candidates = (label.get("categories") or []) if origin == "babel-1.0" \
+                    else [label.get("code")]
+                for value in {str(item).strip().lower() for item in candidates if item}:
+                    if value and search.lower() in value:
+                        values[value] += 1
+        ordered = sorted(values.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        return {"datasets": [{"name": name, "count": count}
+                             for name, count in sorted(datasets.items())],
+                "values": [{"value": value, "count": count}
+                           for value, count in ordered]}
+
+    def _matching_candidates(self, rule: dict) -> list[dict]:
+        matched_by_id = {}
+        for commit in self._mapping_commits():
             if self.labels.matches(rule, commit):
                 candidate_id = commit["candidate_id"]
                 previous = matched_by_id.get(candidate_id)
@@ -465,7 +515,28 @@ class SyntheticReviewService:
                     matched_by_id[candidate_id] = {
                         "candidate_id": candidate_id, "version_id": commit["version_id"],
                         "published_at_utc": commit["published_at_utc"]}
-        matched = sorted(matched_by_id.values(), key=lambda row: row["candidate_id"])
+        return sorted(matched_by_id.values(), key=lambda row: row["candidate_id"])
+
+    def mapping_estimate(self, body: RuleInput) -> dict:
+        if self.labels is None or body.origin not in {"babel-1.0", "stageii-source-member"} \
+                or not body.source_value.strip():
+            raise ValueError("Invalid mapping source")
+        concept = self.labels.concept(body.target_code)
+        if concept["is_fall"]:
+            raise ValueError("跌倒标签必须逐条人工确认，不能由来源词自动赋值")
+        rule = {"origin": body.origin, "source_value": body.source_value.strip().lower(),
+                "source_dataset": body.source_dataset or None}
+        matched = self._matching_candidates(rule)
+        return {"matched_count": len(matched), "sample_candidates": matched[:20]}
+
+    def mapping_preview(self, rule_id: str) -> dict:
+        if self.labels is None:
+            raise ValueError("Synthetic label registry is unavailable")
+        rule = next((item for item in self.labels.catalog()["rules"]
+                     if item["rule_id"] == rule_id), None)
+        if rule is None:
+            raise FileNotFoundError(rule_id)
+        matched = self._matching_candidates(rule)
         return {"rule_id": rule_id, "matched_count": len(matched),
                 "sample_candidates": matched[:min(20, len(matched))],
                 "sample_candidate_ids": [row["candidate_id"] for row in matched[:20]]}
@@ -679,6 +750,42 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
                 code=body["code"], name=body["name"],
                 is_fall=body["is_fall"], actor=actor.unikey)
         except (KeyError, ValueError, ObjectConflictError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.patch("/api/v1/synthetic/labels/concepts/{code}")
+    def synthetic_concept_update(code: str, body: MotionConceptUpdateInput,
+                                 request: Request):
+        actor = current_actor(request)
+        if not actor.is_admin:
+            raise HTTPException(status_code=403, detail="该操作仅限管理员")
+        try:
+            return label_registry.update_concept(
+                code, expected_revision=body.expected_revision,
+                name=body.name, active=body.active, actor=actor.unikey)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="找不到动捕专用概念") from error
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/v1/synthetic/labels/mapping-options")
+    def synthetic_mapping_options(request: Request):
+        current_actor(request)
+        params = request.query_params
+        try:
+            return service.mapping_options(
+                params.get("origin", "babel-1.0"),
+                params.get("source_dataset", ""), params.get("search", "")[:120])
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/synthetic/labels/mappings/estimate")
+    def synthetic_mapping_estimate(body: RuleInput, request: Request):
+        current_actor(request)
+        try:
+            return service.mapping_estimate(body)
+        except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.post("/api/v1/synthetic/labels/mappings")
