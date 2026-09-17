@@ -121,7 +121,8 @@ class SyntheticCatalog:
         clauses = []
         params: list[object] = []
         if decision and decision != "all":
-            clauses.append("decision=?"); params.append(decision)
+            clauses.append("decision=?")
+            params.append(decision)
         if search:
             clauses.append("(candidate_id LIKE ? OR commit_json LIKE ?)")
             params.extend([f"%{search}%", f"%{search}%"])
@@ -153,14 +154,17 @@ class SyntheticCatalog:
 
     def counts(self) -> dict:
         with self._connect() as db:
-            rows = db.execute("SELECT decision, COUNT(*) AS n FROM candidates GROUP BY decision").fetchall()
+            rows = db.execute(
+                "SELECT decision, COUNT(*) AS n FROM candidates GROUP BY decision"
+            ).fetchall()
         result = {row["decision"]: row["n"] for row in rows}
         return {"published": sum(result.values()),
                 "unreviewed": result.get("unreviewed", 0),
                 "passed": result.get("pass", 0),
                 "rejected": result.get("reject", 0)}
 
-    def set_review(self, candidate_id: str, version_id: str, pointer: dict) -> None:
+    def set_review(self, candidate_id: str, version_id: str, pointer: dict,
+                   *, reset_by: str | None = None) -> None:
         with self._connect() as db:
             db.execute("UPDATE candidates SET decision=?, revision=?, review_json=? "
                        "WHERE candidate_id=? AND version_id=?",
@@ -168,6 +172,35 @@ class SyntheticCatalog:
                         candidate_id, version_id))
             db.execute("DELETE FROM leases WHERE candidate_id=? AND version_id=?",
                        (candidate_id, version_id))
+            if reset_by:
+                db.execute("INSERT OR REPLACE INTO skipped VALUES (?, ?, ?, ?)",
+                           (candidate_id, version_id, reset_by, time.time() + 3600))
+
+    def claim_reviewed(self, actor: str, candidate_id: str, version_id: str,
+                       expected_revision: int) -> str:
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM leases WHERE expires_at<?", (now,))
+            row = db.execute(
+                "SELECT decision, revision FROM candidates WHERE candidate_id=? AND version_id=?",
+                (candidate_id, version_id)).fetchone()
+            if row is None or row["decision"] not in ("pass", "reject") \
+                    or row["revision"] != expected_revision:
+                raise ObjectConflictError("审核结果已变化，请刷新后重试")
+            lease = db.execute(
+                "SELECT actor, token FROM leases WHERE candidate_id=? AND version_id=?",
+                (candidate_id, version_id)).fetchone()
+            if lease:
+                if lease["actor"] != actor:
+                    raise ObjectConflictError("该复审任务已由其他人领取")
+                db.execute("UPDATE leases SET expires_at=? WHERE candidate_id=? AND version_id=?",
+                           (now + 900, candidate_id, version_id))
+                return lease["token"]
+            token = uuid4().hex
+            db.execute("INSERT INTO leases VALUES (?, ?, ?, ?, ?)",
+                       (candidate_id, version_id, actor, token, now + 900))
+            return token
 
     def set_label(self, candidate_id: str, version_id: str, label: dict) -> None:
         with self._connect() as db:

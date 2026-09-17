@@ -13,10 +13,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from imu_data_collector.storage import ObjectConflictError, ObjectStore
 from imu_data_collector.http_download import object_download_response
-from imu_data_collector.synthetic_labels import SyntheticLabelRegistry
+from imu_data_collector.storage import ObjectConflictError, ObjectStore
 from imu_data_collector.synthetic_catalog import SyntheticCatalog
+from imu_data_collector.synthetic_labels import SyntheticLabelRegistry
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -58,6 +58,12 @@ class RuleStateInput(BaseModel):
 class LeaseInput(BaseModel):
     lease_token: str
     skip: bool = False
+
+
+class ReviewClaimInput(BaseModel):
+    candidate_id: str
+    version_id: str
+    expected_revision: int
 
 
 REJECTION_CODES = {
@@ -284,6 +290,23 @@ class SyntheticReviewService:
             })
         return result
 
+    def claim_reviewed(self, actor: str, body: ReviewClaimInput) -> dict:
+        if self.catalog is None:
+            raise ValueError("Synthetic queue is unavailable")
+        self._identity(body.candidate_id, body.version_id)
+        self.catalog.refresh(self.store, self.prefix, self._commit)
+        pointer = self.latest(body.candidate_id, body.version_id)
+        if pointer is None or pointer["decision"] not in ("pass", "reject") \
+                or pointer["revision"] != body.expected_revision:
+            raise ObjectConflictError("审核结果已变化，请刷新后重试")
+        cached = self.catalog.get(body.candidate_id, body.version_id)
+        if cached["revision"] != pointer["revision"] \
+                or cached["decision"] != pointer["decision"]:
+            self.catalog.set_review(body.candidate_id, body.version_id, pointer)
+        token = self.catalog.claim_reviewed(
+            actor, body.candidate_id, body.version_id, body.expected_revision)
+        return {"lease_token": token, "revision": pointer["revision"]}
+
     def detail(self, candidate_id: str, version_id: str) -> dict:
         commit = self._commit(candidate_id, version_id)
         for item in commit["objects"] + commit["bundle_files"]:
@@ -313,7 +336,7 @@ class SyntheticReviewService:
         if self.catalog and body.lease_token:
             self.catalog.check_lease(candidate_id, version_id, reviewer, body.lease_token)
         commit = self.detail(candidate_id, version_id)["commit"]
-        if body.decision not in {"pass", "reject"} or body.expected_revision < 0:
+        if body.decision not in {"pass", "reject", "unreviewed"} or body.expected_revision < 0:
             raise ValueError("Review decision or expected revision is invalid")
         if body.labels and (
             body.decision != "pass" or len(body.labels) != 1
@@ -338,6 +361,14 @@ class SyntheticReviewService:
         current_revision = previous["revision"] if previous else 0
         if current_revision != body.expected_revision:
             raise ObjectConflictError("审核已被更新，请刷新后重试")
+        if body.decision == "unreviewed" and (
+                previous is None or previous["decision"] == "unreviewed"):
+            raise ValueError("只有已审核条目才能撤回为未审核")
+        if body.decision == "unreviewed" and (body.labels or body.reason_codes):
+            raise ValueError("撤回审核不能附带标签或拒绝原因")
+        if self.catalog and previous and previous["decision"] in ("pass", "reject") \
+                and not body.lease_token:
+            raise ObjectConflictError("请先领取复审任务")
         revision = {
             "schema": "imu_motion_simulator.synthetic_review_revision.v1",
             "candidate_id": candidate_id, "version_id": version_id,
@@ -357,7 +388,9 @@ class SyntheticReviewService:
                    "candidate_id": candidate_id, "version_id": version_id}
         self.store.write_json(pointer_key, pointer, if_generation_match=generation)
         if self.catalog:
-            self.catalog.set_review(candidate_id, version_id, pointer)
+            self.catalog.set_review(
+                candidate_id, version_id, pointer,
+                reset_by=reviewer if body.decision == "unreviewed" else None)
         return pointer
 
     def set_label(self, candidate_id: str, version_id: str,
@@ -572,6 +605,18 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
             return {"candidates": service.claim(
                 actor.unikey, search=request.query_params.get("search", ""),
                 high_risk=request.query_params.get("high_risk") == "true")}
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/synthetic/queue/claim-reviewed")
+    def synthetic_queue_claim_reviewed(body: ReviewClaimInput, request: Request):
+        actor = current_actor(request)
+        try:
+            return service.claim_reviewed(actor.unikey, body)
+        except ObjectConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="找不到合成候选") from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 

@@ -1326,15 +1326,15 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
-      <header className={annotationApplication && tab === "annotate" ? "workbench-header" : ""}>
+    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""} ${annotationApplication && tab === "synthetic" ? "synthetic-workbench-shell" : ""}`}>
+      <header className={annotationApplication && (tab === "annotate" || tab === "synthetic") ? "workbench-header" : ""}>
         <div>
           <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("多设备 IMU · 本机采集", "Multi-device IMU · Local capture")}</span>
           <h1>{annotationApplication ? tr("IMU 数据标注平台", "IMU Annotation Platform") : tr("IMU 数据采集", "IMU Data Capture")}</h1>
         </div>
         <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
-      <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
+      <nav className={annotationApplication && (tab === "annotate" || tab === "synthetic") ? "workbench-nav" : ""}>
         {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_run_id && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}</button>}<button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>

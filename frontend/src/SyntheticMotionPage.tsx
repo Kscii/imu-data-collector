@@ -47,6 +47,7 @@ export function SyntheticMotionPage() {
   const [filter, setFilter] = useState("unreviewed");
   const [search, setSearch] = useState("");
   const [highRisk, setHighRisk] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [labelRevision, setLabelRevision] = useState(0);
@@ -54,27 +55,37 @@ export function SyntheticMotionPage() {
   const [reasons, setReasons] = useState<{code: string; name: string}[]>([]);
   const [reasonCodes, setReasonCodes] = useState<string[]>([]);
   const [reasonNote, setReasonNote] = useState("");
+  const [resetNote, setResetNote] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const frame = useRef<HTMLIFrameElement>(null);
+  const drawerButton = useRef<HTMLButtonElement>(null);
+  const drawerSearch = useRef<HTMLInputElement>(null);
+  const drawerWasOpened = useRef(false);
   const leases = useRef<string[]>([]);
   const loadGeneration = useRef(0);
 
   const queueMode = view === "quality" && filter === "unreviewed";
+  const refreshSummary = () => syntheticRequest<Summary>(`${syntheticRoot}/summary`)
+    .then(setSummary).catch(error => setError(String(error)));
+  const release = (lease_token: string, skip = false) =>
+    syntheticRequest(`${syntheticRoot}/queue/release`, {method: "POST",
+      body: JSON.stringify({lease_token, skip})});
   const claim = async (generation = loadGeneration.current) => {
     const params = new URLSearchParams({search, high_risk: String(highRisk)});
     const value = await syntheticRequest<{candidates: Candidate[]}>(
       `${syntheticRoot}/queue/claim?${params}`, {method: "POST"});
-    // A later load may have resumed the same leases. Let stale responses expire
-    // instead of releasing tokens that the active view could now own.
+    // A stale response must not release tokens owned by a newer page load.
     if (generation !== loadGeneration.current) return;
     leases.current.push(...value.candidates.flatMap(item => item.lease_token ? [item.lease_token] : []));
     setItems(value.candidates); setHasMore(false);
     setSelected(value.candidates[0] ? candidateKey(value.candidates[0]) : "");
   };
-  const browse = async (offset = 0, generation = loadGeneration.current) => {
+  const browse = async (offset = 0, generation = loadGeneration.current,
+                        preferred = "") => {
     const params = new URLSearchParams({
       decision: view === "labels" ? "pass" : filter,
       search, high_risk: String(highRisk), limit: "100", offset: String(offset),
@@ -86,16 +97,19 @@ export function SyntheticMotionPage() {
     if (generation !== loadGeneration.current) return;
     setItems(previous => offset ? [...previous, ...value.candidates] : value.candidates);
     setHasMore(value.candidates.length === 100);
-    if (!offset) setSelected(value.candidates[0] ? candidateKey(value.candidates[0]) : "");
+    if (!offset) {
+      const next = value.candidates.find(item => candidateKey(item) === preferred)
+        ?? value.candidates[0];
+      setSelected(next ? candidateKey(next) : "");
+    }
   };
   useEffect(() => {
-    syntheticRequest<Catalog>(`${syntheticRoot}/labels`).then(setCatalog).catch(error => setError(String(error)));
+    syntheticRequest<Catalog>(`${syntheticRoot}/labels`).then(setCatalog)
+      .catch(error => setError(String(error)));
     syntheticRequest<{reasons: {code: string; name: string}[]}>(`${syntheticRoot}/rejection-reasons`)
       .then(value => setReasons(value.reasons)).catch(error => setError(String(error)));
-    const updateSummary = () => syntheticRequest<Summary>(`${syntheticRoot}/summary`)
-      .then(setSummary).catch(error => setError(String(error)));
-    void updateSummary();
-    const timer = window.setInterval(updateSummary, 20000);
+    void refreshSummary();
+    const timer = window.setInterval(refreshSummary, 20000);
     return () => window.clearInterval(timer);
   }, []);
   useEffect(() => {
@@ -103,9 +117,7 @@ export function SyntheticMotionPage() {
     setItems([]); setSelected(""); setError("");
     const previous = leases.current.splice(0);
     const load = async () => {
-      await Promise.allSettled(previous.map(lease_token => syntheticRequest(
-        `${syntheticRoot}/queue/release`, {method: "POST",
-          body: JSON.stringify({lease_token})})));
+      await Promise.allSettled(previous.map(token => release(token)));
       if (generation !== loadGeneration.current) return;
       await (queueMode ? claim(generation) : browse(0, generation));
     };
@@ -121,14 +133,26 @@ export function SyntheticMotionPage() {
     };
   }, []);
   useEffect(() => {
-    if (!queueMode || summary?.read_only) return;
+    if (summary?.read_only) return;
     const timer = window.setInterval(() => {
       for (const lease_token of leases.current) void syntheticRequest(
         `${syntheticRoot}/queue/renew`, {method: "POST",
-          body: JSON.stringify({lease_token})}).catch(error => setError(String(error)));
+          body: JSON.stringify({lease_token})}).catch(error => {
+        leases.current = leases.current.filter(token => token !== lease_token);
+        setItems(previous => previous.map(item => item.lease_token === lease_token
+          ? {...item, lease_token: undefined} : item));
+        setError(String(error));
+      });
     }, 300000);
     return () => window.clearInterval(timer);
-  }, [queueMode]);
+  }, [summary?.read_only]);
+  useEffect(() => {
+    if (drawerOpen) {
+      drawerWasOpened.current = true;
+      drawerSearch.current?.focus();
+    } else if (drawerWasOpened.current) drawerButton.current?.focus();
+  }, [drawerOpen]);
+
   const visible = useMemo(() => items.filter(item => {
     const status = view === "quality"
       ? filter === "all" || item.decision === filter
@@ -140,46 +164,98 @@ export function SyntheticMotionPage() {
   }), [items, view, filter, highRisk, search]);
   const current = visible.find(item => candidateKey(item) === selected) ?? visible[0];
   const base = current ? `${syntheticRoot}/candidates/${encodeURIComponent(current.candidate_id)}/${current.version_id}` : "";
+  const canDecide = view === "quality" && Boolean(current?.lease_token) && !summary?.read_only;
 
   useEffect(() => {
     setLabelRevision(0); setChosenCode(current?.label?.code ?? "");
-    setReasonCodes([]); setReasonNote(""); setRejectOpen(false);
+    setReasonCodes([]); setReasonNote(""); setResetNote("");
+    setRejectOpen(false); setResetOpen(false);
     if (current) syntheticRequest<{label_revision: {revision: number} | null}>(base)
       .then(value => setLabelRevision(value.label_revision?.revision ?? 0))
       .catch(error => setError(String(error)));
   }, [base]);
+  const selectCandidate = async (item: Candidate) => {
+    if (current?.lease_token && !queueMode && candidateKey(current) !== candidateKey(item)) {
+      const token = current.lease_token;
+      leases.current = leases.current.filter(value => value !== token);
+      setItems(previous => previous.map(row => candidateKey(row) === candidateKey(current)
+        ? {...row, lease_token: undefined} : row));
+      await release(token).catch(error => setError(String(error)));
+    }
+    setSelected(candidateKey(item)); setDrawerOpen(false);
+  };
   const afterCurrent = async (item: Candidate, skip: boolean) => {
-    if (queueMode && item.lease_token) {
-      if (skip) await syntheticRequest(`${syntheticRoot}/queue/release`, {
-        method: "POST", body: JSON.stringify({lease_token: item.lease_token, skip: true})});
+    if (item.lease_token) {
+      await release(item.lease_token, skip && queueMode);
       leases.current = leases.current.filter(token => token !== item.lease_token);
+    }
+    if (queueMode) {
       const remaining = items.filter(row => candidateKey(row) !== candidateKey(item));
       setItems(remaining);
       if (remaining.length) setSelected(candidateKey(remaining[0]));
       else await claim();
       return;
     }
+    if (item.lease_token) setItems(previous => previous.map(row =>
+      candidateKey(row) === candidateKey(item) ? {...row, lease_token: undefined} : row));
     const index = visible.findIndex(row => candidateKey(row) === candidateKey(item));
-    const next = visible[index + 1];
+    const next = visible[index + 1] ?? visible[index - 1];
     setSelected(next ? candidateKey(next) : "");
   };
-  const decide = async (decision: "pass" | "reject") => {
-    if (!current || working || summary?.read_only || (decision === "reject"
-        && reasonCodes.length === 0 && !reasonNote.trim())) return;
+  const claimReviewed = async () => {
+    if (!current || current.decision === "unreviewed" || working || summary?.read_only) return;
     setWorking(true); setError("");
     try {
+      const value = await syntheticRequest<{lease_token: string; revision: number}>(
+        `${syntheticRoot}/queue/claim-reviewed`, {method: "POST",
+          body: JSON.stringify({candidate_id: current.candidate_id,
+            version_id: current.version_id, expected_revision: current.revision})});
+      leases.current.push(value.lease_token);
+      setItems(previous => previous.map(row => candidateKey(row) === candidateKey(current)
+        ? {...row, lease_token: value.lease_token} : row));
+      setMessage(tr("已领取复审任务", "Review task claimed"));
+    } catch (error) {
+      setError(String(error));
+      await browse(0, loadGeneration.current, candidateKey(current))
+        .catch(refreshError => setError(String(refreshError)));
+    } finally { setWorking(false); }
+  };
+  const decide = async (decision: "pass" | "reject" | "unreviewed") => {
+    if (!current || !canDecide || working || decision === current.decision ||
+        (decision === "reject" && !reasonCodes.length && !reasonNote.trim())) return;
+    setWorking(true); setError("");
+    const item = current;
+    const nextIndex = visible.findIndex(row => candidateKey(row) === candidateKey(item));
+    const next = visible[nextIndex + 1] ?? visible[nextIndex - 1];
+    try {
       await syntheticRequest(`${base}/reviews`, {method: "POST", body: JSON.stringify({
-        decision, expected_revision: current.revision, labels: [],
-        lease_token: current.lease_token,
+        decision, expected_revision: item.revision, labels: [],
+        lease_token: item.lease_token,
         reason_codes: decision === "reject" ? reasonCodes : [],
-        reason: decision === "reject" ? reasonNote.trim() || null : null,
+        reason: decision === "reject" ? reasonNote.trim() || null
+          : decision === "unreviewed" ? resetNote.trim() || null : null,
       })});
-      setRejectOpen(false);
-      setMessage(decision === "pass" ? tr("质量已通过", "Quality passed") : tr("已拒绝", "Rejected"));
-      await afterCurrent(current, false);
-      syntheticRequest<Summary>(`${syntheticRoot}/summary`).then(setSummary).catch(() => undefined);
-    } catch (error) { setError(String(error)); }
-    finally { setWorking(false); }
+      leases.current = leases.current.filter(token => token !== item.lease_token);
+      setRejectOpen(false); setResetOpen(false);
+      setMessage(decision === "pass" ? tr("质量已通过", "Quality passed")
+        : decision === "reject" ? tr("已拒绝", "Rejected")
+          : tr("已撤回为未审核", "Returned to unreviewed"));
+      if (queueMode) {
+        const remaining = items.filter(row => candidateKey(row) !== candidateKey(item));
+        setItems(remaining);
+        if (remaining.length) setSelected(candidateKey(remaining[0]));
+        else await claim();
+      } else {
+        await browse(0, loadGeneration.current, next ? candidateKey(next) : "");
+      }
+      void refreshSummary();
+    } catch (error) {
+      setError(String(error));
+      leases.current = leases.current.filter(token => token !== item.lease_token);
+      if (queueMode) await claim().catch(refreshError => setError(String(refreshError)));
+      else await browse(0, loadGeneration.current, candidateKey(item))
+        .catch(refreshError => setError(String(refreshError)));
+    } finally { setWorking(false); }
   };
   const saveLabel = async () => {
     if (!current || !chosenCode || working || summary?.read_only) return;
@@ -189,8 +265,8 @@ export function SyntheticMotionPage() {
         body: JSON.stringify({code: chosenCode, expected_revision: labelRevision})});
       setMessage(tr("正式标签已保存", "Formal label saved"));
       const next = visible.find(item => candidateKey(item) !== candidateKey(current) && !item.label);
-      await browse();
-      if (next) setSelected(candidateKey(next));
+      await browse(0, loadGeneration.current, next ? candidateKey(next) : "");
+      void refreshSummary();
     } catch (error) { setError(String(error)); }
     finally { setWorking(false); }
   };
@@ -199,6 +275,14 @@ export function SyntheticMotionPage() {
       {type: "imu-synthetic-review-control", action}, location.origin);
   const shortcut = (key: string) => {
     if (working) return;
+    if (drawerOpen) {
+      if (key === "Escape") setDrawerOpen(false);
+      return;
+    }
+    if (resetOpen) {
+      if (key === "Escape") setResetOpen(false);
+      return;
+    }
     if (rejectOpen) {
       if (key === "Escape") setRejectOpen(false);
       if (key === "Enter") void decide("reject");
@@ -208,20 +292,20 @@ export function SyntheticMotionPage() {
     if (key.toLowerCase() === "r") control("replay");
     if (key.toLowerCase() === "n" && current) void afterCurrent(current, queueMode)
       .catch(error => setError(String(error)));
-    if (view !== "quality") return;
-    if (!queueMode) return;
-    if (key.toLowerCase() === "p") void decide("pass");
-    if (key.toLowerCase() === "x") setRejectOpen(true);
-    if (key.toLowerCase() === "s") {
+    if (view !== "quality" || !canDecide) return;
+    if (key.toLowerCase() === "p" && current?.decision !== "pass") void decide("pass");
+    if (key.toLowerCase() === "x" && current?.decision !== "reject") setRejectOpen(true);
+    if (key.toLowerCase() === "s" && queueMode) {
       if (current) void afterCurrent(current, true).catch(error => setError(String(error)));
       setMessage(tr("已跳过，仍为未审核", "Skipped; still unreviewed"));
     }
   };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.altKey || event.ctrlKey || event.metaKey || editable(event.target)) return;
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (editable(event.target) && event.key !== "Escape") return;
       if ([" ", "r", "R", "n", "N", "p", "P", "x", "X", "s", "S"].includes(event.key)
-          || (rejectOpen && ["Enter", "Escape"].includes(event.key))) {
+          || ((drawerOpen || rejectOpen || resetOpen) && ["Enter", "Escape"].includes(event.key))) {
         event.preventDefault(); shortcut(event.key);
       }
     };
@@ -236,95 +320,186 @@ export function SyntheticMotionPage() {
   });
 
   return <main className="synthetic-workbench">
-    <section className="panel synthetic-heading">
-      <div><h2>{tr("合成运动", "Synthetic motion")}</h2>
-        <p>{tr("先判断动作和 IMU 质量，正式标签在独立流程处理。", "Review motion and IMU quality first; formal labels are handled separately.")}</p>
-        {summary && <p>{tr("已发布", "Published")} {summary.published}
-          {" · "}{tr("待审核", "Awaiting review")} {summary.unreviewed}
-          {" · "}{tr("待标签", "Needs label")} {summary.label_pending}
-          {summary.latest_published_at_utc && <> · {tr("最近到达", "Latest arrival")}
-            {" "}{new Date(summary.latest_published_at_utc).toLocaleString()}</>}</p>}</div>
-      {summary?.read_only && <span className="warning-banner">{tr("只读预览：审核决定不会保存", "Read-only preview: decisions are disabled")}</span>}
-      {summary?.preview_mode && <span className="warning-banner">{tr("本地试用：审核决定只保存在本机，不写入云端", "Local trial: decisions stay on this machine")}</span>}
+    <section className="annotation-workbench-bar synthetic-topbar">
+      <button ref={drawerButton} onClick={() => setDrawerOpen(true)}>{tr("审核队列", "Review queue")}</button>
+      <div className="annotation-recording-summary synthetic-current-summary">
+        <strong>{current ? tr("当前片段", "Current clip") : tr("没有待处理片段", "No clip selected")}</strong>
+        {current && <span>{tr("片段", "Clip")} {visible.indexOf(current) + 1}/{visible.length} · {current.decision === "pass"
+          ? tr("已通过", "Passed") : current.decision === "reject"
+            ? tr("已拒绝", "Rejected") : tr("未审核", "Unreviewed")}</span>}
+      </div>
       <nav className="synthetic-tabs">
-        <button className={view === "quality" ? "active" : ""} onClick={() => { setView("quality"); setFilter("unreviewed"); setSelected(""); }}>{tr("质量审核", "Quality review")}</button>
-        <button className={view === "labels" ? "active" : ""} onClick={() => { setView("labels"); setFilter("unreviewed"); setSelected(""); }}>{tr("标签待办", "Label tasks")}</button>
+        <button className={view === "quality" ? "active" : ""} onClick={() => {
+          setView("quality"); setFilter("unreviewed"); setSelected("");
+        }}>{tr("质量审核", "Quality review")}</button>
+        <button className={view === "labels" ? "active" : ""} onClick={() => {
+          setView("labels"); setFilter("unreviewed"); setSelected("");
+        }}>{tr("标签待办", "Label tasks")}</button>
       </nav>
+      {summary && <span className="synthetic-progress">
+        {tr("待审核", "Pending")} {summary.unreviewed} · {tr("待标签", "Labels")} {summary.label_pending}
+      </span>}
     </section>
-    <aside className="panel synthetic-queue">
-      <div className="panel-title">{tr("队列", "Queue")} · {visible.length} / {items.length}</div>
-      <select aria-label={tr("状态筛选", "Status filter")} value={filter} onChange={event => { setFilter(event.target.value); setSelected(""); }}>
-        <option value="unreviewed">{view === "quality" ? tr("未审核", "Unreviewed") : tr("待标签", "Needs label")}</option>
-        <option value="pass">{view === "quality" ? tr("已通过", "Passed") : tr("已标注", "Labeled")}</option>
-        {view === "quality" && <option value="reject">{tr("已拒绝", "Rejected")}</option>}
-        <option value="all">{tr("全部", "All")}</option>
-      </select>
-      <label><input type="checkbox" checked={highRisk} onChange={event => setHighRisk(event.target.checked)} />{tr("高风险复审", "High risk")}</label>
-      <details><summary>{tr("查找片段", "Find clip")}</summary>
-        <input value={search} onChange={event => setSearch(event.target.value)} placeholder={tr("来源或 ID", "Source or ID")} /></details>
-      <div className="synthetic-queue-list">{visible.map((item, index) =>
-        <button key={candidateKey(item)} className={item === current ? "active" : ""}
-          onClick={() => setSelected(candidateKey(item))}>
-          <strong>{tr("片段", "Clip")} {index + 1}</strong>
-          <span>{item.risk_tier === "high" ? tr("高风险提示", "High-risk hint")
-            : item.warning_flags.length ? tr("有 QA 提示", "QA hints") : ""}</span>
-        </button>)}</div>
-      {hasMore && <button onClick={() => browse(items.length).catch(error => setError(String(error)))}>
-        {tr("加载更多", "Load more")}</button>}
-    </aside>
-    <section className="panel synthetic-review">
-      {error && <div className="error-banner" role="alert">{error}</div>}
-      {message && <div className="success-banner" role="status">{message}</div>}
-      {current ? <>
-        <div className="synthetic-review-head"><div>
-          <h2>{view === "quality" ? tr("判断这段动作是否可用", "Is this motion usable?") : tr("选择正式活动标签", "Choose a formal activity label")}</h2>
-          <span>{current.risk_tier === "high" ? tr("高风险提示", "High-risk hint") : tr("动作与 IMU 同源回放", "Motion and IMU replay")}</span>
-        </div><button onClick={() => afterCurrent(current, queueMode).catch(error => setError(String(error)))}>{tr("下一条 N", "Next N")}</button></div>
-        {current.warning_flags.length > 0 && <p className="warning-banner">QA · {current.warning_flags.join(", ")}</p>}
-        <iframe ref={frame} key={base} title={tr("动作与 IMU 同源回放", "Motion and IMU replay")}
-          src={`${base}/files/index.html`} className="synthetic-frame" />
-        <div className="synthetic-controls">
-          <button onClick={() => control("toggle")}>{tr("播放／暂停 Space", "Play / pause Space")}</button>
-          <button onClick={() => control("replay")}>{tr("重播 R", "Replay R")}</button>
-          {queueMode ? <>
-            <button className="primary" disabled={working || summary?.read_only} onClick={() => decide("pass")}>{tr("通过 P", "Pass P")}</button>
-            <button disabled={working || summary?.read_only} onClick={() => setRejectOpen(true)}>{tr("拒绝 X", "Reject X")}</button>
-            <button disabled={working} onClick={() => {
-              void afterCurrent(current, true).catch(error => setError(String(error)));
-              setMessage(tr("已跳过，仍为未审核", "Skipped; still unreviewed"));
-            }}>{tr("跳过 S", "Skip S")}</button>
-          </> : view === "quality" ? <span>{tr("历史审核结果只读", "Historical review is read only")}</span>
-          : <>
-            <label>{tr("正式标签", "Formal label")} <select value={chosenCode} onChange={event => setChosenCode(event.target.value)}>
-              <option value="">{tr("从受控列表选择", "Choose from managed labels")}</option>
-              {catalog?.concepts.filter(item => item.active).map(item =>
-                <option key={item.code} value={item.code}>{item.name}{item.is_fall ? tr(" · 跌倒", " · Fall") : ""}</option>)}
-            </select></label>
-            <button className="primary" disabled={working || !chosenCode || summary?.read_only} onClick={saveLabel}>{tr("保存标签", "Save label")}</button>
-            {current.label && <span>{tr("当前", "Current")}: {current.label.name} · {current.label.origin === "auto" ? tr("自动来源", "Automatic source") : tr("人工选择", "Human selected")}</span>}
+    {(summary?.read_only || summary?.preview_mode) && <div className="warning-banner synthetic-mode-banner">
+      {summary.read_only ? tr("只读预览：审核决定不会保存", "Read-only preview: decisions are disabled")
+        : tr("本地试用：决定只保存在本机", "Local trial: decisions stay on this machine")}
+    </div>}
+    <section className="synthetic-workbench-body">
+      {drawerOpen && <>
+        <button className="recording-drawer-backdrop" aria-label={tr("关闭审核队列", "Close review queue")}
+          onClick={() => setDrawerOpen(false)} />
+        <aside className="recording-drawer synthetic-drawer" role="dialog" aria-modal="true"
+          aria-label={tr("审核队列", "Review queue")}>
+          <div className="recording-drawer-controls">
+            <div className="recording-drawer-header"><strong>{tr("选择片段", "Choose clip")}</strong>
+              <button onClick={() => setDrawerOpen(false)}>{tr("关闭", "Close")}</button></div>
+            <input ref={drawerSearch} value={search} onChange={event => setSearch(event.target.value)}
+              placeholder={tr("搜索来源或片段 ID", "Search source or clip ID")} />
+            <div className="recording-queue-tabs synthetic-filter-tabs" role="tablist">
+              {[
+                ["unreviewed", view === "quality" ? tr("未审核", "Unreviewed") : tr("待标签", "Needs label"), view === "quality" ? summary?.unreviewed : summary?.label_pending],
+                ["pass", view === "quality" ? tr("已通过", "Passed") : tr("已标注", "Labeled"), view === "quality" ? summary?.passed : summary ? summary.passed - summary.label_pending : undefined],
+                ...(view === "quality" ? [["reject", tr("已拒绝", "Rejected"), summary?.rejected]] : []),
+                ["all", tr("全部", "All"), view === "quality" ? summary?.published : summary?.passed],
+              ].map(([value, label, count]) => <button key={String(value)}
+                className={filter === value ? "active" : ""} role="tab"
+                aria-selected={filter === value} onClick={() => setFilter(String(value))}>
+                <span>{label}</span><strong>{count ?? "·"}</strong></button>)}
+            </div>
+            <label className="synthetic-risk-filter"><input type="checkbox" checked={highRisk}
+              onChange={event => setHighRisk(event.target.checked)} />{tr("只看高风险提示", "High-risk hints only")}</label>
+          </div>
+          <div className="recording-drawer-list-wrap">
+            <div className="recording-drawer-list synthetic-queue-list">
+              {visible.length === 0 && <div className="recording-queue-empty-state">
+                <strong>{tr("没有匹配片段", "No matching clips")}</strong>
+                <span>{tr("可切换状态或调整搜索条件。", "Change the status or search.")}</span>
+              </div>}
+              {visible.map((item, index) => <button key={candidateKey(item)}
+                className={item === current ? "selected" : ""}
+                onClick={() => void selectCandidate(item)}>
+                <strong>{tr("片段", "Clip")} {index + 1}</strong>
+                <span>{item.risk_tier === "high" ? tr("高风险提示", "High-risk hint")
+                  : item.warning_flags.length ? tr("有 QA 提示", "QA hints")
+                    : tr("无 QA 提示", "No QA hint")}</span>
+              </button>)}
+              {hasMore && <button onClick={() => browse(items.length)
+                .catch(error => setError(String(error)))}>{tr("加载更多", "Load more")}</button>}
+            </div>
+          </div>
+          <div className="recording-drawer-footer"><span>{tr("当前列表", "Current list")} {visible.length}</span>
+            <span>{tr("全部已发布", "Published")} {summary?.published ?? "—"}</span></div>
+        </aside>
+      </>}
+      <section className="panel synthetic-viewer-pane">
+        {current ? <>
+          <iframe ref={frame} key={base} title={tr("动作与 IMU 同源回放", "Motion and IMU replay")}
+            src={`${base}/files/index.html`} className="synthetic-frame" />
+          <div className="synthetic-playback-bar">
+            <button onClick={() => control("toggle")}>{tr("播放／暂停 Space", "Play / pause Space")}</button>
+            <button onClick={() => control("replay")}>{tr("重播 R", "Replay R")}</button>
+            <span>{tr("滚轮缩放人物；页面保持固定", "Wheel zooms the model; page stays fixed")}</span>
+          </div>
+        </> : <div className="synthetic-empty">{tr("当前队列没有可处理的片段。可打开审核队列选择其他状态。", "No clips here. Open the review queue to choose another status.")}</div>}
+      </section>
+      <section className="synthetic-task-pane">
+        <div className="synthetic-task-head">
+          <div><span className="panel-title">{view === "quality"
+            ? tr("质量审核", "Quality review") : tr("正式标签", "Formal label")}</span>
+            <h2>{view === "quality" ? tr("动作与 IMU 是否可用", "Is motion and IMU usable?")
+              : tr("选择活动标签", "Choose activity label")}</h2></div>
+          {current && <button onClick={() => void afterCurrent(current, queueMode)
+            .catch(error => setError(String(error)))}>{tr("下一条 N", "Next N")}</button>}
+        </div>
+        <div className="synthetic-task-scroll">
+          {error && <div className="error-banner" role="alert">{error}</div>}
+          {message && <div className="success-banner" role="status">{message}</div>}
+          {current && <>
+            <div className={`synthetic-decision-state state-${current.decision}`}>
+              {current.decision === "pass" ? tr("质量已通过", "Quality passed")
+                : current.decision === "reject" ? tr("质量已拒绝", "Quality rejected")
+                  : tr("等待质量审核", "Awaiting quality review")}
+            </div>
+            {current.warning_flags.length > 0 && <div className="warning-banner">
+              QA · {current.warning_flags.join(", ")}</div>}
+            {view === "quality" && current.label && <p className="synthetic-label-hint">
+              {tr("正式标签", "Formal label")}：{current.label.name}</p>}
+            {view === "labels" && <>
+              <label>{tr("正式标签", "Formal label")}<select value={chosenCode}
+                onChange={event => setChosenCode(event.target.value)}>
+                <option value="">{tr("从受控列表选择", "Choose from managed labels")}</option>
+                {catalog?.concepts.filter(item => item.active).map(item =>
+                  <option key={item.code} value={item.code}>{item.name}
+                    {item.is_fall ? tr(" · 跌倒", " · Fall") : ""}</option>)}
+              </select></label>
+              {current.label && <p className="synthetic-label-hint">
+                {tr("当前", "Current")}：{current.label.name} · {current.label.origin === "auto"
+                  ? tr("来源映射", "Source mapping") : tr("人工选择", "Human selected")}</p>}
+            </>}
+            <details className="synthetic-details"><summary>{tr("来源与技术详情", "Source and technical details")}</summary>
+              <p>{current.source_dataset} · {current.source_member} · {current.candidate_id} · revision {current.revision}</p>
+              <strong>{tr("来源候选描述，仅供参考", "Source suggestions, for reference only")}</strong>
+              {current.label_candidates.length === 0 ? <p>{tr("来源没有提供标签", "No source labels")}</p>
+                : <ul>{current.label_candidates.slice(0, 12).map((label, index) =>
+                  <li key={index}>{label.kind === "temporal-candidate"
+                    ? tr("片段", "Segment") : tr("整段", "Recording")}
+                    {" · "}{label.raw_label || label.code || tr("空标签", "Empty label")}
+                    {label.categories?.length ? ` [${label.categories.join(", ")}]` : ""}</li>)}</ul>}
+            </details>
           </>}
         </div>
-        {rejectOpen && <div className="synthetic-reject panel" role="dialog" aria-label={tr("拒绝原因", "Rejection reason")}>
-          <strong>{tr("选择拒绝原因", "Choose rejection reasons")}</strong>
-          <div className="synthetic-reasons">{reasons.map(reason =>
-            <label key={reason.code}><input type="checkbox" checked={reasonCodes.includes(reason.code)}
-              onChange={event => setReasonCodes(previous => event.target.checked
-                ? [...previous, reason.code] : previous.filter(code => code !== reason.code))} />{reason.name}</label>)}</div>
-          <textarea value={reasonNote} onChange={event => setReasonNote(event.target.value)}
-            placeholder={tr("补充说明（可选）", "Additional details (optional)")} />
-          <div><button className="primary" disabled={working || (reasonCodes.length === 0 && !reasonNote.trim())} onClick={() => decide("reject")}>{tr("确认拒绝 Enter", "Confirm reject Enter")}</button>
-            <button onClick={() => setRejectOpen(false)}>{tr("取消", "Cancel")}</button></div>
+        {current && <div className="synthetic-action-bar">
+          {view === "quality" ? current.decision !== "unreviewed" && !current.lease_token
+            ? <button className="primary" disabled={working || summary?.read_only}
+                onClick={() => void claimReviewed()}>{tr("领取复审", "Claim re-review")}</button>
+            : <>
+              {current.decision !== "pass" && <button className="primary"
+                disabled={working || !canDecide} onClick={() => void decide("pass")}>
+                {tr("通过 P", "Pass P")}</button>}
+              {current.decision !== "reject" && <button disabled={working || !canDecide}
+                onClick={() => setRejectOpen(true)}>{tr("拒绝 X", "Reject X")}</button>}
+              {current.decision !== "unreviewed"
+                ? <button disabled={working || !canDecide} onClick={() => setResetOpen(true)}>
+                  {tr("撤回为未审核", "Return to unreviewed")}</button>
+                : queueMode && <button disabled={working} onClick={() => {
+                  void afterCurrent(current, true).catch(error => setError(String(error)));
+                  setMessage(tr("已跳过，仍为未审核", "Skipped; still unreviewed"));
+                }}>{tr("跳过 S", "Skip S")}</button>}
+              {current.decision === "unreviewed" && !queueMode && <button onClick={() => {
+                setFilter("unreviewed"); setDrawerOpen(false);
+              }}>{tr("进入待审核队列", "Open unreviewed queue")}</button>}
+            </>
+            : <button className="primary" disabled={working || !chosenCode || summary?.read_only}
+              onClick={() => void saveLabel()}>{tr("保存标签", "Save label")}</button>}
         </div>}
-        <details className="synthetic-details"><summary>{tr("来源与技术详情", "Source and technical details")}</summary>
-          <p>{current.source_dataset} · {current.source_member} · {current.candidate_id} · revision {current.revision}</p>
-          <strong>{tr("来源候选描述，仅供参考", "Source suggestions, for reference only")}</strong>
-          {current.label_candidates.length === 0 ? <p>{tr("来源没有提供标签", "No source labels")}</p>
-            : <ul>{current.label_candidates.slice(0, 12).map((label, index) =>
-              <li key={index}>{label.kind === "temporal-candidate" ? tr("片段", "Segment") : tr("整段", "Recording")}
-                {" · "}{label.raw_label || label.code || tr("空标签", "Empty label")}
-                {label.categories?.length ? ` [${label.categories.join(", ")}]` : ""}</li>)}</ul>}
-        </details>
-      </> : <p>{tr("当前队列没有可处理的片段。", "No clips in this queue.")}</p>}
+      </section>
     </section>
+    {rejectOpen && <div className="synthetic-dialog-backdrop">
+      <div className="synthetic-reject panel" role="dialog" aria-modal="true"
+        aria-label={tr("拒绝原因", "Rejection reason")}>
+        <strong>{tr("选择拒绝原因", "Choose rejection reasons")}</strong>
+        <div className="synthetic-reasons">{reasons.map(reason =>
+          <label key={reason.code}><input type="checkbox" checked={reasonCodes.includes(reason.code)}
+            onChange={event => setReasonCodes(previous => event.target.checked
+              ? [...previous, reason.code] : previous.filter(code => code !== reason.code))} />{reason.name}</label>)}</div>
+        <textarea value={reasonNote} onChange={event => setReasonNote(event.target.value)}
+          placeholder={tr("补充说明（可选）", "Additional details (optional)")} />
+        <div><button className="primary" disabled={working || (!reasonCodes.length && !reasonNote.trim())}
+          onClick={() => void decide("reject")}>{tr("确认拒绝 Enter", "Confirm reject Enter")}</button>
+          <button onClick={() => setRejectOpen(false)}>{tr("取消", "Cancel")}</button></div>
+      </div>
+    </div>}
+    {resetOpen && <div className="synthetic-dialog-backdrop">
+      <div className="synthetic-reject panel" role="dialog" aria-modal="true"
+        aria-label={tr("撤回审核结果", "Return review to unreviewed")}>
+        <strong>{tr("撤回为未审核", "Return to unreviewed")}</strong>
+        <p>{tr("将重新进入审核队列。原审核记录和已有快照不会改变；正式标签会保留。", "The clip returns to the review queue. Existing revisions, snapshots, and its formal label remain.")}</p>
+        <textarea value={resetNote} onChange={event => setResetNote(event.target.value)}
+          placeholder={tr("撤回说明（可选）", "Reason (optional)")} />
+        <div><button className="primary" disabled={working}
+          onClick={() => void decide("unreviewed")}>{tr("确认撤回", "Confirm return")}</button>
+          <button onClick={() => setResetOpen(false)}>{tr("取消", "Cancel")}</button></div>
+      </div>
+    </div>}
   </main>;
 }
