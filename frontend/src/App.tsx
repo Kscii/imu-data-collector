@@ -1,6 +1,10 @@
 import { CalibrationExperimentPage, CalibrationDeviceManagement } from "./CalibrationExperiments";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
+import { SyntheticMotionPage } from "./SyntheticMotionPage";
+import { SyntheticSnapshots } from "./SyntheticSnapshots";
+import { SyntheticLabelManagement } from "./SyntheticLabelManagement";
+import { DataManagementPage } from "./DataManagementPage";
 import {
   type BleScanSummary,
   CaptureSettingsPage,
@@ -30,7 +34,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数据采集", "IMU Data Capture");
 
-type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
+type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -71,7 +75,7 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
+    ? { annotate: "annotate", synthetic: "synthetic", data: "data", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
     : { capture: "capture", records: "library", settings: "settings", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -297,6 +301,9 @@ type AppConfig = {
   video?: { width: number; height: number; requested_fps: number; bitrate: string };
   local_actor_id?: string;
   catalog_refresh_interval_s?: number;
+  synthetic_run_id?: string | null;
+  synthetic_target?: "dev" | "prod";
+  synthetic_enabled?: boolean;
   publish?: {
     mode: "disabled" | "local" | "broker" | "direct_gcs";
     backend: "local" | "gcs" | "broker";
@@ -987,6 +994,7 @@ export default function App() {
   const [captureError, setCaptureError] = useState("");
   const [captureOperation, setCaptureOperation] = useState("");
   const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [recordingsLoaded, setRecordingsLoaded] = useState(false);
   const [taxonomy, setTaxonomy] = useState<Taxonomy | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [session, setSession] = useState<Session | null>(null);
@@ -1012,6 +1020,14 @@ export default function App() {
     setTab(next);
     const url = new URL(location.href);
     url.searchParams.set("view", tabView(next));
+    if (next !== "annotate") {
+      url.searchParams.delete("recording"); url.searchParams.delete("task");
+    }
+    if (next !== "synthetic") {
+      for (const key of ["candidate", "version", "stage", "review_filter"])
+        url.searchParams.delete(key);
+    }
+    if (next !== "data") url.searchParams.delete("domain");
     history.pushState({}, "", url);
   };
 
@@ -1061,12 +1077,23 @@ export default function App() {
 
   const refreshRecordings = async () => {
     try {
-      const value = await api<Recording[]>("/api/v1/recordings");
+      const value = annotationApplication
+        ? (await api<{recordings: Recording[]}>("/api/v1/recordings/queue-preview")).recordings
+        : await api<Recording[]>("/api/v1/recordings");
+      if (annotationApplication) {
+        const deepLinked = new URLSearchParams(location.search).get("recording");
+        if (deepLinked && !value.some(item => item.recording_id === deepLinked)) {
+          try { value.push(await api<Recording>(`/api/v1/recordings/${encodeURIComponent(deepLinked)}`)); }
+          catch { /* A stale deep link is handled by the workbench. */ }
+        }
+      }
       setRecordings(value);
       return value;
     } catch (e) {
       setCaptureError((e as Error).message);
       return [];
+    } finally {
+      setRecordingsLoaded(true);
     }
   };
   const refreshCameras = (force = false, scanBle = false) => {
@@ -1322,16 +1349,16 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""}`}>
-      <header className={annotationApplication && tab === "annotate" ? "workbench-header" : ""}>
+    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""} ${annotationApplication && tab === "synthetic" ? "synthetic-workbench-shell" : ""} ${annotationApplication && tab === "data" ? "data-manager-shell" : ""}`}>
+      <header className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data") ? "workbench-header" : ""}>
         <div>
           <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("多设备 IMU · 本机采集", "Multi-device IMU · Local capture")}</span>
           <h1>{annotationApplication ? tr("IMU 数据标注平台", "IMU Annotation Platform") : tr("IMU 数据采集", "IMU Data Capture")}</h1>
         </div>
         <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
-      <nav className={annotationApplication && tab === "annotate" ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+      <nav className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data") ? "workbench-nav" : ""}>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_enabled && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}{config.synthetic_target === "dev" ? tr(" · 测试", " · Test") : ""}</button>}<button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>{tr("数据管理", "Data management")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
           <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
@@ -1396,12 +1423,14 @@ export default function App() {
         />
       )}
       {annotationApplication && tab === "annotate" && taxonomy && session && (
-        <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
+        <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} recordingsLoaded={recordingsLoaded} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
+      {annotationApplication && tab === "synthetic" && config?.synthetic_enabled && <SyntheticMotionPage target={config.synthetic_target ?? "dev"} />}
+      {annotationApplication && tab === "data" && session && <DataManagementPage isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
-      {annotationApplication && tab === "taxonomy" && taxonomy && session && <TaxonomyManagementPage taxonomy={taxonomy} onChanged={setTaxonomy} />}
-      {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} />}
+      {annotationApplication && tab === "taxonomy" && taxonomy && session && <LabelManagementWorkspace taxonomy={taxonomy} onChanged={setTaxonomy} isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
+      {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
       {annotationApplication && tab === "delivery" && <SnapshotDeliveryViewer />}
       {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
       {annotationApplication && tab === "models" && config?.can_view_models && session && <ModelCatalogPage session={session} />}
@@ -1748,7 +1777,40 @@ function Metric({ label, value, warn = false }: { label: string; value: string |
   return <div className={`metric ${warn ? "warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
+function LabelManagementWorkspace({taxonomy, onChanged, isAdmin, syntheticEnabled}: {
+  taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void;
+  isAdmin: boolean; syntheticEnabled: boolean;
+}) {
+  const [section, setSection] = useState<"concepts" | "mappings">("concepts");
+  const [motionRefresh, setMotionRefresh] = useState(0);
+  return <main>
+    {syntheticEnabled && <nav className="synthetic-tabs">
+      <button className={section === "concepts" ? "active" : ""} onClick={() => setSection("concepts")}>{tr("概念库", "Concepts")}</button>
+      <button className={section === "mappings" ? "active" : ""} onClick={() => setSection("mappings")}>{tr("自动映射", "Mappings")}</button>
+    </nav>}
+    {section === "concepts" && <>
+      {syntheticEnabled && <div className="synthetic-scope-links">
+        <span>{tr("按使用范围定位", "Jump by usage scope")}</span>
+        <a href="#shared-concepts">{tr("真实 IMU 共用概念", "Shared real IMU concepts")}</a>
+        <a href="#motion-only-concepts">{tr("动捕专用概念", "Motion-only concepts")}</a>
+      </div>}
+      <TaxonomyManagementPage taxonomy={taxonomy} onChanged={onChanged}
+        motionCreate={syntheticEnabled ? <SyntheticLabelManagement isAdmin={isAdmin}
+          section="create" refreshKey={motionRefresh}
+          onChanged={() => setMotionRefresh(value => value + 1)} /> : null}
+        motionConcepts={syntheticEnabled ? <SyntheticLabelManagement isAdmin={isAdmin}
+          section="concepts" refreshKey={motionRefresh}
+          onChanged={() => setMotionRefresh(value => value + 1)} /> : null} />
+    </>}
+    {section === "mappings" && syntheticEnabled
+      && <SyntheticLabelManagement isAdmin={isAdmin} section="mappings" />}
+  </main>;
+}
+
+function TaxonomyManagementPage({ taxonomy, onChanged, motionCreate, motionConcepts }: {
+  taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void;
+  motionCreate: ReactNode; motionConcepts: ReactNode;
+}) {
   const [definition, setDefinition] = useState<Taxonomy>(taxonomy);
   const [editingCode, setEditingCode] = useState("");
   const [binaryLabel, setBinaryLabel] = useState<"fall" | "non_fall">("non_fall");
@@ -1996,7 +2058,11 @@ function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; o
         <button className="primary" disabled={busy !== "" || !code.trim() || !name.trim()} onClick={createActivity}>新增标签</button>
       </div>
     </section>
-    {(["fall", "non_fall"] as const).map(taxonomyGroup)}
+    {motionCreate}
+    <div className="taxonomy-concept-grid" id="shared-concepts">
+      {(["fall", "non_fall"] as const).map(taxonomyGroup)}
+      {motionConcepts}
+    </div>
     <section className="panel taxonomy-migration">
       <div className="panel-title">{tr("历史标签迁移", "Historical label migration")}</div>
       <p className="stage-help">{tr("预览会冻结当前 taxonomy 版本和受影响 review 修订。执行后仅替换同一跌倒类型的当前标注，自动停用源标签，并为已完成正式数据生成新的活动导出；旧导出和快照不改写。", "Preview freezes the current taxonomy version and affected review revisions. Apply replaces the current label only within the same binary class, disables the source, and creates a new active export for completed production data. Old exports and snapshots remain unchanged.")}</p>
@@ -2101,7 +2167,7 @@ function TaxonomyManagementRow({ entry, editing, editBlocked, busy, onStartEdit,
   </div>;
 }
 
-function AnnotationPage({ recordings, taxonomy, session, participants, onChanged }: { recordings: Recording[]; taxonomy: Taxonomy; session: Session; participants: string[]; onChanged: () => Promise<Recording[]> }) {
+function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, participants, onChanged }: { recordings: Recording[]; recordingsLoaded: boolean; taxonomy: Taxonomy; session: Session; participants: string[]; onChanged: () => Promise<Recording[]> }) {
   const [selected, setSelected] = useState(() => new URLSearchParams(location.search).get("recording") ?? "");
   const [recordingDrawerOpen, setRecordingDrawerOpen] = useState(false);
   const [recordingQuery, setRecordingQuery] = useState("");
@@ -2155,11 +2221,13 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
   const selectedRecordingButtonRef = useRef<HTMLButtonElement>(null);
   const retrySaveRef = useRef<(() => void) | null>(null);
   const locateTimerRef = useRef<number | null>(null);
+  const selectedRecordingAvailable = Boolean(selected && recordings.some((item) => item.recording_id === selected));
 
   useEffect(() => {
+    if (!recordingsLoaded) return;
     if (selected && recordings.some((item) => item.recording_id === selected)) return;
     setSelected(preferredRecordingId(recordings, session.unikey));
-  }, [recordings, selected, session.unikey]);
+  }, [recordings, recordingsLoaded, selected, session.unikey]);
 
   useEffect(() => {
     if (!selected) return;
@@ -2167,12 +2235,11 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
     url.searchParams.set("view", "annotate");
     url.searchParams.set("recording", selected);
     if (loadedRecording === selected) url.searchParams.set("task", taskTab);
-    else url.searchParams.delete("task");
     history.replaceState({}, "", url);
   }, [selected, taskTab, loadedRecording]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selectedRecordingAvailable) return;
     const controller = new AbortController();
     setError("");
     setLoadedRecording("");
@@ -2224,7 +2291,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     });
     return () => controller.abort();
-  }, [selected, reloadNonce, participants.join("|")]);
+  }, [selected, selectedRecordingAvailable, reloadNonce, participants.join("|")]);
 
   useEffect(() => {
     if (!recordingDrawerOpen) return;
@@ -3078,6 +3145,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         <aside ref={recordingDrawerRef} className="recording-drawer" role="dialog" aria-modal="true" aria-labelledby="recording-drawer-title">
           <div className="recording-drawer-controls">
             <div className="recording-drawer-header"><strong id="recording-drawer-title">{tr("选择录制", "Select recording")}</strong><button onClick={() => setRecordingDrawerOpen(false)}>{tr("关闭", "Close")}</button></div>
+            <a className="button-link" href="?view=data">{tr("在数据管理中搜索全部录制", "Search all recordings in Data management")}</a>
             <input ref={recordingSearchRef} placeholder={tr("搜索录制 ID、参与者或负责人", "Search recording ID, participant, or owner")} value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
             <div className="recording-drawer-filters">
               <select aria-label={tr("数据级别", "Data tier")} value={recordingTier} onChange={(event) => setRecordingTier(event.target.value as typeof recordingTier)}>
@@ -3153,7 +3221,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
           </div>
           <div className="recording-drawer-footer" aria-live="polite">
             <span>{tr(`当前显示 ${activeRecordingQueue.length} 条`, `Showing ${activeRecordingQueue.length}`)}</span>
-            <span>{tr(`筛选结果共 ${visibleRecordingCount} 条 · 列表可滚动`, `${visibleRecordingCount} filtered total · list scrolls`)}</span>
+            <span>{tr(`快捷列表共 ${visibleRecordingCount} 条 · 完整目录请用数据管理`, `${visibleRecordingCount} quick-list items · use Data management for the full catalog`)}</span>
           </div>
         </aside>
       </>}
@@ -3393,7 +3461,8 @@ function SnapshotDeliveryViewer() {
   </main>;
 }
 
-function TrainingSnapshotsPage({ session }: { session: Session }) {
+function TrainingSnapshotsPage({ session, syntheticEnabled }: { session: Session; syntheticEnabled: boolean }) {
+  const [domain, setDomain] = useState<"real" | "synthetic">("real");
   const [snapshots, setSnapshots] = useState<TrainingSnapshot[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -3496,6 +3565,11 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
   const otherSnapshots = snapshots.filter((item) => item !== currentSnapshot);
 
   return <main>
+    {syntheticEnabled && <nav className="synthetic-tabs">
+      <button className={domain === "real" ? "active" : ""} onClick={() => setDomain("real")}>{tr("真实 IMU · HDF5 3.2", "Real IMU · HDF5 3.2")}</button>
+      <button className={domain === "synthetic" ? "active" : ""} onClick={() => setDomain("synthetic")}>{tr("合成 IMU · HDF5 3.3", "Synthetic IMU · HDF5 3.3")}</button>
+    </nav>}
+    {domain === "synthetic" && syntheticEnabled ? <SyntheticSnapshots /> : <>
     {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
     {message && <div className="success-banner">{message}</div>}
     <section className="panel library">
@@ -3517,6 +3591,7 @@ function TrainingSnapshotsPage({ session }: { session: Session }) {
         </details>}
       </>}
     </section>
+    </>}
   </main>;
 }
 

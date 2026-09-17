@@ -31,6 +31,10 @@ auth:
   iap_audience: "/projects/123456789/global/backendServices/123456789"
 
 annotation:
+  # 合成运动只接入一个目标：先 dev 验收，再将此值切到 prod；旧 dev 对象保留归档。
+  # synthetic_target: dev
+  # synthetic_run_id: fresh-e2e-20260917  # dev 必填；prod 时省略。
+  # synthetic_bucket: soft3888-label  # 与模拟器发布 bucket 一致。
   # 只允许负载均衡来源访问 8766；应用本身仍校验 IAP 签名 JWT。
   server_host: "0.0.0.0"
   server_port: 8766

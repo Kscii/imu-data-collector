@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from imu_data_collector.models import (
@@ -18,15 +19,29 @@ from imu_data_collector.models import (
 from imu_data_collector.review import ReviewConflictError
 from imu_data_collector.storage import ObjectConflictError, ObjectStore
 
+logger = logging.getLogger(__name__)
+
 
 class AnnotationReviewStore:
     def __init__(
         self,
         store: ObjectStore,
         taxonomy: dict,
+        on_change: Callable[[ReviewDocument, int], None] | None = None,
     ) -> None:
         self.store = store
         self.taxonomy = taxonomy
+        self.on_change = on_change
+
+    def _notify(self, review: ReviewDocument, generation: int) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change(review, generation)
+        except Exception:
+            # The immutable review write is authoritative. A local read-model
+            # failure must not make a successful write look retryable.
+            logger.exception("更新录制任务索引失败：%s", review.recording_id)
 
     @staticmethod
     def key(recording_id: str) -> str:
@@ -83,7 +98,9 @@ class AnnotationReviewStore:
         key = self.key(manifest.recording_id)
         try:
             payload, generation = self.store.read_json(key)
-            return ReviewDocument.model_validate(payload), generation
+            review = ReviewDocument.model_validate(payload)
+            self._notify(review, generation)
+            return review, generation
         except FileNotFoundError:
             initial = self._initial(manifest)
             try:
@@ -92,10 +109,13 @@ class AnnotationReviewStore:
                     initial.model_dump(mode="json"),
                     if_generation_match=0,
                 )
+                self._notify(initial, info.generation)
                 return initial, info.generation
             except ObjectConflictError:
                 payload, generation = self.store.read_json(key)
-                return ReviewDocument.model_validate(payload), generation
+                review = ReviewDocument.model_validate(payload)
+                self._notify(review, generation)
+                return review, generation
 
     def mutate(
         self,
@@ -108,11 +128,12 @@ class AnnotationReviewStore:
             raise ReviewConflictError("review.json 已更新，请刷新后重试")
         updated = update(current).model_copy(update={"revision": current.revision + 1})
         try:
-            self.store.write_json(
+            info = self.store.write_json(
                 self.key(manifest.recording_id),
                 updated.model_dump(mode="json"),
                 if_generation_match=generation,
             )
         except ObjectConflictError as error:
             raise ReviewConflictError("review.json 已被另一位用户更新") from error
+        self._notify(updated, info.generation)
         return updated
