@@ -78,6 +78,17 @@ export function SyntheticLabelManagement({isAdmin, section}: {
       setEditCode(""); await load();
     } catch (reason) { setError(String(reason)); }
   };
+  const toggleConcept = async (item: NonNullable<Catalog["concepts"]>[number]) => {
+    if (!catalog) return;
+    setError("");
+    try {
+      await syntheticRequest(`${syntheticRoot}/labels/concepts/${encodeURIComponent(item.code)}`, {
+        method: "PATCH", body: JSON.stringify({expected_revision: catalog.motion_revision,
+          name: item.name, active: !item.active}),
+      });
+      await load();
+    } catch (reason) { setError(String(reason)); }
+  };
   const addRule = async () => {
     setError("");
     try {
@@ -108,15 +119,30 @@ export function SyntheticLabelManagement({isAdmin, section}: {
   return <section id={section === "concepts" ? "motion-only-concepts" : undefined}
     className="panel synthetic-label-management">
     <div className="panel-title">{section === "concepts"
-      ? tr("动捕专用概念", "Motion-only concepts") : tr("合成运动自动映射", "Synthetic motion mappings")}</div>
+      ? tr("仅合成运动标签", "Synthetic-only labels") : tr("合成运动自动映射", "Synthetic motion mappings")}</div>
     {error && <div className="error-banner">{error}</div>}
     {section === "concepts" && <>
-      <p>{tr("这里维护仅用于动捕合成的概念；共用概念在上方真实 IMU 概念区维护。历史标签不会改写。", "Manage motion-only concepts here; shared concepts are managed above. Historical labels remain unchanged.")}</p>
-      <div className="synthetic-concept-list">{catalog?.concepts.filter(item => item.scope === "motion")
-        .map(item => <button key={item.code} className={!item.active ? "inactive" : ""}
-          onClick={() => { setEditCode(item.code); setEditName(item.name); setEditActive(item.active); }}>
-          {item.name} <small>{item.code} · {item.active ? tr("启用", "Active") : tr("停用", "Inactive")}</small>
-        </button>)}</div>
+      <p>{tr("仅在合成运动中可选；每个标签仍属于跌倒或非跌倒。共用标签在左侧两组维护。", "Only selectable for synthetic motion; each remains a fall or non-fall label. Shared labels are managed in the other two groups.")}</p>
+      <div className="synthetic-concept-list">{catalog?.concepts.filter(item => item.scope === "motion" && item.active)
+        .map(item => <div key={item.code} className="taxonomy-row">
+          <button className="taxonomy-name-tag" disabled={!isAdmin}
+            onClick={() => { setEditCode(item.code); setEditName(item.name); setEditActive(item.active); }}
+            title={tr("编辑显示名称", "Edit display name")}>{item.name}</button>
+          <code>{item.code}</code>
+          <span>{item.is_fall ? tr("跌倒", "Fall") : tr("非跌倒", "Non-fall")}</span>
+          <span className={`state ${item.active ? "state-ready" : "state-needs_attention"}`}>
+            {item.active ? tr("启用", "Active") : tr("停用", "Inactive")}</span>
+          <div className="taxonomy-row-actions">{isAdmin && <button onClick={() => void toggleConcept(item)}>
+            {tr("停用", "Disable")}</button>}</div>
+        </div>)}</div>
+      {catalog?.concepts.some(item => item.scope === "motion" && !item.active) &&
+        <details className="taxonomy-inactive-group"><summary>{tr("已停用标签", "Inactive labels")}</summary>
+          {catalog.concepts.filter(item => item.scope === "motion" && !item.active).map(item =>
+            <div key={item.code} className="taxonomy-row taxonomy-row-inactive">
+              <span className="taxonomy-name-tag">{item.name}</span><code>{item.code}</code>
+              <span>{item.is_fall ? tr("跌倒", "Fall") : tr("非跌倒", "Non-fall")}</span>
+              {isAdmin && <button onClick={() => void toggleConcept(item)}>{tr("恢复", "Restore")}</button>}
+            </div>)}</details>}
       {isAdmin && editCode && <div className="synthetic-form synthetic-concept-edit">
         <strong>{tr("编辑", "Edit")} {editCode}</strong>
         <input aria-label={tr("概念名称", "Concept name")} value={editName}
@@ -126,11 +152,16 @@ export function SyntheticLabelManagement({isAdmin, section}: {
         <button disabled={!editName.trim()} onClick={updateConcept}>{tr("保存概念", "Save concept")}</button>
         <button onClick={() => setEditCode("")}>{tr("取消", "Cancel")}</button>
       </div>}
-      {isAdmin && <div className="synthetic-form">
-        <input value={code} onChange={event => setCode(event.target.value)} placeholder="code" />
-        <input value={name} onChange={event => setName(event.target.value)} placeholder={tr("名称", "Name")} />
-        <label><input type="checkbox" checked={isFall} onChange={event => setIsFall(event.target.checked)} />{tr("跌倒", "Fall")}</label>
-        <button disabled={!code || !name} onClick={addConcept}>{tr("新增动捕概念", "Add motion concept")}</button>
+      {isAdmin && <div className="synthetic-form synthetic-concept-create">
+        <strong>{tr("新增专用标签", "Add synthetic-only label")}</strong>
+        <label>{tr("标签类型", "Label type")}<select value={isFall ? "fall" : "non_fall"}
+          onChange={event => setIsFall(event.target.value === "fall")}>
+          <option value="non_fall">{tr("非跌倒", "Non-fall")}</option>
+          <option value="fall">{tr("跌倒", "Fall")}</option>
+        </select></label>
+        <label>{tr("稳定 code", "Stable code")}<input value={code} onChange={event => setCode(event.target.value)} placeholder="code" /></label>
+        <label>{tr("显示名称", "Display name")}<input value={name} onChange={event => setName(event.target.value)} placeholder={tr("名称", "Name")} /></label>
+        <button disabled={!code || !name} onClick={addConcept}>{tr("新增专用标签", "Add synthetic-only label")}</button>
       </div>}
     </>}
     {section === "mappings" && <>

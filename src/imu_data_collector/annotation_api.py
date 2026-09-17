@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import binascii
 import logging
 import re
 import threading
@@ -94,6 +96,11 @@ def create_annotation_app(
                 result = service.refresh()
                 if result["imported"] or result["skipped"]:
                     logger.info("后台刷新录制索引：%s", result)
+                while not refresh_stop.is_set() and service.backfill_review_index(100):
+                    refresh_stop.wait(0.1)
+                synthetic = getattr(app.state, "synthetic_review_service", None)
+                if synthetic is not None:
+                    synthetic.refresh_index()
             except Exception:
                 logger.exception("后台刷新录制索引失败，继续使用已有 catalog")
             refresh_stop.wait(interval)
@@ -214,6 +221,166 @@ def create_annotation_app(
         if active.annotation.synthetic_run_id else None,
         active.annotation.catalog_path.with_name("synthetic-catalog.sqlite3")
         if active.annotation.synthetic_run_id else None)
+
+    def work_domain(value: str):
+        if value == "real":
+            return service.catalog
+        if value == "synthetic":
+            synthetic = getattr(app.state, "synthetic_review_service", None)
+            if synthetic is not None and synthetic.catalog is not None:
+                synthetic.refresh_index()
+                return synthetic.catalog
+        raise HTTPException(status_code=404, detail="该数据域不可用")
+
+    @app.get("/api/v1/work-items")
+    def work_items(request: Request) -> dict[str, Any]:
+        actor = current_actor(request)
+        params = request.query_params
+        domain = params.get("domain", "real")
+        view = params.get("view", "mine")
+        search = params.get("search", "").strip()[:120]
+        group = params.get("group", "").strip()[:160]
+        status = params.get("status", "").strip()
+        risk = params.get("risk", "").strip()
+        label_state = params.get("label_state", "").strip()
+        tier = params.get("tier", "").strip()
+        if view not in {"mine", "claimable", "completed", "all"} \
+                or label_state not in {"", "pending", "labeled"}:
+            raise HTTPException(status_code=422, detail="列表筛选无效")
+        try:
+            limit = max(1, min(100, int(params.get("limit", "50"))))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="分页参数无效") from error
+        signature = [domain, view, search, group, status, risk, label_state, tier]
+        before = None
+        if params.get("cursor"):
+            try:
+                raw = base64.urlsafe_b64decode(params["cursor"] + "===")
+                value = json.loads(raw)
+                if value["filters"] != signature or not isinstance(value["before"], list):
+                    raise ValueError("Cursor filter mismatch")
+                before = tuple(value["before"])
+            except (ValueError, KeyError, TypeError, binascii.Error) as error:
+                raise HTTPException(status_code=422, detail="分页游标无效") from error
+        catalog = work_domain(domain)
+        if domain == "real":
+            if status not in {"", "unassigned", "in_progress", "completed"} \
+                    or tier not in {"", "test", "prod"} or risk or label_state:
+                raise HTTPException(status_code=422, detail="真实录制筛选无效")
+            if before and (len(before) != 2 or any(not isinstance(v, str) for v in before)):
+                raise HTTPException(status_code=422, detail="分页游标无效")
+            rows, total = catalog.work_items(
+                actor=actor.unikey, view=view, search=search, collection=group,
+                tier=tier, status=status, limit=limit + 1, before=before)
+            items = [{
+                "key": "real:" + row["recording_id"], "domain": "real",
+                "item_id": row["recording_id"], "version_id": None,
+                "title": row["participant_id"] or "待确认身份",
+                "source": "真实 IMU", "group": row["collection_id"],
+                "status": "indexing" if row["review_generation"] < 0 else row["workflow_state"],
+                "stage": "annotation", "label_state": None, "risk": None,
+                "assignee": row["annotator_id"],
+                "duration_s": (row["duration_ns"] or 0) / 1e9,
+                "published_at_utc": row["captured_at_utc"],
+                "indexed_at_utc": row["review_indexed_at_utc"],
+                "claim_paused": bool(row["claim_paused"]),
+            } for row in rows[:limit]]
+            last = rows[limit - 1] if len(rows) > limit else None
+            cursor_values = [last["captured_at_utc"], last["recording_id"]] if last else None
+        else:
+            if status not in {"", "unreviewed", "pass", "reject"} \
+                    or risk not in {"", "high", "ordinary", "unknown"} or tier:
+                raise HTTPException(status_code=422, detail="合成片段筛选无效")
+            if before and (len(before) != 3 or any(not isinstance(v, str) for v in before)):
+                raise HTTPException(status_code=422, detail="分页游标无效")
+            rows, total = catalog.work_items(
+                actor=actor.unikey, view=view, search=search, source=group,
+                risk=risk, status=status, label_state=label_state,
+                limit=limit + 1, before=before)
+            indexed_at = catalog.summary()["indexed_at_utc"]
+            items = [{
+                "key": "synthetic:" + row["candidate_id"] + "/" + row["version_id"],
+                "domain": "synthetic", "item_id": row["candidate_id"],
+                "version_id": row["version_id"],
+                "title": row["source_member"].rsplit("/", 1)[-1],
+                "source": row["source_dataset"], "group": row["source_dataset"],
+                "status": row["decision"],
+                "stage": "quality" if row["decision"] == "unreviewed" else
+                    "label" if row["decision"] == "pass" and not row["effective_label_code"]
+                    else "done",
+                "label_state": "labeled" if row["effective_label_code"] else "pending",
+                "risk": row["risk_tier"], "assignee": None, "duration_s": None,
+                "published_at_utc": row["published_at_utc"],
+                "indexed_at_utc": indexed_at,
+                "claim_paused": bool(row["claim_paused"]),
+                "warning_flags": json.loads(row["warning_flags"] or "[]"),
+            } for row in rows[:limit]]
+            last = rows[limit - 1] if len(rows) > limit else None
+            cursor_values = [last["published_at_utc"], last["candidate_id"],
+                             last["version_id"]] if last else None
+        next_cursor = None
+        if cursor_values:
+            next_cursor = base64.urlsafe_b64encode(json.dumps(
+                {"filters": signature, "before": cursor_values},
+                separators=(",", ":")).encode()).decode().rstrip("=")
+        return {"items": items, "total": total, "next_cursor": next_cursor,
+                "limit": limit}
+
+    @app.get("/api/v1/work-items/groups")
+    def work_item_groups(request: Request) -> dict[str, Any]:
+        current_actor(request)
+        domain = request.query_params.get("domain", "real")
+        catalog = work_domain(domain)
+        return {"groups": catalog.collections() if domain == "real" else catalog.sources()}
+
+    @app.get("/api/v1/work-items/progress")
+    def work_item_progress(request: Request) -> dict[str, Any]:
+        current_actor(request)
+        domain = request.query_params.get("domain", "real")
+        catalog = work_domain(domain)
+        return catalog.index_progress() if domain == "real" else catalog.summary()
+
+    @app.post("/api/v1/work-items/claim-pause")
+    def work_item_claim_pause(body: dict, request: Request) -> dict[str, Any]:
+        actor = admin_actor(request)
+        domain = body.get("domain")
+        group = body.get("group")
+        paused = body.get("paused")
+        if not isinstance(group, str) or not group.strip() or len(group) > 160 \
+                or type(paused) is not bool:
+            raise HTTPException(status_code=422, detail="批次暂停参数无效")
+        try:
+            work_domain(domain).set_claim_paused(group, paused, actor.unikey)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="找不到该来源或批次") from error
+        return {"domain": domain, "group": group, "paused": paused}
+
+    @app.get("/api/v1/recordings/queue-preview")
+    def recording_queue_preview(request: Request) -> dict[str, Any]:
+        actor = current_actor(request)
+        seen: set[str] = set()
+        rows = []
+        for view, limit in (("mine", 30), ("claimable", 40), ("completed", 20), ("all", 10)):
+            page, _ = service.catalog.work_items(actor=actor.unikey, view=view, limit=limit)
+            for row in page:
+                if row["recording_id"] not in seen:
+                    seen.add(row["recording_id"])
+                    rows.append({
+                        "recording_id": row["recording_id"],
+                        "collection_id": row["collection_id"],
+                        "participant_id": row["participant_id"],
+                        "participant_status": row["participant_status"],
+                        "workflow_state": row["workflow_state"],
+                        "annotator_id": row["annotator_id"],
+                        "data_tier": row["data_tier"], "state": "published",
+                        "started_at_utc": row["captured_at_utc"],
+                        "duration_ns": row["duration_ns"], "issues": [],
+                        "upload_state": "published",
+                        "purpose": "calibration_evidence"
+                            if row["recording_id"] in service.calibration_recording_ids
+                            else "annotation",
+                    })
+        return {"recordings": rows, "preview_limit": 100}
 
     @app.get("/api/v1/device-config/snapshots")
     def device_configuration_snapshots(request: Request) -> dict[str, Any]:

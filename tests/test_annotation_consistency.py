@@ -366,6 +366,38 @@ def _publish_calibrated_recording(
     return recording_id
 
 
+def test_unified_real_work_queue_tracks_claim_and_batch_pause(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    app = create_annotation_app(settings, store)
+    service = app.state.annotation_service
+    assert service.refresh()["imported"] == 1
+    with TestClient(app) as client:
+        base = "/api/v1/work-items?domain=real"
+        claimable = client.get(base + "&view=claimable")
+        assert claimable.status_code == 200
+        assert claimable.json()["total"] == 1
+        assert claimable.json()["items"][0]["item_id"] == recording_id
+        assert client.get(base + "&view=all&search=xfan0282").json()["total"] == 1
+        assert client.get("/api/v1/recordings/queue-preview").json()["recordings"][0][
+            "recording_id"] == recording_id
+        pause = client.post("/api/v1/work-items/claim-pause", json={
+            "domain": "real", "group": "pilot", "paused": True})
+        assert pause.status_code == 200
+        assert client.get(base + "&view=claimable").json()["total"] == 0
+        with pytest.raises(ValueError, match="暂停新领取"):
+            service.update_workflow(recording_id, AnnotationReviewWorkflowRequest(
+                action="assign", expected_revision=0), "xfan0282")
+        assert client.post("/api/v1/work-items/claim-pause", json={
+            "domain": "real", "group": "pilot", "paused": False}).status_code == 200
+        service.update_workflow(recording_id, AnnotationReviewWorkflowRequest(
+            action="assign", expected_revision=0), "xfan0282")
+        assert client.get(base + "&view=mine").json()["total"] == 1
+
+
 def _ready_review(service, recording_id: str) -> None:
     manifest = service.required_manifest(recording_id)
     review, generation = service.reviews.load(manifest)

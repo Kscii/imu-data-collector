@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import Plot from "./Plot";
 import { tr } from "./i18n";
+import { extremumIndices } from "./syntheticTraceSampling";
 
 type ArraySpec = {path: string; dtype: string; shape: number[]};
 type Manifest = {
@@ -10,9 +12,6 @@ type Manifest = {
 type ChartData = {manifest: Manifest; force: Float32Array; gyro: Float32Array;
   samples: number; mounts: number};
 export type IMUReadout = {sensor: string; time_s: number; force: number; gyro: number};
-
-const colorForce = "#38bdf8";
-const colorGyro = "#f472b6";
 
 async function loadChart(base: string, signal: AbortSignal): Promise<ChartData> {
   const root = `${base}/files/`;
@@ -37,17 +36,6 @@ async function loadChart(base: string, signal: AbortSignal): Promise<ChartData> 
   return {manifest, force, gyro, samples: a.shape[0], mounts: a.shape[1]};
 }
 
-function magnitudes(data: ChartData, mount: number) {
-  const force = new Float32Array(data.samples);
-  const gyro = new Float32Array(data.samples);
-  for (let i = 0; i < data.samples; i++) {
-    const offset = (i * data.mounts + mount) * 3;
-    force[i] = Math.hypot(data.force[offset], data.force[offset + 1], data.force[offset + 2]);
-    gyro[i] = Math.hypot(data.gyro[offset], data.gyro[offset + 1], data.gyro[offset + 2]);
-  }
-  return {force, gyro};
-}
-
 export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect}: {
   base: string; cursorFrame: number; onSeek: (frame: number) => void;
   onReady: (ready: boolean) => void; onInspect: (value: IMUReadout | null) => void;
@@ -55,150 +43,58 @@ export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect
   const [data, setData] = useState<ChartData | null>(null);
   const [error, setError] = useState("");
   const [mount, setMount] = useState(0);
-  const [zoom, setZoom] = useState<[number, number] | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const drag = useRef<number | null>(null);
-  const drawRef = useRef<() => void>(() => undefined);
   const onReadyRef = useRef(onReady);
-  onReadyRef.current = onReady;
   const onInspectRef = useRef(onInspect);
+  onReadyRef.current = onReady;
   onInspectRef.current = onInspect;
 
   useEffect(() => {
     const controller = new AbortController();
-    setData(null); setError(""); setMount(0); setZoom(null); setExpanded(false);
-    onReadyRef.current(false);
-    onInspectRef.current(null);
+    setData(null); setError(""); setMount(0);
+    onReadyRef.current(false); onInspectRef.current(null);
     void loadChart(base, controller.signal).then(value => {
-      setData(value);
-      onReadyRef.current(true);
+      setData(value); onReadyRef.current(true);
     }).catch(reason => {
       if (controller.signal.aborted) return;
-      setError(String(reason));
-      onReadyRef.current(false);
+      setError(String(reason)); onReadyRef.current(false);
     });
     return () => controller.abort();
   }, [base]);
 
-  useEffect(() => {
-    if (!expanded) return;
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.stopPropagation(); setExpanded(false); }
-    };
-    window.addEventListener("keydown", close, true);
-    return () => window.removeEventListener("keydown", close, true);
-  }, [expanded]);
-
-  const values = useMemo(() => data ? magnitudes(data, mount) : null, [data, mount]);
-  const bounds: [number, number] = zoom ?? [0, data ? data.samples - 1 : 1];
   const cursorSample = data ? Math.max(0, Math.min(data.samples - 1,
     Math.round(cursorFrame * data.manifest.frame_period_s * data.manifest.sensor_rate_hz))) : 0;
   useEffect(() => {
-    if (!data || !values) return;
+    if (!data) return;
     const sensor = data.manifest.layout.mounts[mount];
+    const offset = (cursorSample * data.mounts + mount) * 3;
     onInspectRef.current({
       sensor: sensor?.sensor_id ?? sensor?.mount_id ?? sensor?.joint ?? `IMU ${mount + 1}`,
       time_s: cursorSample / data.manifest.sensor_rate_hz,
-      force: values.force[cursorSample], gyro: values.gyro[cursorSample],
+      force: Math.hypot(data.force[offset], data.force[offset + 1], data.force[offset + 2]),
+      gyro: Math.hypot(data.gyro[offset], data.gyro[offset + 1], data.gyro[offset + 2]),
     });
-  }, [data, values, cursorSample, mount]);
+  }, [data, cursorSample, mount]);
 
-  drawRef.current = () => {
-    const surface = canvas.current;
-    if (!surface || !data || !values) return;
-    const rect = surface.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const ratio = devicePixelRatio || 1;
-    surface.width = Math.round(rect.width * ratio);
-    surface.height = Math.round(rect.height * ratio);
-    const context = surface.getContext("2d");
-    if (!context) return;
-    context.scale(ratio, ratio);
-    const width = rect.width; const height = rect.height;
-    const left = 52; const right = width - 16;
-    const laneHeight = (height - 30) / 2;
-    context.fillStyle = "#07101d"; context.fillRect(0, 0, width, height);
-    context.font = "11px system-ui";
-    const lanes = [
-      {array: values.force, color: colorForce, top: 4, label: "m/s²"},
-      {array: values.gyro, color: colorGyro, top: laneHeight + 16, label: "rad/s"},
-    ];
-    for (const lane of lanes) {
-      const bottom = lane.top + laneHeight - 7;
-      let peak = 0;
-      for (let i = bounds[0]; i <= bounds[1]; i++) peak = Math.max(peak, lane.array[i]);
-      peak = Math.max(peak, .001);
-      context.strokeStyle = "#263753"; context.lineWidth = 1;
-      context.beginPath(); context.moveTo(left, bottom); context.lineTo(right, bottom);
-      context.stroke();
-      context.fillStyle = "#9eb0c8";
-      context.fillText(lane.label, 6, lane.top + 13);
-      context.fillText(peak.toFixed(1), 6, lane.top + 29);
-      context.strokeStyle = lane.color; context.lineWidth = 1.25;
-      context.beginPath();
-      const pixels = Math.max(1, Math.floor(right - left));
-      for (let x = 0; x < pixels; x++) {
-        const start = Math.min(bounds[1], bounds[0] + Math.floor(
-          x / pixels * (bounds[1] - bounds[0] + 1)));
-        const stop = Math.min(bounds[1] + 1, bounds[0] + Math.ceil(
-          (x + 1) / pixels * (bounds[1] - bounds[0] + 1)));
-        let minimum = Infinity; let maximum = 0;
-        for (let i = start; i < Math.max(start + 1, stop); i++) {
-          minimum = Math.min(minimum, lane.array[i]);
-          maximum = Math.max(maximum, lane.array[i]);
-        }
-        const y1 = bottom - minimum / peak * (laneHeight - 28);
-        const y2 = bottom - maximum / peak * (laneHeight - 28);
-        context.moveTo(left + x, y1); context.lineTo(left + x, y2);
-      }
-      context.stroke();
-    }
-    const second = (index: number) => (index / data.manifest.sensor_rate_hz).toFixed(1);
-    context.fillStyle = "#9eb0c8";
-    context.fillText(`${second(bounds[0])} s`, left, height - 3);
-    context.fillText(`${second(bounds[1])} s`, Math.max(left, right - 55), height - 3);
-    if (cursorSample >= bounds[0] && cursorSample <= bounds[1]) {
-      const x = left + (cursorSample - bounds[0]) / Math.max(1, bounds[1] - bounds[0]) * (right - left);
-      context.strokeStyle = "#facc15"; context.lineWidth = 2;
-      context.beginPath(); context.moveTo(x, 4); context.lineTo(x, height - 18); context.stroke();
-    }
-  };
-  useEffect(() => { drawRef.current(); }, [data, values, zoom, cursorFrame, expanded]);
-  useEffect(() => {
-    if (!canvas.current) return;
-    const observer = new ResizeObserver(() => drawRef.current());
-    observer.observe(canvas.current);
-    return () => observer.disconnect();
-  }, [data]);
-
-  const sampleAt = (clientX: number) => {
-    if (!canvas.current || !data) return 0;
-    const rect = canvas.current.getBoundingClientRect();
-    const fraction = Math.max(0, Math.min(1, (clientX - rect.left - 52) / (rect.width - 68)));
-    return Math.round(bounds[0] + fraction * (bounds[1] - bounds[0]));
-  };
-  const finishDrag = (clientX: number) => {
-    if (drag.current === null || !data) return;
-    const first = drag.current;
-    drag.current = null;
-    if (Math.abs(clientX - first) > 12) {
-      const start = sampleAt(Math.min(first, clientX));
-      const end = sampleAt(Math.max(first, clientX));
-      if (end - start > 2) setZoom([start, end]);
-    } else {
-      onSeek(Math.round(sampleAt(clientX) / data.manifest.sensor_rate_hz
-        / data.manifest.frame_period_s));
-    }
+  const traces = useMemo(() => {
+    if (!data) return null;
+    const indices = extremumIndices(data.force, data.gyro, data.samples, data.mounts, mount);
+    return {
+      time: indices.map(index => index / data.manifest.sensor_rate_hz),
+      values: indices.map(index => {
+        const offset = (index * data.mounts + mount) * 3;
+        return [data.force[offset], data.force[offset + 1], data.force[offset + 2],
+          data.gyro[offset], data.gyro[offset + 1], data.gyro[offset + 2]];
+      }),
+    };
+  }, [data, mount]);
+  const selectTime = (time: number) => {
+    if (data) onSeek(Math.round(time / data.manifest.frame_period_s));
   };
   const name = data?.manifest.layout.mounts[mount];
-  return <section className={`synthetic-chart ${expanded ? "synthetic-chart-expanded" : ""}`}>
+  return <section className="synthetic-chart synthetic-six-axis">
     <div className="synthetic-chart-header">
-      <strong>{tr("IMU 曲线", "IMU traces")}</strong>
-      {data && <span className="synthetic-chart-legend">
-        <b style={{color: colorForce}}>●</b> {tr("比力幅值", "Specific force")} ·
-        <b style={{color: colorGyro}}> ●</b> {tr("角速度幅值", "Angular velocity")}
-      </span>}
+      <strong>{tr("IMU 六轴 · 全片段", "Six-axis IMU · full clip")}</strong>
+      <span>{tr("点击曲线定位播放", "Click a trace to seek")}</span>
       {data && data.mounts > 1 && <select aria-label={tr("传感器", "Sensor")}
         value={mount} onChange={event => setMount(Number(event.target.value))}>
         {Array.from({length: data.mounts}, (_, index) => <option key={index} value={index}>
@@ -208,17 +104,25 @@ export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect
         </option>)}
       </select>}
       {data && <span className="synthetic-chart-sensor">{name?.sensor_id ?? name?.joint ?? "IMU 1"}</span>}
-      <button disabled={!zoom} onClick={() => setZoom(null)}>{tr("全段", "Fit all")}</button>
-      <button onClick={() => setExpanded(value => !value)}>
-        {expanded ? tr("收起", "Close") : tr("放大曲线", "Expand chart")}</button>
     </div>
-    {data ? <canvas ref={canvas} onPointerDown={event => {
-      drag.current = event.clientX; event.currentTarget.setPointerCapture(event.pointerId);
-    }} onPointerUp={event => finishDrag(event.clientX)}
-      aria-label={tr("IMU 曲线：点击定位，拖动选择时间段", "IMU traces: click to seek, drag to zoom")} />
-      : <div className="synthetic-chart-empty">{error
-        ? tr("独立曲线不可用，预览窗口内的小曲线仍可查看。", "Chart unavailable; use the preview's small chart.")
-        : tr("正在读取 IMU 曲线…", "Loading IMU traces…")}</div>}
+    {traces && data ? <div className="synthetic-combined-trace">
+      <div className="synthetic-trace-legend">
+        <span>{tr("左轴：比力 m/s²", "Left: force m/s²")}</span>
+        <span style={{color: "#ef4444"}}>ax</span><span style={{color: "#22c55e"}}>ay</span>
+        <span style={{color: "#3b82f6"}}>az</span>
+        <span>{tr("右轴：角速度 rad/s", "Right: angular rate rad/s")}</span>
+        <span style={{color: "#f59e0b"}}>gx</span><span style={{color: "#a855f7"}}>gy</span>
+        <span style={{color: "#06b6d4"}}>gz</span>
+      </div>
+      <Plot time={traces.time} values={traces.values}
+        cursorTime={cursorSample / data.manifest.sensor_rate_hz} controlledCursor
+        seriesLabels={["ax", "ay", "az", "gx", "gy", "gz"]}
+        splitAfter={3} height={190} showReadout={false}
+        showMarkerKey={false} cursorColor="#facc15" scrubOnDrag snapSelection={false}
+        onSelectTime={selectTime} />
+    </div> : <div className="synthetic-chart-empty">{error
+      ? tr("IMU 曲线读取失败，请检查片段文件。", "IMU traces failed to load; check the clip files.")
+      : tr("正在读取六轴 IMU 曲线…", "Loading six-axis IMU traces…")}</div>}
     {error && <small title={error}>{tr("读取失败", "Load failed")}</small>}
   </section>;
 }

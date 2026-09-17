@@ -157,7 +157,8 @@ class AnnotationService:
         self.catalog = AnnotationCatalog(settings.annotation.catalog_path)
         self.cache_root = settings.storage.cache_root
         self.cache_root.mkdir(parents=True, exist_ok=True)
-        self.reviews = AnnotationReviewStore(store, self.taxonomy)
+        self.reviews = AnnotationReviewStore(store, self.taxonomy,
+                                             on_change=self.catalog.index_review)
         self.device_configurations = DeviceConfigurationStore(store)
         self._release_delete_lock = threading.RLock()
         self._delivery_job_lock = threading.RLock()
@@ -651,6 +652,7 @@ class AnnotationService:
                         )
                     self._verify_manifest_objects(manifest)
                     self.catalog.upsert(manifest, generation)
+                    self.reviews.load(manifest)
                     self._write_receipt(
                         recording_id,
                         generation,
@@ -726,6 +728,15 @@ class AnnotationService:
 
     def list_recordings(self) -> list[CaptureManifestV2]:
         return self.catalog.list()
+
+    def backfill_review_index(self, limit: int = 100) -> int:
+        """Bounded background catch-up for pre-existing recordings."""
+        pending = self.catalog.pending_review_ids(limit)
+        for recording_id in pending:
+            manifest = self.catalog.get(recording_id)
+            if manifest is not None:
+                self.reviews.load(manifest)
+        return len(pending)
 
     def recording_summary(self, manifest: CaptureManifestV2) -> dict[str, Any]:
         """把不可变 manifest 投影成前端共用的轻量录制摘要。"""
@@ -1467,6 +1478,10 @@ class AnnotationService:
         def update(review: ReviewDocument) -> ReviewDocument:
             workflow = review.workflow
             action = request.action
+            if action in {"assign", "reopen"} and self.catalog.claim_paused(
+                manifest.collection_id
+            ) and (action == "reopen" or workflow.annotator_id != actor_id):
+                raise ValueError("该批次已暂停新领取")
             if action == "assign":
                 if workflow.state not in {
                     ReviewWorkflowState.UNASSIGNED,

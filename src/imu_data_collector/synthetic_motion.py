@@ -84,6 +84,16 @@ REJECTION_CODES = {
 
 VIEWER_BRIDGE = b"""<script>
 (() => {
+  if (parent === window) return;
+  const version = 2;
+  const report = () => {
+    const slider = document.querySelector('#time');
+    parent.postMessage({type: 'imu-synthetic-review-ready', version,
+      frame: slider ? Number(slider.value) : 0,
+      maxFrame: slider ? Number(slider.max) : 0}, location.origin);
+  };
+  report();
+  addEventListener('load', report);
   const keys = new Set([' ', 'r', 'R', 'n', 'N', 'p', 'P', 'x', 'X', 's', 'S']);
   document.addEventListener('wheel', event => {
     if (event.target.closest('#view')) event.preventDefault();
@@ -128,6 +138,7 @@ VIEWER_BRIDGE = b"""<script>
       parent.postMessage({type: 'imu-synthetic-review-frame', frame}, location.origin);
     }
   }, 80);
+  setInterval(report, 1000);
   setTimeout(() => {
     if (window.__imuReviewViewerVersion) return;
     document.querySelector('#view canvas')?.dispatchEvent(new WheelEvent('wheel', {
@@ -221,6 +232,16 @@ class SyntheticReviewService:
         except FileNotFoundError:
             return None
 
+    def refresh_index(self, label_catalog: dict | None = None) -> None:
+        if self.catalog is None:
+            return
+        refresh = self.catalog.refresh(self.store, self.prefix, self._commit,
+                                       minimum_interval_s=10)
+        if self.labels:
+            self.catalog.reindex_labels(label_catalog or self.labels.catalog(),
+                                        self.labels.active_label,
+                                        force=refresh["new"] > 0)
+
     def list_candidates(self, *, decision: str = "all", search: str = "",
                         high_risk: bool = False, limit: int | None = None,
                         offset: int = 0, label_state: str | None = None) -> list[dict]:
@@ -229,14 +250,13 @@ class SyntheticReviewService:
         result = []
         label_catalog = self.labels.catalog() if self.labels else None
         if self.catalog:
-            self.catalog.refresh(self.store, self.prefix, self._commit)
+            self.refresh_index(label_catalog)
             source = [(row["commit"], row["review"], row["label"], False,
                        row["decision"], row["revision"])
                       for row in self.catalog.rows(
                           decision=decision, search=search, high_risk=high_risk,
-                          limit=(1_000_000_000 if label_state else
-                                 (limit or 1_000_000_000)),
-                          offset=0 if label_state else offset)]
+                          label_state=label_state,
+                          limit=limit or 1_000_000_000, offset=offset)]
         else:
             source = []
             prefix = self.prefix + "/candidates/"
@@ -261,7 +281,7 @@ class SyntheticReviewService:
                 continue
             if high_risk and commit.get("risk_tier") != "high":
                 continue
-            if search and search.lower() not in (
+            if search and not self.catalog and search.lower() not in (
                     f"{candidate_id} {commit['source_dataset']} {commit['source_member']}".lower()):
                 continue
             result.append({
@@ -283,8 +303,6 @@ class SyntheticReviewService:
             result = [row for row in result if (row["label"] is None)
                       == (label_state == "pending")]
         if self.catalog:
-            if label_state:
-                return result[offset:offset + limit if limit is not None else None]
             return result
         return sorted(result, key=lambda row: (row["source_dataset"], row["candidate_id"]))[
             offset:offset + limit if limit is not None else None]
@@ -293,7 +311,7 @@ class SyntheticReviewService:
               high_risk: bool = False) -> list[dict]:
         if self.catalog is None:
             raise ValueError("Synthetic queue is unavailable")
-        self.catalog.refresh(self.store, self.prefix, self._commit)
+        self.refresh_index()
         label_catalog = self.labels.catalog() if self.labels else None
         claimed = self.catalog.claim(actor, batch_size=batch_size,
                                      search=search, high_risk=high_risk)
@@ -322,7 +340,7 @@ class SyntheticReviewService:
         if self.catalog is None:
             raise ValueError("Synthetic queue is unavailable")
         self._identity(body.candidate_id, body.version_id)
-        self.catalog.refresh(self.store, self.prefix, self._commit)
+        self.refresh_index()
         pointer = self.latest(body.candidate_id, body.version_id)
         if pointer is None or pointer["decision"] not in ("pass", "reject") \
                 or pointer["revision"] != body.expected_revision:
@@ -474,7 +492,7 @@ class SyntheticReviewService:
 
     def _mapping_commits(self):
         if self.catalog:
-            self.catalog.refresh(self.store, self.prefix, self._commit)
+            self.refresh_index()
             return (row["commit"] for row in self.catalog.rows(limit=1_000_000_000))
         return (self._commit(row["candidate_id"], row["version_id"])
                 for row in self.list_candidates())
@@ -712,21 +730,27 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
     @app.get("/api/v1/synthetic/summary")
     def synthetic_summary(request: Request):
         current_actor(request)
-        rows = service.list_candidates()
-        return {
-            "published": len(rows),
-            "unreviewed": sum(row["decision"] == "unreviewed" for row in rows),
-            "passed": sum(row["decision"] == "pass" for row in rows),
-            "rejected": sum(row["decision"] == "reject" for row in rows),
-            "snapshot_eligible": sum(row["decision"] == "pass" and row["label"] is not None
+        if service.catalog:
+            service.refresh_index()
+            result = service.catalog.summary()
+        else:
+            rows = service.list_candidates()
+            result = {
+                "published": len(rows),
+                "unreviewed": sum(row["decision"] == "unreviewed" for row in rows),
+                "passed": sum(row["decision"] == "pass" for row in rows),
+                "rejected": sum(row["decision"] == "reject" for row in rows),
+                "snapshot_eligible": sum(row["decision"] == "pass" and row["label"] is not None
+                                         for row in rows),
+                "label_pending": sum(row["decision"] == "pass" and row["label"] is None
                                      for row in rows),
-            "label_pending": sum(row["decision"] == "pass" and row["label"] is None
-                                 for row in rows),
-            "latest_published_at_utc": max(
-                (row["published_at_utc"] for row in rows), default=None),
-            "read_only": bool(getattr(service.store, "read_only", False)),
-            "preview_mode": getattr(service.store, "preview_mode", None),
-        }
+                "latest_published_at_utc": max(
+                    (row["published_at_utc"] for row in rows), default=None),
+                "indexed_at_utc": None,
+            }
+        return {**result,
+                "read_only": bool(getattr(service.store, "read_only", False)),
+                "preview_mode": getattr(service.store, "preview_mode", None)}
 
     @app.get("/api/v1/synthetic/rejection-reasons")
     def synthetic_rejection_reasons(request: Request):
@@ -846,14 +870,15 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
         current_actor(request)
         try:
             payload, media_type = service.file(candidate_id, version_id, filename)
-            if filename == "index.html":
+            if filename == "index.html" and request.query_params.get("bridge") == "2":
                 payload = payload.replace(
                     b"</head>",
-                    b"<style>#panel > .row:nth-of-type(n+3){display:none}</style></head>",
+                    b"<style>#panel{display:none!important}</style></head>",
                 )
                 payload = payload.replace(b"</body>", VIEWER_BRIDGE + b"</body>")
             return Response(content=payload, media_type=media_type,
-                            headers={"Cache-Control": "private, max-age=3600"})
+                            headers={"Cache-Control": "private, no-store" if filename == "index.html"
+                                     else "private, max-age=3600"})
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="找不到审核载荷") from error
         except ValueError as error:

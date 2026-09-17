@@ -20,6 +20,12 @@ type Props = {
   seriesLabels?: string[];
   seriesColors?: string[];
   showReadout?: boolean;
+  cursorColor?: string;
+  scrubOnDrag?: boolean;
+  snapSelection?: boolean;
+  splitAfter?: number;
+  leftAxisLabel?: string;
+  rightAxisLabel?: string;
   onSelectTime?: (time: number) => void;
   onSelectLabel?: (key: string) => void;
 };
@@ -76,14 +82,21 @@ function fitTimeRange(plot: uPlot, time: number[]) {
   plot.setScale("x", { min: first - padding, max: last + padding });
 }
 
-function fitValueRange(plot: uPlot, values: number[][], axisCount: number) {
-  const finite = values.flatMap((row) => row.slice(0, axisCount)).filter(Number.isFinite);
-  if (!finite.length) return;
-  const minimum = Math.min(...finite);
-  const maximum = Math.max(...finite);
+function fitValueRange(plot: uPlot, values: number[][], start: number,
+                       end: number, scale: string) {
+  let minimum = Infinity;
+  let maximum = -Infinity;
+  for (const row of values) for (let axis = start; axis < end; axis++) {
+    const value = row[axis];
+    if (Number.isFinite(value)) {
+      minimum = Math.min(minimum, value);
+      maximum = Math.max(maximum, value);
+    }
+  }
+  if (!Number.isFinite(minimum)) return;
   const span = maximum - minimum;
   const padding = span > 0 ? span * 0.08 : Math.max(Math.abs(maximum) * 0.05, 1);
-  plot.setScale("y", { min: minimum - padding, max: maximum + padding });
+  plot.setScale(scale, { min: minimum - padding, max: maximum + padding });
 }
 
 function formatPlotValue(value: number | undefined) {
@@ -92,7 +105,7 @@ function formatPlotValue(value: number | undefined) {
   return value.toFixed(3).replace(/\.000$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
 
-export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, seriesLabels = defaultLabels, seriesColors = defaultColors, showReadout = true, onSelectTime, onSelectLabel }: Props) {
+export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, seriesLabels = defaultLabels, seriesColors = defaultColors, showReadout = true, cursorColor = "#f8fafc", scrubOnDrag = false, snapSelection = true, splitAfter, leftAxisLabel, rightAxisLabel, onSelectTime, onSelectLabel }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const onSelectTimeRef = useRef(onSelectTime);
@@ -162,7 +175,8 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
                   const row = currentValues[sampleIndex] ?? [];
                   ctx.setLineDash([]);
                   row.slice(0, 6).forEach((value, axis) => {
-                    const y = u.valToPos(value, "y", true);
+                    const y = u.valToPos(value,
+                      splitAfter !== undefined && axis >= splitAfter ? "gyro" : "y", true);
                     ctx.beginPath();
                     ctx.fillStyle = colorsRef.current[axis] ?? defaultColors[axis % defaultColors.length];
                     ctx.strokeStyle = "#f8fafc";
@@ -184,13 +198,13 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
                   ctx.moveTo(x, bbox.top);
                   ctx.lineTo(x, bbox.top + bbox.height);
                   ctx.stroke();
-                  ctx.strokeStyle = "#f8fafc";
+                  ctx.strokeStyle = cursorColor;
                   ctx.lineWidth = 2.25 * pixelRatio;
                   ctx.beginPath();
                   ctx.moveTo(x, bbox.top);
                   ctx.lineTo(x, bbox.top + bbox.height);
                   ctx.stroke();
-                  ctx.fillStyle = "#38bdf8";
+                  ctx.fillStyle = cursorColor;
                   ctx.beginPath();
                   ctx.moveTo(x, bbox.top + 8 * pixelRatio);
                   ctx.lineTo(x - 6 * pixelRatio, bbox.top);
@@ -205,12 +219,15 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
         },
         axes: [
           { stroke: "#94a3b8", grid: { stroke: "#253046" } },
-          { stroke: "#94a3b8", grid: { stroke: "#253046" } }
+          { stroke: "#94a3b8", grid: { stroke: "#253046" }, label: leftAxisLabel },
+          ...(splitAfter === undefined ? [] : [{ scale: "gyro", side: 1 as const,
+            stroke: "#94a3b8", grid: { show: false }, label: rightAxisLabel }])
         ],
         series: [
           { label: "time" },
           ...seriesLabels.map((label, index) => ({
             label,
+            scale: splitAfter !== undefined && index >= splitAfter ? "gyro" : "y",
             stroke: seriesColors[index] ?? defaultColors[index % defaultColors.length],
             width: 1.4,
             points: { show: false }
@@ -221,14 +238,17 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
       host.current
     );
     fitTimeRange(plot.current, timeRef.current);
-    fitValueRange(plot.current, valuesRef.current, seriesLabels.length);
+    fitValueRange(plot.current, valuesRef.current, 0,
+      splitAfter ?? seriesLabels.length, "y");
+    if (splitAfter !== undefined) fitValueRange(plot.current, valuesRef.current,
+      splitAfter, seriesLabels.length, "gyro");
     const observer = new ResizeObserver(() => {
       if (host.current && plot.current) {
         plot.current.setSize({ width: host.current.clientWidth, height });
       }
     });
     observer.observe(host.current);
-    const select = (event: MouseEvent) => {
+    const select = (event: MouseEvent | PointerEvent) => {
       if (!plot.current || !host.current || !onSelectTimeRef.current) return;
       const bounds = host.current.getBoundingClientRect();
       const relativeX = event.clientX - bounds.left;
@@ -246,16 +266,33 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
       const canvasX = relativeX * uPlot.pxRatio;
       const value = plot.current.posToVal(canvasX, "x", true);
       const sampleIndex = nearestIndex(timeRef.current, value);
-      if (sampleIndex >= 0) onSelectTimeRef.current(timeRef.current[sampleIndex]);
+      if (sampleIndex >= 0) onSelectTimeRef.current(snapSelection
+        ? timeRef.current[sampleIndex] : value);
     };
-    host.current.addEventListener("click", select);
+    let dragging = false;
+    const startDrag = (event: PointerEvent) => {
+      dragging = true; select(event);
+      host.current?.setPointerCapture(event.pointerId);
+    };
+    const moveDrag = (event: PointerEvent) => { if (dragging) select(event); };
+    const stopDrag = () => { dragging = false; };
+    if (scrubOnDrag) {
+      host.current.addEventListener("pointerdown", startDrag);
+      host.current.addEventListener("pointermove", moveDrag);
+      host.current.addEventListener("pointerup", stopDrag);
+      host.current.addEventListener("pointercancel", stopDrag);
+    } else host.current.addEventListener("click", select);
     return () => {
       host.current?.removeEventListener("click", select);
+      host.current?.removeEventListener("pointerdown", startDrag);
+      host.current?.removeEventListener("pointermove", moveDrag);
+      host.current?.removeEventListener("pointerup", stopDrag);
+      host.current?.removeEventListener("pointercancel", stopDrag);
       observer.disconnect();
       plot.current?.destroy();
       plot.current = null;
     };
-  }, [controlledCursor, height, seriesLabels.join("|"), seriesColors.join("|")]);
+  }, [controlledCursor, height, seriesLabels.join("|"), seriesColors.join("|"), cursorColor, scrubOnDrag, snapSelection, splitAfter, leftAxisLabel, rightAxisLabel]);
 
   useEffect(() => {
     if (!plot.current) return;
@@ -263,10 +300,12 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
       plot.current?.setData(alignedData(time, values, seriesLabels.length), true);
       if (plot.current) {
         fitTimeRange(plot.current, time);
-        fitValueRange(plot.current, values, seriesLabels.length);
+        fitValueRange(plot.current, values, 0, splitAfter ?? seriesLabels.length, "y");
+        if (splitAfter !== undefined) fitValueRange(plot.current, values,
+          splitAfter, seriesLabels.length, "gyro");
       }
     });
-  }, [time, values, seriesLabels.length]);
+  }, [time, values, seriesLabels.length, splitAfter]);
 
   useEffect(() => {
     if (!plot.current || cursorTime === undefined || !time.length) return;
