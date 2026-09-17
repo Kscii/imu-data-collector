@@ -82,7 +82,7 @@ benchmark 对象或修改任何 `current.json`。
    `DEPLOY PRODUCTION`；
 3. `回滚生产环境`：输入服务器已存在的 40 位 commit 与 `ROLLBACK PRODUCTION`。
 
-生产部署保持手动门禁；main push 只运行 CI，不自动生成或执行生产部署包。PR 自动运行 CI 可以避免合并破坏。合成运动 dev 前缀先在本地完成真实人工验收；prod 配置和正式上传须另行核对，不能因代码部署而自动开始生产或把 dev 决定带入 prod。
+生产部署保持手动门禁；main push 只运行 CI，不自动生成或执行生产部署包。PR 自动运行 CI 可以避免合并破坏。合成运动代码已部署到现有站点，当前只接入 dev 测试前缀；已登录浏览器的人工检查、真实质量决定与云端快照仍待验收。prod 配置和正式上传须另行核对，不能因代码部署而自动开始生产或把 dev 决定带入 prod。若要回滚到不识别 `annotation.synthetic_*` 的旧版，先恢复部署前备份的私有配置，再运行代码回滚。
 仓库 Variables：
 
 ```text
