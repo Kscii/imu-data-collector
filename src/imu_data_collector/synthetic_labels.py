@@ -20,9 +20,11 @@ RULE_ORIGINS = {"babel-1.0", "stageii-source-member"}
 class SyntheticLabelRegistry:
     KEY = "taxonomies/motion-actions/current.json"
 
-    def __init__(self, store: ObjectStore, real_taxonomies) -> None:
+    def __init__(self, store: ObjectStore, real_taxonomies,
+                 key: str | None = None) -> None:
         self.store = store
         self.real_taxonomies = real_taxonomies
+        self.KEY = key or self.KEY
         try:
             store.read_json(self.KEY)
         except FileNotFoundError:

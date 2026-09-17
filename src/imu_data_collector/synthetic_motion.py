@@ -150,13 +150,20 @@ VIEWER_BRIDGE = b"""<script>
 
 
 class SyntheticReviewService:
-    def __init__(self, store: ObjectStore, run_id: str,
+    def __init__(self, store: ObjectStore, run_id: str | None,
                  labels: SyntheticLabelRegistry | None = None,
-                 catalog_path: Path | None = None):
-        if not SAFE_ID.fullmatch(run_id):
+                 catalog_path: Path | None = None, target: str = "dev"):
+        if target not in {"dev", "prod"}:
+            raise ValueError("Invalid synthetic target")
+        if target == "dev" and (not isinstance(run_id, str)
+                                or not SAFE_ID.fullmatch(run_id)):
             raise ValueError("Invalid synthetic run ID")
+        if target == "prod" and run_id is not None:
+            raise ValueError("Production synthetic target has no run ID")
         self.store = store
-        self.prefix = f"synthetic-motion/dev/{run_id}/v1"
+        self.target = target
+        self.prefix = (f"synthetic-motion/dev/{run_id}/v1" if target == "dev"
+                       else "synthetic-motion/prod/v1")
         self.labels = labels
         self.catalog = SyntheticCatalog(catalog_path) if catalog_path else None
 
@@ -244,23 +251,39 @@ class SyntheticReviewService:
 
     def list_candidates(self, *, decision: str = "all", search: str = "",
                         high_risk: bool = False, limit: int | None = None,
-                        offset: int = 0, label_state: str | None = None) -> list[dict]:
+                        offset: int = 0, label_state: str | None = None,
+                        exact: tuple[str, str] | None = None) -> list[dict]:
         if label_state not in (None, "pending", "labeled"):
             raise ValueError("Invalid label state")
         result = []
         label_catalog = self.labels.catalog() if self.labels else None
         if self.catalog:
             self.refresh_index(label_catalog)
+            if exact:
+                try:
+                    rows = [self.catalog.get(*exact)]
+                except FileNotFoundError:
+                    rows = []
+            else:
+                rows = self.catalog.rows(
+                    decision=decision, search=search, high_risk=high_risk,
+                    label_state=label_state,
+                    limit=limit or 1_000_000_000, offset=offset)
             source = [(row["commit"], row["review"], row["label"], False,
-                       row["decision"], row["revision"])
-                      for row in self.catalog.rows(
-                          decision=decision, search=search, high_risk=high_risk,
-                          label_state=label_state,
-                          limit=limit or 1_000_000_000, offset=offset)]
+                       row["decision"], row["revision"]) for row in rows]
         else:
             source = []
+            if exact:
+                try:
+                    commit = self._commit(*exact)
+                    review = self.latest(*exact)
+                    source = [(commit, review, None, True,
+                               review["decision"] if review else "unreviewed",
+                               review["revision"] if review else 0)]
+                except (FileNotFoundError, ValueError):
+                    pass
             prefix = self.prefix + "/candidates/"
-            for info in self.store.list(prefix):
+            for info in ([] if exact else self.store.list(prefix)):
                 if not info.key.endswith(".json"):
                     continue
                 parts = info.key[len(prefix):].split("/")
@@ -302,7 +325,7 @@ class SyntheticReviewService:
         if label_state:
             result = [row for row in result if (row["label"] is None)
                       == (label_state == "pending")]
-        if self.catalog:
+        if self.catalog or exact:
             return result
         return sorted(result, key=lambda row: (row["source_dataset"], row["candidate_id"]))[
             offset:offset + limit if limit is not None else None]
@@ -660,10 +683,12 @@ class SyntheticReviewService:
 def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | None,
                               current_actor,
                               label_registry: SyntheticLabelRegistry | None = None,
-                              catalog_path: Path | None = None) -> None:
-    if not run_id:
+                              catalog_path: Path | None = None,
+                              target: str = "dev") -> None:
+    if target == "dev" and not run_id:
         return
-    service = SyntheticReviewService(store, run_id, label_registry, catalog_path)
+    service = SyntheticReviewService(store, run_id, label_registry, catalog_path,
+                                     target=target)
     app.state.synthetic_review_service = service
 
     @app.get("/api/v1/synthetic/candidates")
@@ -865,20 +890,36 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
+    @app.get("/api/v1/synthetic/candidates/{candidate_id}/{version_id}/entry")
+    def synthetic_candidate_entry(candidate_id: str, version_id: str, request: Request):
+        current_actor(request)
+        rows = service.list_candidates(exact=(candidate_id, version_id))
+        if not rows:
+            raise HTTPException(status_code=404, detail="找不到合成候选")
+        return rows[0]
+
     @app.get("/api/v1/synthetic/candidates/{candidate_id}/{version_id}/files/{filename}")
     def synthetic_file(candidate_id: str, version_id: str, filename: str, request: Request):
         current_actor(request)
         try:
             payload, media_type = service.file(candidate_id, version_id, filename)
             if filename == "index.html" and request.query_params.get("bridge") == "2":
-                payload = payload.replace(
-                    b"</head>",
-                    b"<style>#panel{display:none!important}</style></head>",
-                )
-                payload = payload.replace(b"</body>", VIEWER_BRIDGE + b"</body>")
+                style = b"<style>#panel{display:none!important}</style>"
+                if re.search(rb"</head\s*>", payload, re.IGNORECASE):
+                    payload = re.sub(rb"</head\s*>", lambda match: style + match.group(0),
+                                     payload, count=1, flags=re.IGNORECASE)
+                else:
+                    payload = style + payload
+                if re.search(rb"</body\s*>", payload, re.IGNORECASE):
+                    payload = re.sub(rb"</body\s*>",
+                                     lambda match: VIEWER_BRIDGE + match.group(0),
+                                     payload, count=1, flags=re.IGNORECASE)
+                else:
+                    payload += VIEWER_BRIDGE
+            cache_control = ("private, no-store" if filename == "index.html"
+                             else "private, max-age=3600")
             return Response(content=payload, media_type=media_type,
-                            headers={"Cache-Control": "private, no-store" if filename == "index.html"
-                                     else "private, max-age=3600"})
+                            headers={"Cache-Control": cache_control})
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="找不到审核载荷") from error
         except ValueError as error:

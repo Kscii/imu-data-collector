@@ -57,6 +57,40 @@ def _seed(store, prefix, candidate_id="clip-1"):
     return candidate_id, version_id, preview_key
 
 
+def test_production_target_only_reads_production_namespace(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.catalog_refresh_interval_s = 0
+    settings.annotation.synthetic_target = "prod"
+    settings.annotation.synthetic_run_id = None
+    _seed(store, SyntheticReviewService(store, "old-pilot").prefix, "old-clip")
+    production = SyntheticReviewService(store, None, target="prod")
+    _seed(store, production.prefix, "new-clip")
+    with TestClient(create_annotation_app(settings, store=store)) as client:
+        config = client.get("/api/v1/config").json()
+        assert config["synthetic_target"] == "prod"
+        assert config["synthetic_enabled"] is True
+        response = client.get("/api/v1/synthetic/candidates")
+        assert response.status_code == 200
+        assert [row["candidate_id"] for row in response.json()["candidates"]] == ["new-clip"]
+    assert (tmp_path / "synthetic-catalog-prod.sqlite3").is_file()
+
+
+def test_synthetic_run_id_is_validated_before_catalog_path(tmp_path):
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.synthetic_run_id = "../unsafe"
+    with pytest.raises(ValueError, match="Invalid synthetic run ID"):
+        create_annotation_app(settings)
+
+
 def test_incremental_feed_indexes_new_commit_and_keeps_cursor_on_bad_digest(tmp_path):
     store = LocalFilesystemStore(tmp_path / "objects")
     catalog = SyntheticCatalog(tmp_path / "catalog.sqlite3")
@@ -78,7 +112,8 @@ def test_incremental_feed_indexes_new_commit_and_keeps_cursor_on_bad_digest(tmp_
     assert catalog.refresh(store, service.prefix, service._commit,
                            minimum_interval_s=0)["new"] == 0
     with catalog._connect() as db:
-        assert db.execute("SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone() is None
+        assert db.execute(
+            "SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone() is None
     store.delete(feed_key, if_generation_match=None)
     store.write_json(feed_key, {**feed, "commit_sha256": hashlib.sha256(payload).hexdigest()},
                      if_generation_match=0)
@@ -87,7 +122,8 @@ def test_incremental_feed_indexes_new_commit_and_keeps_cursor_on_bad_digest(tmp_
     assert catalog.get(first_id, version_id)["decision"] == "unreviewed"
     assert catalog.get(second_id, version_id)["decision"] == "unreviewed"
     with catalog._connect() as db:
-        assert db.execute("SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone()[0] == feed_key
+        assert db.execute(
+            "SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone()[0] == feed_key
 
 
 def test_unified_synthetic_work_queue_filters_paginates_and_pauses_claims(tmp_path):
@@ -216,6 +252,12 @@ def test_annotation_api_exposes_separate_synthetic_review_flow(tmp_path):
         assert response.status_code == 200
         assert len(response.json()["candidates"]) == 1
         base = f"/api/v1/synthetic/candidates/{candidate_id}/{version_id}"
+        exact = client.get(base + "/entry")
+        assert exact.status_code == 200
+        assert exact.json()["candidate_id"] == candidate_id
+        assert exact.json()["version_id"] == version_id
+        assert exact.json()["decision"] == "unreviewed"
+        assert client.get(base.replace(candidate_id, "missing") + "/entry").status_code == 404
         response = client.get(base + "/files/index.html?bridge=2")
         assert response.status_code == 200
         assert b"imu-synthetic-review-key" in response.content
@@ -232,6 +274,7 @@ def test_annotation_api_exposes_separate_synthetic_review_flow(tmp_path):
         })
         assert response.status_code == 200
         assert response.json()["revision"] == 1
+        assert client.get(base + "/entry").json()["decision"] == "pass"
         assert client.post(base + "/reviews", json={
             "decision": "pass", "labels": [{"code": "walk", "name": "Walk",
                                              "is_fall": False}],

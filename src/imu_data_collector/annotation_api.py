@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import base64
 import binascii
+import json
 import logging
 import re
 import threading
@@ -63,7 +63,7 @@ from imu_data_collector.storage import (
     create_object_store,
 )
 from imu_data_collector.synthetic_labels import SyntheticLabelRegistry
-from imu_data_collector.synthetic_motion import register_synthetic_motion
+from imu_data_collector.synthetic_motion import SAFE_ID, register_synthetic_motion
 
 logger = logging.getLogger(__name__)
 MODEL_VIEWERS = frozenset({"xfan0282"})
@@ -203,24 +203,42 @@ def create_annotation_app(
             "can_manage_device_configuration": actor.is_admin,
             "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "synthetic_run_id": active.annotation.synthetic_run_id,
+            "synthetic_target": active.annotation.synthetic_target,
+            "synthetic_enabled": (active.annotation.synthetic_target == "prod"
+                                  or bool(active.annotation.synthetic_run_id)),
             "storage": {
                 "backend": active.storage.backend,
                 "bucket": active.storage.bucket,
             },
         }
 
+    synthetic_enabled = (active.annotation.synthetic_target == "prod"
+                         or bool(active.annotation.synthetic_run_id))
+    if active.annotation.synthetic_target not in {"dev", "prod"}:
+        raise ValueError("Invalid synthetic target")
+    if active.annotation.synthetic_target == "dev" and active.annotation.synthetic_run_id \
+            and not SAFE_ID.fullmatch(active.annotation.synthetic_run_id):
+        raise ValueError("Invalid synthetic run ID")
+    if active.annotation.synthetic_target == "prod" and active.annotation.synthetic_run_id:
+        raise ValueError("Production synthetic target has no run ID")
     synthetic_store = synthetic_store_override or (
         create_object_store("gcs", active.storage.root,
                             active.annotation.synthetic_bucket, active.storage.project)
-        if active.annotation.synthetic_run_id and active.annotation.synthetic_bucket
+        if synthetic_enabled and active.annotation.synthetic_bucket
         else object_store
     )
+    synthetic_scope = (f"dev-{active.annotation.synthetic_run_id}"
+                       if active.annotation.synthetic_target == "dev" else "prod")
     register_synthetic_motion(
         app, synthetic_store, active.annotation.synthetic_run_id, current_actor,
-        SyntheticLabelRegistry(object_store, service.taxonomies)
-        if active.annotation.synthetic_run_id else None,
-        active.annotation.catalog_path.with_name("synthetic-catalog.sqlite3")
-        if active.annotation.synthetic_run_id else None)
+        SyntheticLabelRegistry(
+            object_store, service.taxonomies,
+            key=f"taxonomies/motion-actions/{synthetic_scope}/current.json")
+        if synthetic_enabled else None,
+        active.annotation.catalog_path.with_name(
+            f"synthetic-catalog-{synthetic_scope}.sqlite3")
+        if synthetic_enabled else None,
+        target=active.annotation.synthetic_target)
 
     def work_domain(value: str):
         if value == "real":

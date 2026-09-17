@@ -172,6 +172,7 @@ class AnnotationSettings:
     catalog_refresh_interval_s: float = 10.0
     synthetic_run_id: str | None = None
     synthetic_bucket: str | None = None
+    synthetic_target: str = "dev"
 
 
 @dataclass(slots=True)
