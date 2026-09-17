@@ -196,6 +196,11 @@ def test_synthetic_reviews_freeze_exact_pass_and_keep_old_snapshot(tmp_path):
     snapshot = service.create_snapshot("reviewer")
     frozen = service.snapshot(snapshot["snapshot_id"])["request"]
     assert len(frozen["entries"]) == 1
+    repeated = service.create_snapshot("other-reviewer")
+    assert repeated == {"snapshot_id": snapshot["snapshot_id"],
+                        "state": "queued", "candidate_count": 1,
+                        "already_exists": True}
+    assert service.snapshot(snapshot["snapshot_id"])["request"] == frozen
     service.review(candidate_id, version_id, ReviewInput(
         decision="reject", reason="changed my mind", labels=[], expected_revision=1),
         "reviewer")
