@@ -60,8 +60,8 @@ from imu_data_collector.storage import (
     ObjectStore,
     create_object_store,
 )
-from imu_data_collector.synthetic_motion import register_synthetic_motion
 from imu_data_collector.synthetic_labels import SyntheticLabelRegistry
+from imu_data_collector.synthetic_motion import register_synthetic_motion
 
 logger = logging.getLogger(__name__)
 MODEL_VIEWERS = frozenset({"xfan0282"})
@@ -513,6 +513,12 @@ def create_annotation_app(
     ) -> dict[str, Any]:
         actor = current_actor(request)
         try:
+            synthetic = getattr(app.state, "synthetic_review_service", None)
+            if synthetic and any(
+                concept["code"] == body.code and concept["scope"] == "motion"
+                for concept in synthetic.labels.catalog()["concepts"]
+            ):
+                raise ValueError("该 code 已被动捕专用概念使用")
             return service.create_taxonomy_activity(body, actor.unikey)
         except ObjectConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error

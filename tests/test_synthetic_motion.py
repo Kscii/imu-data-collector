@@ -17,13 +17,14 @@ from imu_data_collector.synthetic_motion import (
 )
 
 
-def _seed(store, prefix):
-    candidate_id, version_id = "clip-1", "a" * 64
+def _seed(store, prefix, candidate_id="clip-1"):
+    version_id = "a" * 64
     objects = []
     for role in ("motion", "sensors", "selection"):
-        content = role.encode()
+        content = role.encode() if candidate_id == "clip-1" else f"{role}:{candidate_id}".encode()
         digest = hashlib.sha256(content).hexdigest()
-        source = store.root / (role + ".source")
+        source = store.root / (role + ".source" if candidate_id == "clip-1"
+                               else candidate_id + "." + role + ".source")
         source.write_bytes(content)
         key = f"{prefix}/objects/{digest}/{role}"
         store.put_file(source, key, content_type="application/octet-stream",
@@ -32,7 +33,8 @@ def _seed(store, prefix):
                         "byte_length": len(content)})
     preview = b"<html><head></head><body>review</body></html>"
     digest = hashlib.sha256(preview).hexdigest()
-    source = store.root / "review.source"
+    source = store.root / ("review.source" if candidate_id == "clip-1"
+                           else candidate_id + ".review.source")
     source.write_bytes(preview)
     preview_key = f"{prefix}/previews/{candidate_id}/{version_id}/index.html"
     store.put_file(source, preview_key, content_type="text/html",
@@ -259,6 +261,41 @@ def test_reviewed_results_can_be_claimed_revised_and_reset_without_changing_snap
     assert service.create_snapshot("reviewer-b")["candidate_count"] == 1
 
 
+def test_returned_candidate_precedes_new_unreviewed_and_keeps_formal_label(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.catalog_refresh_interval_s = 0
+    settings.annotation.synthetic_run_id = "pilot"
+    service = create_annotation_app(settings, store=store).state.synthetic_review_service
+    candidate_id, version_id, _ = _seed(store, service.prefix, "returned")
+    _seed(store, service.prefix, "new")
+    initial = service.claim("reviewer-a", batch_size=1)[0]
+    assert initial["candidate_id"] == "new"  # same publish time, lexical order
+    service.catalog.release("reviewer-a", initial["lease_token"], skip=True)
+    initial = service.claim("reviewer-a", batch_size=1)[0]
+    assert initial["candidate_id"] == candidate_id
+    service.review(candidate_id, version_id, ReviewInput(
+        decision="pass", expected_revision=0, lease_token=initial["lease_token"]),
+        "reviewer-a")
+    concept = next(item for item in service.labels.catalog()["concepts"]
+                   if item["active"] and not item["is_fall"])
+    service.set_label(candidate_id, version_id, LabelInput(
+        code=concept["code"], expected_revision=0), "reviewer-a")
+    claim = service.claim_reviewed("reviewer-b", ReviewClaimInput(
+        candidate_id=candidate_id, version_id=version_id, expected_revision=1))
+    service.review(candidate_id, version_id, ReviewInput(
+        decision="unreviewed", expected_revision=1,
+        lease_token=claim["lease_token"]), "reviewer-b")
+    rows = service.list_candidates(decision="unreviewed")
+    assert rows[0]["candidate_id"] == candidate_id
+    assert rows[0]["label"]["code"] == concept["code"]
+    assert service.claim("reviewer-c", batch_size=1)[0]["candidate_id"] == candidate_id
+
+
 def test_reviewed_claim_api_reuses_own_lease_and_releases_expired_lease(tmp_path):
     store = LocalFilesystemStore(tmp_path / "objects")
     settings = load_settings()
@@ -343,6 +380,15 @@ def test_activated_exact_mapping_freezes_label_without_human_label_edit(tmp_path
     with TestClient(create_annotation_app(settings, store=store)) as client:
         concepts = client.get("/api/v1/synthetic/labels").json()["concepts"]
         code = next(item["code"] for item in concepts if item["active"] and not item["is_fall"])
+        options = client.get("/api/v1/synthetic/labels/mapping-options",
+                             params={"origin": "babel-1.0"}).json()
+        assert {item["value"] for item in options["values"]} == {"walking"}
+        assert {item["name"] for item in options["datasets"]} == {"ACCAD"}
+        estimate = client.post("/api/v1/synthetic/labels/mappings/estimate", json={
+            "origin": "babel-1.0", "source_value": "walking",
+            "source_dataset": "ACCAD", "target_code": code})
+        assert estimate.status_code == 200
+        assert estimate.json()["matched_count"] == 1
         created = client.post("/api/v1/synthetic/labels/mappings", json={
             "origin": "babel-1.0", "source_value": "walking",
             "source_dataset": "ACCAD", "target_code": code})
@@ -365,3 +411,32 @@ def test_activated_exact_mapping_freezes_label_without_human_label_edit(tmp_path
         assert client.post(f"/api/v1/synthetic/labels/mappings/{rule_id}/state", json={
             "state": "retired"}).status_code == 200
         assert store.read_json(entry["label_key"])[0] == resolution
+
+
+def test_motion_concept_edit_keeps_shared_concepts_unchanged(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.synthetic_run_id = "pilot"
+    with TestClient(create_annotation_app(settings, store=store)) as client:
+        catalog = client.get("/api/v1/synthetic/labels").json()
+        shared = next(item["code"] for item in catalog["concepts"]
+                      if item["scope"] == "shared")
+        assert client.patch(f"/api/v1/synthetic/labels/concepts/{shared}", json={
+            "expected_revision": catalog["motion_revision"], "name": "Changed"}).status_code == 404
+        created = client.post("/api/v1/synthetic/labels/concepts", json={
+            "code": "custom_motion", "name": "Custom motion", "is_fall": False})
+        assert created.status_code == 200
+        revision = client.get("/api/v1/synthetic/labels").json()["motion_revision"]
+        edited = client.patch("/api/v1/synthetic/labels/concepts/custom_motion", json={
+            "expected_revision": revision, "name": "Updated motion", "active": False})
+        assert edited.status_code == 200
+        catalog = client.get("/api/v1/synthetic/labels").json()
+        motion = next(item for item in catalog["concepts"]
+                      if item["code"] == "custom_motion")
+        assert motion["name"] == "Updated motion" and not motion["active"]
+        assert client.patch("/api/v1/synthetic/labels/concepts/custom_motion", json={
+            "expected_revision": revision, "active": True}).status_code == 409

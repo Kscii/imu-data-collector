@@ -129,8 +129,11 @@ class SyntheticCatalog:
         if high_risk:
             clauses.append("json_extract(commit_json, '$.risk_tier')='high'")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        priority = (" CASE WHEN decision='unreviewed' AND revision>0 THEN 0 ELSE 1 END,"
+                    " json_extract(review_json, '$.returned_at_utc') DESC,") \
+            if decision == "unreviewed" else ""
         sql = ("SELECT * FROM candidates" + where +
-               " ORDER BY published_at_utc, candidate_id LIMIT ? OFFSET ?")
+               " ORDER BY" + priority + " published_at_utc, candidate_id LIMIT ? OFFSET ?")
         with self._connect() as db:
             rows = db.execute(sql, [*params, limit, offset]).fetchall()
         return [self._decode(row) for row in rows]
@@ -228,7 +231,9 @@ class SyntheticCatalog:
                 JOIN candidates AS c ON c.candidate_id=l.candidate_id
                     AND c.version_id=l.version_id
                 WHERE l.actor=? AND c.decision='unreviewed'
-            """ + extra + " ORDER BY c.published_at_utc, c.candidate_id LIMIT ?",
+            """ + extra + " ORDER BY CASE WHEN c.revision>0 THEN 0 ELSE 1 END, "
+            "json_extract(c.review_json, '$.returned_at_utc') DESC, "
+            "c.published_at_utc, c.candidate_id LIMIT ?",
                                   [actor, *filter_params, batch_size]).fetchall()
             claimed = [{"candidate_id": row["candidate_id"],
                         "version_id": row["version_id"],
@@ -249,7 +254,9 @@ class SyntheticCatalog:
                         AND (newer.published_at_utc>c.published_at_utc
                           OR (newer.published_at_utc=c.published_at_utc
                               AND newer.version_id>c.version_id)))
-            """ + extra + " ORDER BY c.published_at_utc, c.candidate_id LIMIT ?",
+            """ + extra + " ORDER BY CASE WHEN c.revision>0 THEN 0 ELSE 1 END, "
+            "json_extract(c.review_json, '$.returned_at_utc') DESC, "
+            "c.published_at_utc, c.candidate_id LIMIT ?",
                               [*params, remaining]).fetchall()
             for row in rows:
                 token = uuid4().hex

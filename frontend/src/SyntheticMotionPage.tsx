@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { tr } from "./i18n";
+import { SyntheticIMUChart, type IMUReadout } from "./SyntheticIMUChart";
 
 export type FormalLabel = {
   code: string; name: string; is_fall: boolean;
@@ -10,12 +11,12 @@ export type Candidate = {
   lease_token?: string;
   source_member: string; published_at_utc: string;
   label_candidates: {code?: string | null; raw_label?: string | null;
-    categories?: string[] | null; kind?: string}[];
+    name?: string | null; categories?: string[] | null; kind?: string; origin?: string}[];
   warning_flags: string[]; risk_tier?: string; label: FormalLabel | null;
   decision: "unreviewed" | "pass" | "reject"; revision: number;
 };
 export type Catalog = {
-  taxonomy_id: string; version: string;
+  taxonomy_id: string; version: string; motion_revision: number;
   concepts: (FormalLabel & {active: boolean; scope: string})[];
   rules: {rule_id: string; origin: string; source_value: string;
     source_dataset: string | null; target_code: string; state: string}[];
@@ -39,6 +40,71 @@ export async function syntheticRequest<T>(url: string, options?: RequestInit): P
 const editable = (target: EventTarget | null) =>
   Boolean((target as HTMLElement | null)?.closest("input,textarea,select,[contenteditable='true']"));
 
+function FormalLabelPicker({concepts, value, onChange, onPlay}: {
+  concepts: Catalog["concepts"]; value: string;
+  onChange: (value: string) => void; onPlay: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
+  const id = useId();
+  const active = concepts.filter(item => item.active);
+  const selected = active.find(item => item.code === value);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, []);
+  return <div className="synthetic-label-picker" ref={root}>
+    <span>{tr("正式标签", "Formal label")}</span>
+    <button type="button" role="combobox" aria-expanded={open}
+      aria-controls={`${id}-list`} aria-activedescendant={open ? `${id}-${highlight}` : undefined}
+      aria-label={tr("正式活动标签", "Formal activity label")}
+      onClick={() => { setOpen(value => !value); setHighlight(Math.max(0,
+        active.findIndex(item => item.code === value))); }}
+      onKeyDown={event => {
+        if (event.key === " ") {
+          event.preventDefault(); event.stopPropagation(); onPlay(); return;
+        }
+        if (event.key === "Escape" && open) {
+          event.preventDefault(); setOpen(false); return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault(); setOpen(true);
+          setHighlight(index => Math.max(0, Math.min(active.length - 1,
+            index + (event.key === "ArrowDown" ? 1 : -1))));
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (open && active[highlight]) { onChange(active[highlight].code); setOpen(false); }
+          else setOpen(true);
+        }
+      }}>
+      {selected?.name ?? tr("从受控列表选择", "Choose from managed labels")}
+      <span aria-hidden="true">⌄</span>
+    </button>
+    {open && <div className="synthetic-label-options" id={`${id}-list`} role="listbox">
+      {active.map((item, index) => <div key={item.code} id={`${id}-${index}`} role="option"
+        aria-selected={item.code === value} className={index === highlight ? "highlight" : ""}
+        onMouseEnter={() => setHighlight(index)}
+        onClick={() => { onChange(item.code); setOpen(false); }}>
+        {item.name}{item.is_fall ? tr(" · 跌倒", " · Fall") : ""}
+      </div>)}
+    </div>}
+  </div>;
+}
+
+function sourceSuggestions(item: Candidate) {
+  const labels = item.label_candidates.map(value => ({
+    name: value.raw_label || value.name || value.categories?.join(", ") || value.code || "",
+    kind: value.kind,
+  })).filter(value => value.name);
+  return labels.filter((value, index) => labels.findIndex(other =>
+    other.name.toLowerCase() === value.name.toLowerCase()) === index);
+}
+
 export function SyntheticMotionPage() {
   const [view, setView] = useState<"quality" | "labels">("quality");
   const [items, setItems] = useState<Candidate[]>([]);
@@ -61,6 +127,9 @@ export function SyntheticMotionPage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [cursorFrame, setCursorFrame] = useState(0);
+  const [chartReady, setChartReady] = useState(false);
+  const [imuReadout, setImuReadout] = useState<IMUReadout | null>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const drawerButton = useRef<HTMLButtonElement>(null);
   const drawerSearch = useRef<HTMLInputElement>(null);
@@ -168,6 +237,7 @@ export function SyntheticMotionPage() {
 
   useEffect(() => {
     setLabelRevision(0); setChosenCode(current?.label?.code ?? "");
+    setCursorFrame(0); setChartReady(false);
     setReasonCodes([]); setReasonNote(""); setResetNote("");
     setRejectOpen(false); setResetOpen(false);
     if (current) syntheticRequest<{label_revision: {revision: number} | null}>(base)
@@ -270,11 +340,43 @@ export function SyntheticMotionPage() {
     } catch (error) { setError(String(error)); }
     finally { setWorking(false); }
   };
-  const control = (action: "toggle" | "replay") =>
+  const returnFromLabels = async () => {
+    if (!current || current.decision !== "pass" || working || summary?.read_only) return;
+    const item = current;
+    setWorking(true); setError("");
+    let token = "";
+    try {
+      const lease = await syntheticRequest<{lease_token: string}>(
+        `${syntheticRoot}/queue/claim-reviewed`, {method: "POST",
+          body: JSON.stringify({candidate_id: item.candidate_id,
+            version_id: item.version_id, expected_revision: item.revision})});
+      token = lease.lease_token;
+      await syntheticRequest(`${base}/reviews`, {method: "POST", body: JSON.stringify({
+        decision: "unreviewed", expected_revision: item.revision, labels: [],
+        lease_token: token, reason_codes: [], reason: resetNote.trim() || null,
+      })});
+      setResetOpen(false);
+      setMessage(tr("已退回质量审核队列顶部，正式标签保留", "Returned to the top of quality review; formal label preserved"));
+      const next = visible.find(row => candidateKey(row) !== candidateKey(item));
+      await browse(0, loadGeneration.current, next ? candidateKey(next) : "");
+      void refreshSummary();
+    } catch (reason) {
+      setError(String(reason));
+      await browse(0, loadGeneration.current, candidateKey(item))
+        .catch(refreshError => setError(String(refreshError)));
+    } finally {
+      if (token) await release(token).catch(() => undefined);
+      setWorking(false);
+    }
+  };
+  const control = (action: "toggle" | "replay" | "seek" | "chart-ready",
+                   extra: {frame?: number; ready?: boolean} = {}) =>
     frame.current?.contentWindow?.postMessage(
-      {type: "imu-synthetic-review-control", action}, location.origin);
+      {type: "imu-synthetic-review-control", action, ...extra}, location.origin);
+  useEffect(() => { if (chartReady) control("chart-ready", {ready: true}); }, [chartReady, base]);
   const shortcut = (key: string) => {
     if (working) return;
+    if (key === " " && !rejectOpen && !resetOpen) { control("toggle"); return; }
     if (drawerOpen) {
       if (key === "Escape") setDrawerOpen(false);
       return;
@@ -288,7 +390,6 @@ export function SyntheticMotionPage() {
       if (key === "Enter") void decide("reject");
       return;
     }
-    if (key === " ") control("toggle");
     if (key.toLowerCase() === "r") control("replay");
     if (key.toLowerCase() === "n" && current) void afterCurrent(current, queueMode)
       .catch(error => setError(String(error)));
@@ -311,9 +412,11 @@ export function SyntheticMotionPage() {
     };
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== location.origin || event.source !== frame.current?.contentWindow
-          || event.data?.type !== "imu-synthetic-review-key"
-          || typeof event.data.key !== "string") return;
-      shortcut(event.data.key);
+          || !event.data) return;
+      if (event.data.type === "imu-synthetic-review-frame"
+          && Number.isInteger(event.data.frame)) setCursorFrame(event.data.frame);
+      if (event.data.type === "imu-synthetic-review-key"
+          && typeof event.data.key === "string") shortcut(event.data.key);
     };
     window.addEventListener("keydown", onKey); window.addEventListener("message", onMessage);
     return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("message", onMessage); };
@@ -394,7 +497,12 @@ export function SyntheticMotionPage() {
       <section className="panel synthetic-viewer-pane">
         {current ? <>
           <iframe ref={frame} key={base} title={tr("动作与 IMU 同源回放", "Motion and IMU replay")}
-            src={`${base}/files/index.html`} className="synthetic-frame" />
+            src={`${base}/files/index.html`} className="synthetic-frame"
+            onLoad={() => { if (chartReady) control("chart-ready", {ready: true}); }} />
+          <SyntheticIMUChart base={base} cursorFrame={cursorFrame}
+            onReady={setChartReady} onInspect={setImuReadout} onSeek={index => {
+              setCursorFrame(index); control("seek", {frame: index});
+            }} />
           <div className="synthetic-playback-bar">
             <button onClick={() => control("toggle")}>{tr("播放／暂停 Space", "Play / pause Space")}</button>
             <button onClick={() => control("replay")}>{tr("重播 R", "Replay R")}</button>
@@ -422,16 +530,27 @@ export function SyntheticMotionPage() {
             </div>
             {current.warning_flags.length > 0 && <div className="warning-banner">
               QA · {current.warning_flags.join(", ")}</div>}
+            {imuReadout && <div className="synthetic-imu-readout">
+              <strong>{tr("当前播放位置 · IMU", "Current position · IMU")}</strong>
+              <span>{imuReadout.sensor} · {imuReadout.time_s.toFixed(2)} s</span>
+              <div><span>{tr("比力幅值", "Specific force")} <b>{imuReadout.force.toFixed(2)}</b> m/s²</span>
+                <span>{tr("角速度幅值", "Angular velocity")} <b>{imuReadout.gyro.toFixed(2)}</b> rad/s</span></div>
+            </div>}
             {view === "quality" && current.label && <p className="synthetic-label-hint">
               {tr("正式标签", "Formal label")}：{current.label.name}</p>}
             {view === "labels" && <>
-              <label>{tr("正式标签", "Formal label")}<select value={chosenCode}
-                onChange={event => setChosenCode(event.target.value)}>
-                <option value="">{tr("从受控列表选择", "Choose from managed labels")}</option>
-                {catalog?.concepts.filter(item => item.active).map(item =>
-                  <option key={item.code} value={item.code}>{item.name}
-                    {item.is_fall ? tr(" · 跌倒", " · Fall") : ""}</option>)}
-              </select></label>
+              <div className="synthetic-source-tags">
+                <strong>{tr("来源候选标签（仅供参考）", "Source labels (reference only)")}</strong>
+                {sourceSuggestions(current).length ? <div>{sourceSuggestions(current).slice(0, 5)
+                  .map((item, index) => <span key={index}>
+                    {item.kind === "temporal-candidate" ? tr("片段 · ", "Segment · ") : ""}{item.name}
+                  </span>)}
+                  {sourceSuggestions(current).length > 5 && <small>
+                    +{sourceSuggestions(current).length - 5}</small>}</div>
+                  : <small>{tr("来源未提供候选标签", "No source labels provided")}</small>}
+              </div>
+              <FormalLabelPicker concepts={catalog?.concepts ?? []} value={chosenCode}
+                onChange={setChosenCode} onPlay={() => control("toggle")} />
               {current.label && <p className="synthetic-label-hint">
                 {tr("当前", "Current")}：{current.label.name} · {current.label.origin === "auto"
                   ? tr("来源映射", "Source mapping") : tr("人工选择", "Human selected")}</p>}
@@ -469,8 +588,12 @@ export function SyntheticMotionPage() {
                 setFilter("unreviewed"); setDrawerOpen(false);
               }}>{tr("进入待审核队列", "Open unreviewed queue")}</button>}
             </>
-            : <button className="primary" disabled={working || !chosenCode || summary?.read_only}
-              onClick={() => void saveLabel()}>{tr("保存标签", "Save label")}</button>}
+            : <>
+              <button className="primary" disabled={working || !chosenCode || summary?.read_only}
+                onClick={() => void saveLabel()}>{tr("保存标签", "Save label")}</button>
+              <button disabled={working || summary?.read_only} onClick={() => setResetOpen(true)}>
+                {tr("退回质量审核", "Return to quality review")}</button>
+            </>}
         </div>}
       </section>
     </section>
@@ -478,10 +601,12 @@ export function SyntheticMotionPage() {
       <div className="synthetic-reject panel" role="dialog" aria-modal="true"
         aria-label={tr("拒绝原因", "Rejection reason")}>
         <strong>{tr("选择拒绝原因", "Choose rejection reasons")}</strong>
+        <p>{tr("可多选；若列表不适用，可在下方填写其他原因。", "Select any that apply, or enter another reason below.")}</p>
         <div className="synthetic-reasons">{reasons.map(reason =>
-          <label key={reason.code}><input type="checkbox" checked={reasonCodes.includes(reason.code)}
+          <label className={reasonCodes.includes(reason.code) ? "selected" : ""} key={reason.code}><input type="checkbox" checked={reasonCodes.includes(reason.code)}
             onChange={event => setReasonCodes(previous => event.target.checked
               ? [...previous, reason.code] : previous.filter(code => code !== reason.code))} />{reason.name}</label>)}</div>
+        <label className="synthetic-dialog-field">{tr("其他原因或补充说明", "Other reason or details")}</label>
         <textarea value={reasonNote} onChange={event => setReasonNote(event.target.value)}
           placeholder={tr("补充说明（可选）", "Additional details (optional)")} />
         <div><button className="primary" disabled={working || (!reasonCodes.length && !reasonNote.trim())}
@@ -492,12 +617,14 @@ export function SyntheticMotionPage() {
     {resetOpen && <div className="synthetic-dialog-backdrop">
       <div className="synthetic-reject panel" role="dialog" aria-modal="true"
         aria-label={tr("撤回审核结果", "Return review to unreviewed")}>
-        <strong>{tr("撤回为未审核", "Return to unreviewed")}</strong>
+        <strong>{view === "labels" ? tr("退回质量审核", "Return to quality review")
+          : tr("撤回为未审核", "Return to unreviewed")}</strong>
         <p>{tr("将重新进入审核队列。原审核记录和已有快照不会改变；正式标签会保留。", "The clip returns to the review queue. Existing revisions, snapshots, and its formal label remain.")}</p>
         <textarea value={resetNote} onChange={event => setResetNote(event.target.value)}
           placeholder={tr("撤回说明（可选）", "Reason (optional)")} />
         <div><button className="primary" disabled={working}
-          onClick={() => void decide("unreviewed")}>{tr("确认撤回", "Confirm return")}</button>
+          onClick={() => void (view === "labels" ? returnFromLabels() : decide("unreviewed"))}>
+          {view === "labels" ? tr("确认退回", "Confirm return") : tr("确认撤回", "Confirm return")}</button>
           <button onClick={() => setResetOpen(false)}>{tr("取消", "Cancel")}</button></div>
       </div>
     </div>}

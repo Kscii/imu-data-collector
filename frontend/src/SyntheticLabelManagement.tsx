@@ -6,12 +6,19 @@ type Preview = {
   rule_id: string; matched_count: number;
   sample_candidates: {candidate_id: string; version_id: string}[];
 };
+type MappingOptions = {datasets: {name: string; count: number}[];
+  values: {value: string; count: number}[]};
+type Estimate = {matched_count: number; sample_candidates: {candidate_id: string}[]};
 
-export function SyntheticLabelManagement({isAdmin}: {isAdmin: boolean}) {
+export function SyntheticLabelManagement({isAdmin, section}: {
+  isAdmin: boolean; section: "concepts" | "mappings";
+}) {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
-  const [section, setSection] = useState<"concepts" | "scopes" | "mappings">("concepts");
   const [code, setCode] = useState(""); const [name, setName] = useState("");
   const [isFall, setIsFall] = useState(false);
+  const [editCode, setEditCode] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editActive, setEditActive] = useState(true);
   const [origin, setOrigin] = useState("babel-1.0");
   const [sourceValue, setSourceValue] = useState("");
   const [sourceDataset, setSourceDataset] = useState("");
@@ -19,10 +26,39 @@ export function SyntheticLabelManagement({isAdmin}: {isAdmin: boolean}) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [selectedSample, setSelectedSample] = useState(0);
   const [checked, setChecked] = useState<string[]>([]);
+  const [options, setOptions] = useState<MappingOptions>({datasets: [], values: []});
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [error, setError] = useState("");
   const load = () => syntheticRequest<Catalog>(`${syntheticRoot}/labels`)
     .then(setCatalog).catch(error => setError(String(error)));
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (section !== "mappings") return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const query = new URLSearchParams({origin, source_dataset: sourceDataset,
+        search: sourceValue, limit: "40"});
+      void syntheticRequest<MappingOptions>(`${syntheticRoot}/labels/mapping-options?${query}`,
+        {signal: controller.signal}).then(setOptions).catch(reason => {
+          if (!controller.signal.aborted) setError(String(reason));
+        });
+    }, 180);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [section, origin, sourceDataset, sourceValue]);
+  useEffect(() => {
+    if (section !== "mappings" || !sourceValue.trim() || !targetCode) { setEstimate(null); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void syntheticRequest<Estimate>(`${syntheticRoot}/labels/mappings/estimate`, {
+        method: "POST", signal: controller.signal,
+        body: JSON.stringify({origin, source_value: sourceValue,
+          source_dataset: sourceDataset || null, target_code: targetCode || ""}),
+      }).then(setEstimate).catch(reason => {
+        if (!controller.signal.aborted) setError(String(reason));
+      });
+    }, 280);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [section, origin, sourceDataset, sourceValue, targetCode]);
   const addConcept = async () => {
     setError("");
     try {
@@ -30,6 +66,17 @@ export function SyntheticLabelManagement({isAdmin}: {isAdmin: boolean}) {
         body: JSON.stringify({code, name, is_fall: isFall})});
       setCode(""); setName(""); await load();
     } catch (error) { setError(String(error)); }
+  };
+  const updateConcept = async () => {
+    if (!editCode || !catalog) return;
+    setError("");
+    try {
+      await syntheticRequest(`${syntheticRoot}/labels/concepts/${encodeURIComponent(editCode)}`, {
+        method: "PATCH", body: JSON.stringify({expected_revision: catalog.motion_revision,
+          name: editName, active: editActive}),
+      });
+      setEditCode(""); await load();
+    } catch (reason) { setError(String(reason)); }
   };
   const addRule = async () => {
     setError("");
@@ -58,18 +105,27 @@ export function SyntheticLabelManagement({isAdmin}: {isAdmin: boolean}) {
     } catch (error) { setError(String(error)); }
   };
   const sample = preview?.sample_candidates[selectedSample];
-  return <section className="panel synthetic-label-management">
-    <div className="panel-title">{tr("合成运动标签管理", "Synthetic motion label management")}</div>
+  return <section id={section === "concepts" ? "motion-only-concepts" : undefined}
+    className="panel synthetic-label-management">
+    <div className="panel-title">{section === "concepts"
+      ? tr("动捕专用概念", "Motion-only concepts") : tr("合成运动自动映射", "Synthetic motion mappings")}</div>
     {error && <div className="error-banner">{error}</div>}
-    <nav className="synthetic-tabs">
-      <button className={section === "concepts" ? "active" : ""} onClick={() => setSection("concepts")}>{tr("概念库", "Concepts")}</button>
-      <button className={section === "scopes" ? "active" : ""} onClick={() => setSection("scopes")}>{tr("适用场景", "Scopes")}</button>
-      <button className={section === "mappings" ? "active" : ""} onClick={() => setSection("mappings")}>{tr("自动映射", "Mappings")}</button>
-    </nav>
     {section === "concepts" && <>
-      <p>{tr("共用概念由真实 IMU 标签管理维护；动捕专用概念不会出现在真实 IMU 标注选择器。", "Shared concepts come from the real IMU taxonomy; motion-only concepts stay out of the real IMU picker.")}</p>
-      <div className="synthetic-concept-list">{catalog?.concepts.map(item =>
-        <span key={item.code}>{item.name} <small>{item.code} · {item.scope}</small></span>)}</div>
+      <p>{tr("这里维护仅用于动捕合成的概念；共用概念在上方真实 IMU 概念区维护。历史标签不会改写。", "Manage motion-only concepts here; shared concepts are managed above. Historical labels remain unchanged.")}</p>
+      <div className="synthetic-concept-list">{catalog?.concepts.filter(item => item.scope === "motion")
+        .map(item => <button key={item.code} className={!item.active ? "inactive" : ""}
+          onClick={() => { setEditCode(item.code); setEditName(item.name); setEditActive(item.active); }}>
+          {item.name} <small>{item.code} · {item.active ? tr("启用", "Active") : tr("停用", "Inactive")}</small>
+        </button>)}</div>
+      {isAdmin && editCode && <div className="synthetic-form synthetic-concept-edit">
+        <strong>{tr("编辑", "Edit")} {editCode}</strong>
+        <input aria-label={tr("概念名称", "Concept name")} value={editName}
+          onChange={event => setEditName(event.target.value)} />
+        <label><input type="checkbox" checked={editActive}
+          onChange={event => setEditActive(event.target.checked)} />{tr("启用", "Active")}</label>
+        <button disabled={!editName.trim()} onClick={updateConcept}>{tr("保存概念", "Save concept")}</button>
+        <button onClick={() => setEditCode("")}>{tr("取消", "Cancel")}</button>
+      </div>}
       {isAdmin && <div className="synthetic-form">
         <input value={code} onChange={event => setCode(event.target.value)} placeholder="code" />
         <input value={name} onChange={event => setName(event.target.value)} placeholder={tr("名称", "Name")} />
@@ -77,9 +133,6 @@ export function SyntheticLabelManagement({isAdmin}: {isAdmin: boolean}) {
         <button disabled={!code || !name} onClick={addConcept}>{tr("新增动捕概念", "Add motion concept")}</button>
       </div>}
     </>}
-    {section === "scopes" && <p>{tr(
-      "真实 IMU 保持现有跌倒与日常活动集合；合成运动可使用共用概念和动捕专用概念。两个页面使用同一代码和显示名称，历史标签版本不改写。",
-      "Real IMU keeps its fall and daily-activity set. Synthetic motion can use shared and motion-only concepts. Both pages use the same codes and names; history is unchanged.")}</p>}
     {section === "mappings" && <>
       <p>{tr("来源词只作证据；规则须精确命中单一整段动作，预览并抽检后才能启用。", "Source words are evidence only. Rules must match one whole-clip action exactly and require sample review before activation.")}</p>
       {catalog?.rules.map(rule => <article key={rule.rule_id}>
@@ -107,16 +160,29 @@ export function SyntheticLabelManagement({isAdmin}: {isAdmin: boolean}) {
           <option value="babel-1.0">BABEL act_cat</option>
           <option value="stageii-source-member">GRAB/SOMA action</option>
         </select>
-        <input value={sourceDataset} onChange={event => setSourceDataset(event.target.value)}
-          placeholder={tr("限定来源（可选）", "Dataset (optional)")} />
-        <input value={sourceValue} onChange={event => setSourceValue(event.target.value)}
-          placeholder={tr("来源类别精确值", "Exact source category")} />
+        <input value={sourceDataset} list="synthetic-source-datasets"
+          onChange={event => setSourceDataset(event.target.value)}
+          placeholder={tr("限定来源（可选，可选或输入）", "Dataset (optional; choose or type)")} />
+        <datalist id="synthetic-source-datasets">{options.datasets.map(item =>
+          <option key={item.name} value={item.name}>{item.count}</option>)}</datalist>
+        <input value={sourceValue} list="synthetic-source-values"
+          onChange={event => setSourceValue(event.target.value)}
+          placeholder={tr("来源类别：从观测值选或手动输入", "Source value: choose observed or type")} />
+        <datalist id="synthetic-source-values">{options.values.map(item =>
+          <option key={item.value} value={item.value}>{item.count}</option>)}</datalist>
         <select value={targetCode} onChange={event => setTargetCode(event.target.value)}>
           <option value="">{tr("目标正式标签", "Target formal label")}</option>
           {catalog?.concepts.filter(item => item.active && !item.is_fall).map(item =>
             <option key={item.code} value={item.code}>{item.name}</option>)}
         </select>
         <button disabled={!sourceValue || !targetCode} onClick={addRule}>{tr("创建草稿规则", "Create draft rule")}</button>
+      </div>}
+      {isAdmin && <div className="synthetic-mapping-evidence">
+        <strong>{tr("已观测来源值", "Observed source values")}</strong>
+        <div>{options.values.slice(0, 16).map(item => <button key={item.value}
+          onClick={() => setSourceValue(item.value)}>{item.value} <small>× {item.count}</small></button>)}</div>
+        {sourceValue && <p>{tr("当前精确匹配", "Current exact matches")}: {estimate?.matched_count ?? "…"}
+          {estimate?.matched_count === 0 && ` · ${tr("没有匹配候选，请检查来源或拼写", "No matches; check source or spelling")}`}</p>}
       </div>}
     </>}
   </section>;
