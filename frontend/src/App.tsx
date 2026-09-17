@@ -419,6 +419,37 @@ type DatasetCatalogFile = {
   supervision?: Record<string, number>;
 };
 
+type ProvisionalExport = {
+  export_id: string;
+  dataset_id: string;
+  created_at_utc: string;
+  candidate_count: number;
+  sequence_count: number;
+  sample_count: number;
+  weak_count: number;
+  unresolved_count: number;
+  rules_sha256: string;
+  rules_revision: number;
+  coverage?: "partial" | "complete";
+  h5: { filename: string; byte_length: number; sha256: string };
+};
+
+type ProvisionalRule = {
+  rule_id: string;
+  origin: string;
+  source_value: string;
+  source_dataset: string | null;
+  target_code: string;
+  is_fall: false;
+};
+
+type ProvisionalRules = {
+  schema: string;
+  revision: number;
+  rules: ProvisionalRule[];
+  sha256: string;
+};
+
 type DatasetCatalogSnapshot = {
   kind: "base" | "team";
   snapshot_id: string;
@@ -1432,7 +1463,7 @@ export default function App() {
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <LabelManagementWorkspace taxonomy={taxonomy} onChanged={setTaxonomy} isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
       {annotationApplication && tab === "delivery" && <SnapshotDeliveryViewer />}
-      {annotationApplication && tab === "datasets" && <DatasetCatalogPage />}
+      {annotationApplication && tab === "datasets" && <DatasetCatalogPage syntheticEnabled={Boolean(config?.synthetic_enabled)} isAdmin={Boolean(session?.is_admin)} />}
       {annotationApplication && tab === "models" && config?.can_view_models && session && <ModelCatalogPage session={session} />}
       {!annotationApplication && tab === "library" && <CaptureLibrary
         recordings={recordings}
@@ -3876,8 +3907,10 @@ function formatDatasetDuration(durationSeconds: number) {
   return `${seconds} s`;
 }
 
-function DatasetCatalogPage() {
+function DatasetCatalogPage({ syntheticEnabled, isAdmin }: { syntheticEnabled: boolean; isAdmin: boolean }) {
   const [catalog, setCatalog] = useState<DatasetCatalogDocument | null>(null);
+  const [provisional, setProvisional] = useState<ProvisionalExport[]>([]);
+  const [provisionalError, setProvisionalError] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -3893,7 +3926,19 @@ function DatasetCatalogPage() {
     }
   };
 
+  const refreshProvisional = async () => {
+    if (!syntheticEnabled) return;
+    try {
+      const result = await api<{ exports: ProvisionalExport[] }>("/api/v1/synthetic/datasets/provisional");
+      setProvisional(result.exports);
+      setProvisionalError("");
+    } catch (value) {
+      setProvisionalError((value as Error).message);
+    }
+  };
+
   useEffect(() => { void refresh(); }, []);
+  useEffect(() => { void refreshProvisional(); }, [syntheticEnabled]);
 
   return <main>
     {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
@@ -3908,7 +3953,109 @@ function DatasetCatalogPage() {
       {!catalog && !error && <span className="muted">{tr("正在读取数据集目录…", "Loading dataset catalog…")}</span>}
       {catalog?.collections.map((collection) => <DatasetCollection key={collection.kind} collection={collection} />)}
     </section>
+    {syntheticEnabled && <ProvisionalDatasetSection exports={provisional} error={provisionalError} refresh={refreshProvisional} isAdmin={isAdmin} />}
   </main>;
+}
+
+function ProvisionalDatasetSection({ exports, error, refresh, isAdmin }: {
+  exports: ProvisionalExport[]; error: string; refresh: () => Promise<void>; isAdmin: boolean;
+}) {
+  const [candidateId, setCandidateId] = useState("");
+  const [versionId, setVersionId] = useState("");
+  const [lookupError, setLookupError] = useState("");
+  const openReplay = async () => {
+    const candidate = candidateId.trim();
+    const version = versionId.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(candidate) || !/^[0-9a-f]{64}$/.test(version)) {
+      setLookupError(tr("请输入 H5 candidate_index 中完整的 candidate_id 和 version_id。", "Enter the full candidate_id and version_id from the H5 candidate_index."));
+      return;
+    }
+    try {
+      await api(`/api/v1/synthetic/candidates/${encodeURIComponent(candidate)}/${encodeURIComponent(version)}`);
+      window.location.href = `/?view=synthetic&candidate=${encodeURIComponent(candidate)}&version=${encodeURIComponent(version)}`;
+    } catch (value) {
+      setLookupError((value as Error).message);
+    }
+  };
+  return <section className="panel dataset-catalog provisional-catalog">
+    <div className="dataset-catalog-heading">
+      <div>
+        <div className="panel-title">{tr("未审核合成 IMU · 核心数据 HDF5 3.3", "Unreviewed synthetic IMU · core HDF5 3.3")}</div>
+        <p className="stage-help">{tr("仅包含已发布且机器 QA 通过的数据。弱标签来自来源规则，可能错误或未解析；没有人工质量审核、确认标签和回放。经过审核与标注的数据请到「训练快照」创建正式快照。", "Contains only published machine-QA-pass data. Source-based weak labels may be wrong or unresolved; there is no human quality review, verified label or replay. Create a formal snapshot in Training snapshots after review and labeling.")}</p>
+      </div>
+      <button onClick={() => void refresh()}>{tr("刷新版本", "Refresh exports")}</button>
+    </div>
+    {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
+    <div className="provisional-lookup">
+      <strong>{tr("用 H5 中的标识查找回放", "Find replay by H5 identity")}</strong>
+      <span className="stage-help">{tr("读取 candidate_index 的 candidate_id 与 version_id；回放仍保存在平台候选页面。", "Read candidate_id and version_id from candidate_index; replay remains on the platform candidate page.")}</span>
+      <div className="provisional-lookup-fields">
+        <input value={candidateId} onChange={(event) => setCandidateId(event.target.value)} placeholder="candidate_id" aria-label="candidate_id" />
+        <input value={versionId} onChange={(event) => setVersionId(event.target.value)} placeholder="version_id" aria-label="version_id" />
+        <button onClick={() => void openReplay()}>{tr("打开对应回放", "Open matching replay")}</button>
+      </div>
+      {lookupError && <div className="error-banner compact-banner">{userVisibleMessage(lookupError)}</div>}
+    </div>
+    {exports.length === 0 && !error && <span className="muted">{tr("尚未发布核心数据导出；正式快照不显示在这里。", "No core export has been published; formal snapshots do not appear here.")}</span>}
+    {exports.map((item, index) => <article className="dataset-snapshot" key={item.export_id}>
+      <div className="dataset-snapshot-heading"><div>
+        <strong>{index === 0 ? tr("最新不可变版本", "Latest immutable version") : tr("历史版本", "Earlier version")} · {item.export_id}</strong>
+        <span>{item.candidate_count.toLocaleString()} {tr("片段", "clips")} · {item.sequence_count.toLocaleString()} {tr("序列", "sequences")} · {item.sample_count.toLocaleString()} {tr("采样行", "sample rows")} · {new Date(item.created_at_utc).toLocaleString()}</span>
+      </div><span className="dataset-availability">{item.coverage === "complete" ? tr("生产已结束", "Production finished") : tr("阶段性版本", "Partial export")} · {tr("未人工审核", "Unreviewed")}</span></div>
+      <div className="stage-help">{tr("弱标签", "Weak labels")} {item.weak_count.toLocaleString()} · {tr("未解析", "Unresolved")} {item.unresolved_count.toLocaleString()} · {formatDatasetBytes(item.h5.byte_length)} · {tr("规则版本", "Rules revision")} {item.rules_revision}</div>
+      <details className="dataset-checks"><summary>{tr("校验信息", "Verification")}</summary><code>H5 SHA-256 {item.h5.sha256}</code><code>rules SHA-256 {item.rules_sha256}</code></details>
+      <div className="provisional-downloads">
+        <a className="button-link primary" href={`/api/v1/synthetic/datasets/provisional/${item.export_id}/download`} download>{tr("下载核心 H5", "Download core H5")}</a>
+        <a className="button-link" href={`/api/v1/synthetic/datasets/provisional/${item.export_id}/manifest`} download>{tr("下载 manifest", "Download manifest")}</a>
+      </div>
+    </article>)}
+    {isAdmin && <ProvisionalRulesEditor />}
+  </section>;
+}
+
+function ProvisionalRulesEditor() {
+  const [current, setCurrent] = useState<ProvisionalRules | null>(null);
+  const [draft, setDraft] = useState("");
+  const [previewId, setPreviewId] = useState("");
+  const [preview, setPreview] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api<ProvisionalRules>("/api/v1/synthetic/provisional-rules")
+      .then((value) => { setCurrent(value); setDraft(JSON.stringify(value.rules, null, 2)); })
+      .catch((value) => setError((value as Error).message));
+  }, []);
+  const parsed = (): ProvisionalRule[] => {
+    const value: unknown = JSON.parse(draft);
+    if (!Array.isArray(value)) throw new Error(tr("规则必须是 JSON 数组", "Rules must be a JSON array"));
+    return value as ProvisionalRule[];
+  };
+  const previewRules = async () => {
+    setBusy(true); setError("");
+    try {
+      const result = await api<{ preview: { candidate_id: string; state: string; code: string | null }[] }>(
+        "/api/v1/synthetic/provisional-rules/preview", { method: "POST", body: JSON.stringify({ candidate_ids: previewId.trim() ? [previewId.trim()] : [], rules: parsed() }) });
+      setPreview(JSON.stringify(result.preview, null, 2));
+    } catch (value) { setError((value as Error).message); }
+    finally { setBusy(false); }
+  };
+  const publish = async () => {
+    if (!current) return;
+    setBusy(true); setError("");
+    try {
+      const result = await api<ProvisionalRules>("/api/v1/synthetic/provisional-rules", {
+        method: "PUT", body: JSON.stringify({ expected_revision: current.revision, rules: parsed() }) });
+      setCurrent(result); setDraft(JSON.stringify(result.rules, null, 2));
+    } catch (value) { setError((value as Error).message); }
+    finally { setBusy(false); }
+  };
+  return <details className="provisional-rules"><summary>{tr("管理员：未审核数据弱标签规则", "Admin: unreviewed weak-label rules")}</summary>
+    <p className="stage-help">{tr("此规则与正式标签映射独立。修改后仅影响下一次不可变导出；不会改变已有文件，也不允许自动确认跌倒。", "These rules are separate from formal label mappings. Changes affect only the next immutable export and cannot confirm falls.")}</p>
+    <div className="stage-help">revision {current?.revision ?? "—"} · SHA-256 {current?.sha256 ?? "—"}</div>
+    <textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={10} aria-label={tr("弱标签规则 JSON", "Weak-label rules JSON")} />
+    <div className="provisional-lookup-fields"><input value={previewId} onChange={(event) => setPreviewId(event.target.value)} placeholder="candidate_id" aria-label={tr("预览候选 ID", "Preview candidate ID")} /><button disabled={busy} onClick={() => void previewRules()}>{tr("预览规则", "Preview rules")}</button><button disabled={busy || !current} onClick={() => void publish()}>{tr("发布新规则版本", "Publish new rules revision")}</button></div>
+    {preview && <pre>{preview}</pre>}{error && <div className="error-banner compact-banner">{userVisibleMessage(error)}</div>}
+  </details>;
 }
 
 function DatasetCollection({ collection }: { collection: DatasetCatalogCollection }) {

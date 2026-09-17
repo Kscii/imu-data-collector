@@ -708,6 +708,8 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
     service = SyntheticReviewService(store, run_id, label_registry, catalog_path,
                                      target=target)
     app.state.synthetic_review_service = service
+    from .synthetic_provisional import register_provisional_routes
+    register_provisional_routes(app, service, current_actor)
 
     @app.get("/api/v1/synthetic/candidates")
     def synthetic_candidates(request: Request):
