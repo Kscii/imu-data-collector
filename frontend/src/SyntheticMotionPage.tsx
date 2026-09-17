@@ -106,12 +106,16 @@ function sourceSuggestions(item: Candidate) {
 }
 
 export function SyntheticMotionPage() {
-  const [view, setView] = useState<"quality" | "labels">("quality");
+  const deepLink = new URLSearchParams(location.search);
+  const deepCandidate = deepLink.get("candidate") ?? "";
+  const deepVersion = deepLink.get("version") ?? "";
+  const [view, setView] = useState<"quality" | "labels">(
+    deepLink.get("stage") === "label" ? "labels" : "quality");
   const [items, setItems] = useState<Candidate[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [selected, setSelected] = useState("");
-  const [filter, setFilter] = useState("unreviewed");
-  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState(deepCandidate ? "all" : "unreviewed");
+  const [search, setSearch] = useState(deepCandidate);
   const [highRisk, setHighRisk] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -129,8 +133,12 @@ export function SyntheticMotionPage() {
   const [message, setMessage] = useState("");
   const [cursorFrame, setCursorFrame] = useState(0);
   const [chartReady, setChartReady] = useState(false);
+  const [bridgeStatus, setBridgeStatus] = useState<"loading" | "ready" | "lost" | "outdated">("loading");
+  const [maxFrame, setMaxFrame] = useState(0);
   const [imuReadout, setImuReadout] = useState<IMUReadout | null>(null);
   const frame = useRef<HTMLIFrameElement>(null);
+  const bridgeLastSeen = useRef(0);
+  const bridgeVersion = useRef(0);
   const drawerButton = useRef<HTMLButtonElement>(null);
   const drawerSearch = useRef<HTMLInputElement>(null);
   const drawerWasOpened = useRef(false);
@@ -188,7 +196,8 @@ export function SyntheticMotionPage() {
     const load = async () => {
       await Promise.allSettled(previous.map(token => release(token)));
       if (generation !== loadGeneration.current) return;
-      await (queueMode ? claim(generation) : browse(0, generation));
+      await (queueMode ? claim(generation) : browse(0, generation,
+        deepCandidate && deepVersion ? `${deepCandidate}/${deepVersion}` : ""));
     };
     load().catch(error => { if (generation === loadGeneration.current) setError(String(error)); });
     return () => { loadGeneration.current++; };
@@ -237,12 +246,21 @@ export function SyntheticMotionPage() {
 
   useEffect(() => {
     setLabelRevision(0); setChosenCode(current?.label?.code ?? "");
-    setCursorFrame(0); setChartReady(false);
+    setCursorFrame(0); setChartReady(false); setBridgeStatus("loading");
+    setMaxFrame(0); bridgeLastSeen.current = Date.now(); bridgeVersion.current = 0;
     setReasonCodes([]); setReasonNote(""); setResetNote("");
     setRejectOpen(false); setResetOpen(false);
     if (current) syntheticRequest<{label_revision: {revision: number} | null}>(base)
       .then(value => setLabelRevision(value.label_revision?.revision ?? 0))
       .catch(error => setError(String(error)));
+  }, [base]);
+  useEffect(() => {
+    if (!base) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() - bridgeLastSeen.current > 2500)
+        setBridgeStatus(current => current === "outdated" ? current : "lost");
+    }, 500);
+    return () => window.clearInterval(timer);
   }, [base]);
   const selectCandidate = async (item: Candidate) => {
     if (current?.lease_token && !queueMode && candidateKey(current) !== candidateKey(item)) {
@@ -413,8 +431,18 @@ export function SyntheticMotionPage() {
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== location.origin || event.source !== frame.current?.contentWindow
           || !event.data) return;
+      if (event.data.type === "imu-synthetic-review-ready") {
+        if (event.data.version !== 2) { setBridgeStatus("outdated"); return; }
+        bridgeVersion.current = 2; bridgeLastSeen.current = Date.now();
+        setBridgeStatus("ready");
+        if (Number.isInteger(event.data.maxFrame)) setMaxFrame(event.data.maxFrame);
+        if (Number.isInteger(event.data.frame)) setCursorFrame(event.data.frame);
+      }
       if (event.data.type === "imu-synthetic-review-frame"
-          && Number.isInteger(event.data.frame)) setCursorFrame(event.data.frame);
+          && bridgeVersion.current === 2 && Number.isInteger(event.data.frame)) {
+        bridgeLastSeen.current = Date.now(); setBridgeStatus("ready");
+        setCursorFrame(event.data.frame);
+      }
       if (event.data.type === "imu-synthetic-review-key"
           && typeof event.data.key === "string") shortcut(event.data.key);
     };
@@ -425,6 +453,7 @@ export function SyntheticMotionPage() {
   return <main className="synthetic-workbench">
     <section className="annotation-workbench-bar synthetic-topbar">
       <button ref={drawerButton} onClick={() => setDrawerOpen(true)}>{tr("审核队列", "Review queue")}</button>
+      <a className="button-link" href="?view=data&domain=synthetic">{tr("数据管理", "Data management")}</a>
       <div className="annotation-recording-summary synthetic-current-summary">
         <strong>{current ? tr("当前片段", "Current clip") : tr("没有待处理片段", "No clip selected")}</strong>
         {current && <span>{tr("片段", "Clip")} {visible.indexOf(current) + 1}/{visible.length} · {current.decision === "pass"
@@ -456,6 +485,7 @@ export function SyntheticMotionPage() {
           <div className="recording-drawer-controls">
             <div className="recording-drawer-header"><strong>{tr("选择片段", "Choose clip")}</strong>
               <button onClick={() => setDrawerOpen(false)}>{tr("关闭", "Close")}</button></div>
+            <a className="button-link" href="?view=data&domain=synthetic">{tr("在数据管理中搜索全部片段", "Search all clips in Data management")}</a>
             <input ref={drawerSearch} value={search} onChange={event => setSearch(event.target.value)}
               placeholder={tr("搜索来源或片段 ID", "Search source or clip ID")} />
             <div className="recording-queue-tabs synthetic-filter-tabs" role="tablist">
@@ -497,15 +527,18 @@ export function SyntheticMotionPage() {
       <section className="panel synthetic-viewer-pane">
         {current ? <>
           <iframe ref={frame} key={base} title={tr("动作与 IMU 同源回放", "Motion and IMU replay")}
-            src={`${base}/files/index.html`} className="synthetic-frame"
+            src={`${base}/files/index.html?bridge=2`} className="synthetic-frame"
             onLoad={() => { if (chartReady) control("chart-ready", {ready: true}); }} />
           <SyntheticIMUChart base={base} cursorFrame={cursorFrame}
             onReady={setChartReady} onInspect={setImuReadout} onSeek={index => {
+              if (bridgeStatus !== "ready") return;
               setCursorFrame(index); control("seek", {frame: index});
             }} />
           <div className="synthetic-playback-bar">
-            <button onClick={() => control("toggle")}>{tr("播放／暂停 Space", "Play / pause Space")}</button>
-            <button onClick={() => control("replay")}>{tr("重播 R", "Replay R")}</button>
+            <button disabled={bridgeStatus !== "ready"} onClick={() => control("toggle")}>{tr("播放／暂停 Space", "Play / pause Space")}</button>
+            <button disabled={bridgeStatus !== "ready"} onClick={() => control("replay")}>{tr("重播 R", "Replay R")}</button>
+            <strong>{bridgeStatus === "ready" ? `source ${cursorFrame}/${maxFrame} · ${imuReadout?.time_s.toFixed(3) ?? "0.000"} s`
+              : tr("播放器同步未就绪", "Playback sync unavailable")}</strong>
             <span>{tr("滚轮缩放人物；页面保持固定", "Wheel zooms the model; page stays fixed")}</span>
           </div>
         </> : <div className="synthetic-empty">{tr("当前队列没有可处理的片段。可打开审核队列选择其他状态。", "No clips here. Open the review queue to choose another status.")}</div>}
@@ -530,7 +563,12 @@ export function SyntheticMotionPage() {
             </div>
             {current.warning_flags.length > 0 && <div className="warning-banner">
               QA · {current.warning_flags.join(", ")}</div>}
-            {imuReadout && <div className="synthetic-imu-readout">
+            {bridgeStatus !== "ready" && <div className="warning-banner" role="status">
+              {bridgeStatus === "outdated" ? tr("播放器版本过旧，请刷新页面", "Viewer version is outdated; refresh the page")
+                : bridgeStatus === "lost" ? tr("播放器通信中断；当前 IMU 时间读数暂停", "Viewer connection lost; IMU time readout is paused")
+                  : tr("正在连接播放器…", "Connecting to viewer…")}
+            </div>}
+            {bridgeStatus === "ready" && imuReadout && <div className="synthetic-imu-readout">
               <strong>{tr("当前播放位置 · IMU", "Current position · IMU")}</strong>
               <span>{imuReadout.sensor} · {imuReadout.time_s.toFixed(2)} s</span>
               <div><span>{tr("比力幅值", "Specific force")} <b>{imuReadout.force.toFixed(2)}</b> m/s²</span>

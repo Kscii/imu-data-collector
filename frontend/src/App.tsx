@@ -1,9 +1,10 @@
 import { CalibrationExperimentPage, CalibrationDeviceManagement } from "./CalibrationExperiments";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Plot, { type PlotMarker, type PlotRegion, type PlotSelectionLabel } from "./Plot";
 import { SyntheticMotionPage } from "./SyntheticMotionPage";
 import { SyntheticSnapshots } from "./SyntheticSnapshots";
 import { SyntheticLabelManagement } from "./SyntheticLabelManagement";
+import { DataManagementPage } from "./DataManagementPage";
 import {
   type BleScanSummary,
   CaptureSettingsPage,
@@ -33,7 +34,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数据采集", "IMU Data Capture");
 
-type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
+type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -74,7 +75,7 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", synthetic: "synthetic", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
+    ? { annotate: "annotate", synthetic: "synthetic", data: "data", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
     : { capture: "capture", records: "library", settings: "settings", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -1065,7 +1066,16 @@ export default function App() {
 
   const refreshRecordings = async () => {
     try {
-      const value = await api<Recording[]>("/api/v1/recordings");
+      const value = annotationApplication
+        ? (await api<{recordings: Recording[]}>("/api/v1/recordings/queue-preview")).recordings
+        : await api<Recording[]>("/api/v1/recordings");
+      if (annotationApplication) {
+        const deepLinked = new URLSearchParams(location.search).get("recording");
+        if (deepLinked && !value.some(item => item.recording_id === deepLinked)) {
+          try { value.push(await api<Recording>(`/api/v1/recordings/${encodeURIComponent(deepLinked)}`)); }
+          catch { /* A stale deep link is handled by the workbench. */ }
+        }
+      }
       setRecordings(value);
       return value;
     } catch (e) {
@@ -1335,7 +1345,7 @@ export default function App() {
         <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && (tab === "annotate" || tab === "synthetic") ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_run_id && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}</button>}<button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_run_id && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}</button>}<button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>{tr("数据管理", "Data management")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
           <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
@@ -1403,6 +1413,7 @@ export default function App() {
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
       {annotationApplication && tab === "synthetic" && config?.synthetic_run_id && <SyntheticMotionPage />}
+      {annotationApplication && tab === "data" && session && <DataManagementPage isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_run_id)} />}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <LabelManagementWorkspace taxonomy={taxonomy} onChanged={setTaxonomy} isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_run_id)} />}
@@ -1769,15 +1780,18 @@ function LabelManagementWorkspace({taxonomy, onChanged, isAdmin, syntheticEnable
         <a href="#shared-concepts">{tr("真实 IMU 共用概念", "Shared real IMU concepts")}</a>
         <a href="#motion-only-concepts">{tr("动捕专用概念", "Motion-only concepts")}</a>
       </div>}
-      <div id="shared-concepts"><TaxonomyManagementPage taxonomy={taxonomy} onChanged={onChanged} /></div>
-      {syntheticEnabled && <SyntheticLabelManagement isAdmin={isAdmin} section="concepts" />}
+      <TaxonomyManagementPage taxonomy={taxonomy} onChanged={onChanged}
+        motionConcepts={syntheticEnabled ? <SyntheticLabelManagement isAdmin={isAdmin} section="concepts" /> : null} />
     </>}
     {section === "mappings" && syntheticEnabled
       && <SyntheticLabelManagement isAdmin={isAdmin} section="mappings" />}
   </main>;
 }
 
-function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void }) {
+function TaxonomyManagementPage({ taxonomy, onChanged, motionConcepts }: {
+  taxonomy: Taxonomy; onChanged: (value: Taxonomy) => void;
+  motionConcepts: ReactNode;
+}) {
   const [definition, setDefinition] = useState<Taxonomy>(taxonomy);
   const [editingCode, setEditingCode] = useState("");
   const [binaryLabel, setBinaryLabel] = useState<"fall" | "non_fall">("non_fall");
@@ -2025,7 +2039,10 @@ function TaxonomyManagementPage({ taxonomy, onChanged }: { taxonomy: Taxonomy; o
         <button className="primary" disabled={busy !== "" || !code.trim() || !name.trim()} onClick={createActivity}>新增标签</button>
       </div>
     </section>
-    {(["fall", "non_fall"] as const).map(taxonomyGroup)}
+    <div className="taxonomy-concept-grid" id="shared-concepts">
+      {(["fall", "non_fall"] as const).map(taxonomyGroup)}
+      {motionConcepts}
+    </div>
     <section className="panel taxonomy-migration">
       <div className="panel-title">{tr("历史标签迁移", "Historical label migration")}</div>
       <p className="stage-help">{tr("预览会冻结当前 taxonomy 版本和受影响 review 修订。执行后仅替换同一跌倒类型的当前标注，自动停用源标签，并为已完成正式数据生成新的活动导出；旧导出和快照不改写。", "Preview freezes the current taxonomy version and affected review revisions. Apply replaces the current label only within the same binary class, disables the source, and creates a new active export for completed production data. Old exports and snapshots remain unchanged.")}</p>
@@ -3107,6 +3124,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
         <aside ref={recordingDrawerRef} className="recording-drawer" role="dialog" aria-modal="true" aria-labelledby="recording-drawer-title">
           <div className="recording-drawer-controls">
             <div className="recording-drawer-header"><strong id="recording-drawer-title">{tr("选择录制", "Select recording")}</strong><button onClick={() => setRecordingDrawerOpen(false)}>{tr("关闭", "Close")}</button></div>
+            <a className="button-link" href="?view=data">{tr("在数据管理中搜索全部录制", "Search all recordings in Data management")}</a>
             <input ref={recordingSearchRef} placeholder={tr("搜索录制 ID、参与者或负责人", "Search recording ID, participant, or owner")} value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} />
             <div className="recording-drawer-filters">
               <select aria-label={tr("数据级别", "Data tier")} value={recordingTier} onChange={(event) => setRecordingTier(event.target.value as typeof recordingTier)}>
@@ -3182,7 +3200,7 @@ function AnnotationPage({ recordings, taxonomy, session, participants, onChanged
           </div>
           <div className="recording-drawer-footer" aria-live="polite">
             <span>{tr(`当前显示 ${activeRecordingQueue.length} 条`, `Showing ${activeRecordingQueue.length}`)}</span>
-            <span>{tr(`筛选结果共 ${visibleRecordingCount} 条 · 列表可滚动`, `${visibleRecordingCount} filtered total · list scrolls`)}</span>
+            <span>{tr(`快捷列表共 ${visibleRecordingCount} 条 · 完整目录请用数据管理`, `${visibleRecordingCount} quick-list items · use Data management for the full catalog`)}</span>
           </div>
         </aside>
       </>}

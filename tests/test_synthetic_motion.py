@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.config import load_settings
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
+from imu_data_collector.synthetic_catalog import SyntheticCatalog
 from imu_data_collector.synthetic_motion import (
     LabelInput,
     ReviewClaimInput,
@@ -53,6 +55,92 @@ def _seed(store, prefix, candidate_id="clip-1"):
     store.write_json(f"{prefix}/candidates/{candidate_id}/{version_id}.json",
                      commit, if_generation_match=0)
     return candidate_id, version_id, preview_key
+
+
+def test_incremental_feed_indexes_new_commit_and_keeps_cursor_on_bad_digest(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    catalog = SyntheticCatalog(tmp_path / "catalog.sqlite3")
+    service = SyntheticReviewService(store, "pilot")
+    first_id, version_id, _ = _seed(store, service.prefix)
+    assert catalog.refresh(store, service.prefix, service._commit,
+                           minimum_interval_s=0)["new"] == 1
+    second_id, _, _ = _seed(store, service.prefix, "clip-2")
+    commit_key = service.commit_key(second_id, version_id)
+    commit = store.read_json(commit_key)[0]
+    payload = (json.dumps(commit, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False) + "\n").encode()
+    feed_key = f"{service.prefix}/index-feed/2026091701/20260917T010000000000Z-{second_id}.json"
+    feed = {"schema": "imu_motion_simulator.candidate_index_feed.v1",
+            "feed_key": feed_key, "candidate_id": second_id,
+            "version_id": version_id, "commit_key": commit_key,
+            "commit_sha256": "0" * 64}
+    store.write_json(feed_key, feed, if_generation_match=0)
+    assert catalog.refresh(store, service.prefix, service._commit,
+                           minimum_interval_s=0)["new"] == 0
+    with catalog._connect() as db:
+        assert db.execute("SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone() is None
+    store.delete(feed_key, if_generation_match=None)
+    store.write_json(feed_key, {**feed, "commit_sha256": hashlib.sha256(payload).hexdigest()},
+                     if_generation_match=0)
+    assert catalog.refresh(store, service.prefix, service._commit,
+                           minimum_interval_s=0)["new"] == 1
+    assert catalog.get(first_id, version_id)["decision"] == "unreviewed"
+    assert catalog.get(second_id, version_id)["decision"] == "unreviewed"
+    with catalog._connect() as db:
+        assert db.execute("SELECT value FROM catalog_meta WHERE key='feed_last_key'").fetchone()[0] == feed_key
+
+
+def test_unified_synthetic_work_queue_filters_paginates_and_pauses_claims(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.catalog_refresh_interval_s = 0
+    settings.annotation.synthetic_run_id = "pilot"
+    prefix = SyntheticReviewService(store, "pilot").prefix
+    _seed(store, prefix, "clip-1")
+    _seed(store, prefix, "clip-2")
+    with TestClient(create_annotation_app(settings, store=store)) as client:
+        base = "/api/v1/work-items?domain=synthetic&view=claimable"
+        first = client.get(base + "&limit=1")
+        assert first.status_code == 200
+        assert first.json()["total"] == 2
+        assert len(first.json()["items"]) == 1
+        cursor = first.json()["next_cursor"]
+        assert cursor
+        second = client.get(base + "&limit=1&cursor=" + cursor)
+        assert second.status_code == 200
+        assert second.json()["total"] == 2
+        assert second.json()["items"][0]["item_id"] != first.json()["items"][0]["item_id"]
+        assert second.json()["next_cursor"] is None
+        assert client.get(base + "&risk=ordinary").json()["total"] == 0
+        assert client.get(base + "&search=clip-2").json()["total"] == 1
+        pause = client.post("/api/v1/work-items/claim-pause", json={
+            "domain": "synthetic", "group": "ACCAD", "paused": True})
+        assert pause.status_code == 200
+        assert client.get(base).json()["total"] == 0
+        assert client.post("/api/v1/synthetic/queue/claim").json()["candidates"] == []
+        assert client.get("/api/v1/work-items?domain=synthetic&view=all").json()["total"] == 2
+
+
+def test_actionable_catalog_hides_superseded_candidate_versions(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    service = SyntheticReviewService(store, "pilot")
+    candidate_id, old_version, _ = _seed(store, service.prefix)
+    newer = store.read_json(service.commit_key(candidate_id, old_version))[0]
+    newer["version_id"] = "b" * 64
+    newer["published_at_utc"] = "2026-09-17T00:00:00Z"
+    store.write_json(service.commit_key(candidate_id, newer["version_id"]), newer,
+                     if_generation_match=0)
+    catalog = SyntheticCatalog(tmp_path / "catalog.sqlite3")
+    assert catalog.refresh(store, service.prefix, service._commit,
+                           minimum_interval_s=0)["new"] == 2
+    actionable, total = catalog.work_items(actor="reviewer", view="claimable")
+    assert total == 1
+    assert actionable[0]["version_id"] == newer["version_id"]
+    assert catalog.work_items(actor="reviewer", view="all")[1] == 2
 
 
 def test_synthetic_reviews_freeze_exact_pass_and_keep_old_snapshot(tmp_path):
@@ -128,10 +216,13 @@ def test_annotation_api_exposes_separate_synthetic_review_flow(tmp_path):
         assert response.status_code == 200
         assert len(response.json()["candidates"]) == 1
         base = f"/api/v1/synthetic/candidates/{candidate_id}/{version_id}"
-        response = client.get(base + "/files/index.html")
+        response = client.get(base + "/files/index.html?bridge=2")
         assert response.status_code == 200
         assert b"imu-synthetic-review-key" in response.content
+        assert b"#panel{display:none!important}" in response.content
         assert b"<body>review" in response.content
+        assert b"imu-synthetic-review-key" not in client.get(
+            base + "/files/index.html").content
         assert client.get(base + "/files/api/capabilities").json() == {
             "review_write": False}
         response = client.post(base + "/reviews", json={
