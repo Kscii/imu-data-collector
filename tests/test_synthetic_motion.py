@@ -17,6 +17,86 @@ from imu_data_collector.synthetic_motion import (
     ReviewInput,
     SyntheticReviewService,
 )
+from imu_data_collector.synthetic_provisional import (
+    default_rules as default_provisional_rules,
+)
+from imu_data_collector.synthetic_provisional import (
+    preview_label,
+    validate_rules,
+)
+
+
+def test_provisional_export_is_separate_downloadable_dataset(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.synthetic_run_id = "pilot"
+    prefix = SyntheticReviewService(store, "pilot").prefix
+    export_id = "a" * 32
+    dataset_id = "synthetic-provisional-" + export_id
+    base = f"{prefix}/datasets/provisional/exports/{export_id}"
+    source = tmp_path / (dataset_id + ".h5")
+    source.write_bytes(b"test-provisional-file")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    key = base + "/" + source.name
+    store.put_file(source, key, content_type="application/x-hdf5",
+                   metadata={"sha256": digest})
+    manifest = {"schema": "imu_motion_simulator.provisional_export.v1",
+                "export_id": export_id, "dataset_id": dataset_id,
+                "artifact_profile": "imu_dataset_provisional",
+                "evaluation_role": "unverified_synthetic",
+                "candidate_count": 1, "sequence_count": 1, "sample_count": 10,
+                "weak_count": 1, "unresolved_count": 0,
+                "rules_revision": 1, "rules_sha256": "b" * 64,
+                "created_at_utc": "2026-09-18T00:00:00Z",
+                "h5": {"object_key": key, "filename": source.name,
+                       "sha256": digest, "byte_length": source.stat().st_size}}
+    store.write_json(base + "/manifest.json", manifest, if_generation_match=0)
+    with TestClient(create_annotation_app(settings, store=store)) as client:
+        listed = client.get("/api/v1/synthetic/datasets/provisional")
+        assert listed.status_code == 200
+        assert listed.json()["exports"][0]["export_id"] == export_id
+        downloaded = client.get(f"/api/v1/synthetic/datasets/provisional/{export_id}/download",
+                                headers={"Range": "bytes=0-3"})
+        assert downloaded.status_code == 206
+        assert downloaded.content == b"test"
+        assert downloaded.headers["x-content-sha256"] == digest
+        manifest_response = client.get(
+            f"/api/v1/synthetic/datasets/provisional/{export_id}/manifest")
+        assert manifest_response.json() == manifest
+        assert client.get("/api/v1/synthetic/snapshots").json()["snapshots"] == []
+        assert client.get("/api/v1/synthetic/provisional-rules").json()["revision"] == 1
+
+
+def test_provisional_rule_preview_keeps_conflicts_unresolved():
+    rules = default_provisional_rules()
+    commit = {"source_dataset": "ACCAD", "label_candidates": [
+        {"origin": "babel-1.0", "kind": "recording-candidate", "code": "walk",
+         "categories": ["walk"]},
+        {"origin": "babel-1.0", "kind": "temporal-candidate", "code": "transition",
+         "categories": ["transition"]}]}
+    assert preview_label(commit, rules)["state"] == "unresolved"
+    rules["rules"][0]["is_fall"] = True
+    with pytest.raises(ValueError, match="跌倒"):
+        validate_rules(rules)
+
+
+def test_provisional_preview_prefers_dataset_specific_rule():
+    rules = default_provisional_rules()
+    rules["rules"].append({"rule_id": "accad-walk-v1", "origin": "babel-1.0",
+                           "source_value": "walk", "source_dataset": "ACCAD",
+                           "target_code": "walking_special", "is_fall": False})
+    validate_rules(rules)
+    commit = {"source_dataset": "ACCAD", "label_candidates": [
+        {"origin": "babel-1.0", "kind": "recording-candidate",
+         "code": "walk", "categories": ["walk"]}]}
+    assert preview_label(commit, rules) == {
+        "state": "weak", "code": "walking_special", "rule_id": "accad-walk-v1"}
+    assert preview_label({**commit, "source_dataset": "EKUT"}, rules) == {
+        "state": "weak", "code": "walking", "rule_id": "babel-walk-v1"}
 
 
 def _seed(store, prefix, candidate_id="clip-1"):

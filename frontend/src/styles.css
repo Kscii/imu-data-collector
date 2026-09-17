@@ -435,6 +435,15 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .dataset-file .button-link { justify-self: start; margin-top: 3px; }
 .dataset-history { display: grid; gap: 10px; }
 .dataset-history > summary { cursor: pointer; }
+.provisional-catalog { margin-top: 14px; }
+.provisional-lookup { display: grid; gap: 8px; padding: 12px; border: 1px solid #2b3e5d; border-radius: 9px; background: #0b1525; }
+.provisional-lookup-fields, .provisional-downloads { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.provisional-lookup-fields input { min-width: 220px; flex: 1 1 220px; }
+.provisional-lookup-fields input:nth-child(2) { flex: 2 1 380px; }
+.provisional-rules { border-top: 1px solid #27364f; padding-top: 12px; }
+.provisional-rules summary { cursor: pointer; font-weight: 700; }
+.provisional-rules textarea { width: 100%; box-sizing: border-box; font: 12px ui-monospace, monospace; }
+.provisional-rules pre { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .model-catalog-page { display: grid; gap: 12px; }
 .model-catalog { display: grid; gap: 16px; }
 .model-catalog-heading, .model-publication-heading { display: flex; justify-content: space-between; align-items: start; gap: 14px; }
