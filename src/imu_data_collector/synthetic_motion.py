@@ -669,12 +669,13 @@ class SyntheticReviewService:
         key = f"{self.prefix}/snapshots/requests/{snapshot_id}.json"
         try:
             self.store.write_json(key, intent, if_generation_match=0)
-        except ObjectConflictError:
+        except ObjectConflictError as error:
             existing, _ = self.store.read_json(key)
             if (existing.get("schema") != intent["schema"]
                     or existing.get("snapshot_id") != snapshot_id
                     or existing.get("entries") != entries):
-                raise ValueError("Snapshot identity conflicts with frozen inputs")
+                raise ValueError(
+                    "Snapshot identity conflicts with frozen inputs") from error
             return {"snapshot_id": snapshot_id,
                     "state": self.snapshot(snapshot_id)["result"]["state"],
                     "candidate_count": len(entries), "already_exists": True}
