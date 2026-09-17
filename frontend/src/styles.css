@@ -719,6 +719,9 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .synthetic-chart-header { display: flex; gap: 7px; align-items: center; min-width: 0; }
 .synthetic-chart-header strong { white-space: nowrap; font-size: 12px; }
 .synthetic-chart-header button { padding: 4px 7px; white-space: nowrap; font-size: 10px; }
+.synthetic-chart-mode { display: flex; gap: 3px; margin-left: auto; padding: 2px; border: 1px solid #354765; border-radius: 7px; }
+.synthetic-chart-mode button { border: 0; background: transparent; }
+.synthetic-chart-mode button.active { background: #1d3b65; color: #f8fafc; }
 .synthetic-chart-header select { min-width: 0; max-width: 150px; padding: 3px; font-size: 10px; }
 .synthetic-chart-legend { flex: 1 1 auto; min-width: 0; color: #9eb0c8; font-size: 10px; }
 .synthetic-chart-sensor { color: #9eb0c8; white-space: nowrap; font-size: 10px; }
