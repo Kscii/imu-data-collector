@@ -1,4 +1,6 @@
 import hashlib
+import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -7,7 +9,12 @@ from fastapi.testclient import TestClient
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.config import load_settings
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
-from imu_data_collector.synthetic_motion import ReviewInput, SyntheticReviewService
+from imu_data_collector.synthetic_motion import (
+    LabelInput,
+    ReviewClaimInput,
+    ReviewInput,
+    SyntheticReviewService,
+)
 
 
 def _seed(store, prefix):
@@ -187,6 +194,107 @@ def test_quality_pass_requires_separate_formal_label_for_snapshot(tmp_path):
         assert "label_sha256" in entry
         review = store.read_json(passed.json()["revision_key"])[0]
         assert review["labels"] == []
+
+
+def test_reviewed_results_can_be_claimed_revised_and_reset_without_changing_snapshot(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.catalog_refresh_interval_s = 0
+    settings.annotation.synthetic_run_id = "pilot"
+    service = create_annotation_app(settings, store=store).state.synthetic_review_service
+    candidate_id, version_id, _ = _seed(store, service.prefix)
+    first = service.claim("reviewer-a")[0]
+    base = dict(candidate_id=candidate_id, version_id=version_id)
+    service.review(candidate_id, version_id, ReviewInput(
+        decision="pass", expected_revision=0, lease_token=first["lease_token"]),
+        "reviewer-a")
+    concept = next(item for item in service.labels.catalog()["concepts"]
+                   if item["active"] and not item["is_fall"])
+    service.set_label(candidate_id, version_id, LabelInput(
+        code=concept["code"], expected_revision=0), "reviewer-a")
+    frozen = service.create_snapshot("reviewer-a")
+    request = service.snapshot(frozen["snapshot_id"])["request"]
+
+    claim = service.claim_reviewed("reviewer-b", ReviewClaimInput(
+        **base, expected_revision=1))
+    with pytest.raises(ObjectConflictError, match="其他人"):
+        service.claim_reviewed("reviewer-a", ReviewClaimInput(**base, expected_revision=1))
+    with pytest.raises(ObjectConflictError, match="领取复审"):
+        service.review(candidate_id, version_id, ReviewInput(
+            decision="reject", reason_codes=["imu_artifact"],
+            expected_revision=1), "reviewer-a")
+    rejected = service.review(candidate_id, version_id, ReviewInput(
+        decision="reject", reason_codes=["imu_artifact"],
+        expected_revision=1, lease_token=claim["lease_token"]), "reviewer-b")
+    assert rejected["revision"] == 2
+    assert service.list_candidates()[0]["decision"] == "reject"
+    with pytest.raises(ObjectConflictError, match="变化"):
+        service.claim_reviewed("reviewer-a", ReviewClaimInput(**base, expected_revision=1))
+    with pytest.raises(ObjectConflictError, match="审核已被更新"):
+        service.review(candidate_id, version_id, ReviewInput(
+            decision="pass", expected_revision=1), "reviewer-a")
+
+    claim = service.claim_reviewed("reviewer-a", ReviewClaimInput(
+        **base, expected_revision=2))
+    reset = service.review(candidate_id, version_id, ReviewInput(
+        decision="unreviewed", expected_revision=2,
+        lease_token=claim["lease_token"]), "reviewer-a")
+    assert reset["revision"] == 3
+    assert store.read_json(reset["revision_key"])[0]["reason"] is None
+    row = service.list_candidates()[0]
+    assert row["decision"] == "unreviewed" and row["label"]["code"] == concept["code"]
+    assert service.claim("reviewer-a") == []
+    assert service.snapshot(frozen["snapshot_id"])["request"] == request
+    with pytest.raises(ValueError, match="No accepted"):
+        service.create_snapshot("reviewer-b")
+    next_claim = service.claim("reviewer-b")[0]
+    service.review(candidate_id, version_id, ReviewInput(
+        decision="pass", expected_revision=3,
+        lease_token=next_claim["lease_token"]), "reviewer-b")
+    assert service.list_candidates()[0]["label"]["code"] == concept["code"]
+    assert service.create_snapshot("reviewer-b")["candidate_count"] == 1
+
+
+def test_reviewed_claim_api_reuses_own_lease_and_releases_expired_lease(tmp_path):
+    store = LocalFilesystemStore(tmp_path / "objects")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.catalog_refresh_interval_s = 0
+    settings.annotation.synthetic_run_id = "pilot"
+    app = create_annotation_app(settings, store=store)
+    service = app.state.synthetic_review_service
+    candidate_id, version_id, _ = _seed(store, service.prefix)
+    first = service.claim("reviewer-a")[0]
+    service.review(candidate_id, version_id, ReviewInput(
+        decision="pass", expected_revision=0,
+        lease_token=first["lease_token"]), "reviewer-a")
+    request = {"candidate_id": candidate_id, "version_id": version_id,
+               "expected_revision": 1}
+    with TestClient(app) as client:
+        claimed = client.post("/api/v1/synthetic/queue/claim-reviewed", json=request)
+        assert claimed.status_code == 200
+        token = claimed.json()["lease_token"]
+        assert client.post("/api/v1/synthetic/queue/claim-reviewed",
+                           json=request).json()["lease_token"] == token
+        with pytest.raises(ObjectConflictError, match="其他人"):
+            service.claim_reviewed("another-reviewer", ReviewClaimInput(**request))
+        with sqlite3.connect(service.catalog.path) as db:
+            db.execute("UPDATE leases SET expires_at=? WHERE token=?",
+                       (time.time() - 1, token))
+        replacement = service.claim_reviewed(
+            "another-reviewer", ReviewClaimInput(**request))
+        assert replacement["lease_token"] != token
+        with pytest.raises(ObjectConflictError, match="过期"):
+            service.review(candidate_id, version_id, ReviewInput(
+                decision="reject", reason="test", expected_revision=1,
+                lease_token=token), "reviewer-a")
 
 
 def test_queue_skip_cools_down_candidate_for_same_actor(tmp_path):
