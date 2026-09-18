@@ -426,6 +426,7 @@ type ProvisionalExport = {
   candidate_count: number;
   sequence_count: number;
   sample_count: number;
+  duration_s?: number;
   weak_count: number;
   unresolved_count: number;
   rules_sha256: string;
@@ -4000,7 +4001,7 @@ function ProvisionalDatasetSection({ exports, error, refresh, isAdmin }: {
     {exports.map((item, index) => <article className="dataset-snapshot" key={item.export_id}>
       <div className="dataset-snapshot-heading"><div>
         <strong>{index === 0 ? tr("最新不可变版本", "Latest immutable version") : tr("历史版本", "Earlier version")} · {item.export_id}</strong>
-        <span>{item.candidate_count.toLocaleString()} {tr("片段", "clips")} · {item.sequence_count.toLocaleString()} {tr("序列", "sequences")} · {item.sample_count.toLocaleString()} {tr("采样行", "sample rows")} · {new Date(item.created_at_utc).toLocaleString()}</span>
+        <span>{item.candidate_count.toLocaleString()} {tr("片段", "clips")} · {item.sequence_count.toLocaleString()} {tr("序列", "sequences")} · {item.sample_count.toLocaleString()} {tr("采样行", "sample rows")}{(item.duration_s != null || item.sequence_count === item.candidate_count) && <> · {item.duration_s != null ? "" : tr("约 ", "about ")}{((item.duration_s ?? item.sample_count / 25) / 3600).toFixed(2)} {tr("小时动作", "motion hours")}</>} · {new Date(item.created_at_utc).toLocaleString()}</span>
       </div><span className="dataset-availability">{item.coverage === "complete" ? tr("生产已结束", "Production finished") : tr("阶段性版本", "Partial export")} · {tr("未人工审核", "Unreviewed")}</span></div>
       <div className="stage-help">{tr("弱标签", "Weak labels")} {item.weak_count.toLocaleString()} · {tr("未解析", "Unresolved")} {item.unresolved_count.toLocaleString()} · {formatDatasetBytes(item.h5.byte_length)} · {tr("规则版本", "Rules revision")} {item.rules_revision}</div>
       <details className="dataset-checks"><summary>{tr("校验信息", "Verification")}</summary><code>H5 SHA-256 {item.h5.sha256}</code><code>rules SHA-256 {item.rules_sha256}</code></details>
