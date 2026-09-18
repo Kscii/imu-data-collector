@@ -80,7 +80,12 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
   const [pauseBusy, setPauseBusy] = useState(false);
   const [error, setError] = useState("");
   const [scrollTop, setScrollTop] = useState(0);
+  const [listChanged, setListChanged] = useState(false);
   const list = useRef<HTMLDivElement>(null);
+  const sentinel = useRef<HTMLDivElement>(null);
+  const itemsRef = useRef<WorkItem[]>([]);
+  const loading = useRef<number | null>(null);
+  const polling = useRef(false);
   const generation = useRef(0);
 
   useEffect(() => {
@@ -106,27 +111,90 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
   }, [domain, view, search, group, status, risk, labelState, tier]);
 
   const load = async (cursor: string | null, current: number) => {
+    if (loading.current === current) return;
+    loading.current = current;
     const query = new URLSearchParams(params);
     if (cursor) query.set("cursor", cursor);
     setBusy(true); setError("");
     try {
       const page = await request<Page>(`/api/v1/work-items?${query}`);
       if (generation.current !== current) return;
-      setItems(previous => cursor ? [...previous, ...page.items] : page.items);
+      setItems(previous => {
+        const seen = new Set(previous.map(item => item.key));
+        const next = cursor ? [...previous, ...page.items.filter(item => !seen.has(item.key))]
+          : page.items;
+        itemsRef.current = next;
+        return next;
+      });
       setTotal(page.total); setNextCursor(page.next_cursor);
     } catch (reason) {
       if (generation.current === current) setError(String(reason));
     } finally {
+      if (loading.current === current) loading.current = null;
       if (generation.current === current) setBusy(false);
     }
   };
 
   useEffect(() => {
     const current = ++generation.current;
+    loading.current = null; itemsRef.current = [];
     setItems([]); setTotal(0); setNextCursor(null); setScrollTop(0);
+    setListChanged(false); setBusy(false);
     list.current?.scrollTo({top: 0});
     void load(null, current);
   }, [params.toString()]);
+
+  useEffect(() => {
+    if (!nextCursor || busy || !list.current || !sentinel.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries[0]?.isIntersecting && loading.current !== generation.current)
+        void load(nextCursor, generation.current);
+    }, {root: list.current, rootMargin: "400px"});
+    observer.observe(sentinel.current);
+    return () => observer.disconnect();
+  }, [nextCursor, busy, params.toString()]);
+
+  useEffect(() => {
+    let live = true;
+    const refreshHead = async () => {
+      const current = generation.current;
+      if (document.hidden || polling.current || loading.current === current) return;
+      polling.current = true;
+      try {
+        const page = await request<Page>(`/api/v1/work-items?${params}`);
+        if (!live || current !== generation.current) return;
+        const previous = itemsRef.current;
+        if (!previous.length) return;
+        const firstOld = page.items.findIndex(item => item.key === previous[0].key);
+        const purePrefix = firstOld >= 0 && page.items.slice(firstOld).every((item, index) =>
+          previous[index]?.key === item.key);
+        if (purePrefix) {
+          const inserted = page.items.slice(0, firstOld);
+          const refreshed = new Map(page.items.map(item => [item.key, item]));
+          const merged = [...inserted, ...previous.map(item => refreshed.get(item.key) ?? item)];
+          itemsRef.current = merged;
+          setItems(merged);
+          if (inserted.length && list.current && list.current.scrollTop > 8) {
+            const position = list.current.scrollTop + inserted.length * 84;
+            requestAnimationFrame(() => list.current?.scrollTo({top: position}));
+          }
+          if (page.next_cursor && !nextCursor) setNextCursor(page.next_cursor);
+          setListChanged(false);
+        } else if (page.items[0]?.key !== previous[0].key || page.total !== total) {
+          setListChanged(true);
+        }
+        setTotal(page.total);
+        setCounts(previousCounts => ({...previousCounts, [view]: page.total}));
+      } catch (reason) {
+        if (live && current === generation.current) setError(String(reason));
+      } finally { polling.current = false; }
+    };
+    const timer = window.setInterval(() => void refreshHead(), 20_000);
+    const visible = () => { if (!document.hidden) void refreshHead(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { live = false; window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible); };
+  }, [params.toString(), nextCursor, total, view]);
 
   useEffect(() => {
     let live = true;
@@ -173,6 +241,14 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
     finally { setPauseBusy(false); }
   };
 
+  const refreshList = () => {
+    const current = ++generation.current;
+    loading.current = null; itemsRef.current = [];
+    setItems([]); setNextCursor(null); setBusy(false); setListChanged(false);
+    setScrollTop(0); list.current?.scrollTo({top: 0});
+    void load(null, current);
+  };
+
   const rowHeight = 84;
   const start = Math.max(0, Math.floor(scrollTop / rowHeight) - 6);
   const end = Math.min(items.length, start + 28);
@@ -183,8 +259,10 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
         <h2>{tr("先处理待办，再查找全部数据", "Work the queue, then search the catalog")}</h2>
         <p>{tr("这里统一管理真实 IMU 录制与动捕合成片段；打开条目后进入各自的审核工作台。", "Manage real IMU recordings and synthetic clips here, then open them in their review workbenches.")}</p></div>
       <div className="data-manager-progress">
-        <strong>{progress ? `${progress.indexed ?? progress.published}/${progress.published}` : "—"}</strong>
-        <span>{tr("已索引／已发布", "Indexed / published")}</span>
+        <strong>{progress ? domain === "real"
+          ? `${progress.indexed ?? 0}/${progress.published}` : progress.published : "—"}</strong>
+        <span>{domain === "real" ? tr("已索引／已发布", "Indexed / published")
+          : tr("平台已索引候选", "Candidates indexed by platform")}</span>
         <small>{tr("目录更新", "Catalog updated")} · {formatDate(progress?.indexed_at_utc ?? null)}</small>
         <small>{tr("最新数据", "Latest data")} · {formatDate(progress?.latest_published_at_utc ?? null)}</small>
       </div>
@@ -246,6 +324,8 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
             : tr("暂停新领取", "Pause claiming")}</button>}
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {listChanged && <button className="data-manager-update" onClick={refreshList}>
+        {tr("列表已有更新，点击查看最新数据", "List updated. Show latest items")}</button>}
       <div className="data-manager-result-head"><strong>{tr("匹配条目", "Matching items")} · {total}</strong>
         <span>{tr("仅逐条审核；批次暂停不会撤销已领取任务", "Review items individually; a paused batch keeps existing claims")}</span></div>
       <div ref={list} className="data-manager-list" onScroll={event =>
@@ -266,10 +346,11 @@ export function DataManagementPage({isAdmin, syntheticEnabled}: {
               {item.claim_paused ? ` · ${tr("暂停领取", "Claim paused")}` : ""}</span></div>
         </button>)}
         <div style={{height: Math.max(0, items.length - end) * rowHeight}} />
+        <div ref={sentinel} aria-hidden="true" />
       </div>
       <div className="data-manager-footer"><span>{tr("已加载", "Loaded")} {items.length}/{total}</span>
-        {nextCursor && <button disabled={busy} onClick={() => void load(nextCursor, generation.current)}>
-          {busy ? tr("正在加载…", "Loading…") : tr("加载下一页", "Load next page")}</button>}</div>
+        {nextCursor && <span role="status">{busy ? tr("正在加载…", "Loading…")
+          : tr("向下滚动自动加载", "Scroll to load more")}</span>}</div>
     </section>
   </main>;
 }

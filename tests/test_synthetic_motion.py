@@ -49,6 +49,7 @@ def test_provisional_export_is_separate_downloadable_dataset(tmp_path):
                 "artifact_profile": "imu_dataset_provisional",
                 "evaluation_role": "unverified_synthetic",
                 "candidate_count": 1, "sequence_count": 1, "sample_count": 10,
+                "duration_s": 0.4,
                 "weak_count": 1, "unresolved_count": 0,
                 "rules_revision": 1, "rules_sha256": "b" * 64,
                 "created_at_utc": "2026-09-18T00:00:00Z",
