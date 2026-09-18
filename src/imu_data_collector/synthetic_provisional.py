@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 
 from fastapi import FastAPI, HTTPException, Request
@@ -142,6 +143,11 @@ def register_provisional_routes(app: FastAPI, service, current_actor) -> None:
                 or not HEX.fullmatch(str(h5.get("sha256", ""))) \
                 or type(h5.get("byte_length")) is not int or h5["byte_length"] < 1:
             raise HTTPException(status_code=422, detail="未审核数据 manifest 无效")
+        duration = value.get("duration_s")
+        if duration is not None and (isinstance(duration, bool)
+                                     or not isinstance(duration, (int, float))
+                                     or not math.isfinite(duration) or duration <= 0):
+            raise HTTPException(status_code=422, detail="未审核数据时长无效")
         info = store.stat(key)
         if info is None or info.size_bytes != h5["byte_length"] \
                 or info.metadata.get("sha256") not in (None, h5["sha256"]):
