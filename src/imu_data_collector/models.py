@@ -778,7 +778,9 @@ class DeviceConfigurationReference(BaseModel):
 class CaptureManifestV2(BaseModel):
     """采集端与标注端之间唯一稳定的公开交接合同。"""
 
-    schema_version: Literal["2.0.0", "2.1.0", "3.0.0", "3.1.0", "3.2.0"] = "3.0.0"
+    schema_version: Literal[
+        "2.0.0", "2.1.0", "3.0.0", "3.1.0", "3.2.0", "3.3.0"
+    ] = "3.0.0"
     recording_id: str
     collection_id: str
     participant_id: str | None = None
@@ -794,6 +796,7 @@ class CaptureManifestV2(BaseModel):
     calibration: CalibrationProfile = Field(default_factory=CalibrationProfile)
     sensor: SensorReference | None = None
     configuration: DeviceConfigurationReference | None = None
+    quality_warnings: list[str] = Field(default_factory=list)
     artifacts: list[ArtifactDescriptor]
 
     @model_validator(mode="before")
@@ -810,21 +813,38 @@ class CaptureManifestV2(BaseModel):
 
     @model_validator(mode="after")
     def validate_artifacts(self) -> CaptureManifestV2:
-        if self.schema_version in {"3.0.0", "3.1.0", "3.2.0"}:
+        modern_versions = {"3.0.0", "3.1.0", "3.2.0", "3.3.0"}
+        sensor_versions = {"3.1.0", "3.2.0", "3.3.0"}
+        configuration_versions = {"3.2.0", "3.3.0"}
+        if self.schema_version in modern_versions:
             if self.participant_id is not None:
                 raise ValueError("manifest 3.x 禁止包含 participant_id")
             if self.identity_mode != "annotation_required":
                 raise ValueError("manifest 3.x 必须由标注端确认参与者")
         elif not self.participant_id:
             raise ValueError("legacy manifest requires participant_id")
-        if self.schema_version in {"3.1.0", "3.2.0"} and self.sensor is None:
+        if self.schema_version in sensor_versions and self.sensor is None:
             raise ValueError("manifest 3.1+ 必须引用冻结的传感器 SN 档案")
-        if self.schema_version not in {"3.1.0", "3.2.0"} and self.sensor is not None:
+        if self.schema_version not in sensor_versions and self.sensor is not None:
             raise ValueError("只有 manifest 3.1+ 可以包含 sensor 引用")
-        if self.schema_version == "3.2.0" and self.configuration is None:
-            raise ValueError("manifest 3.2 必须引用冻结的配置 Snapshot")
-        if self.schema_version != "3.2.0" and self.configuration is not None:
-            raise ValueError("只有 manifest 3.2 可以包含 configuration 引用")
+        if (
+            self.schema_version in configuration_versions
+            and self.configuration is None
+        ):
+            raise ValueError("manifest 3.2+ 必须引用冻结的配置 Snapshot")
+        if (
+            self.schema_version not in configuration_versions
+            and self.configuration is not None
+        ):
+            raise ValueError("只有 manifest 3.2+ 可以包含 configuration 引用")
+        if self.schema_version != "3.3.0" and self.quality_warnings:
+            raise ValueError("只有 manifest 3.3 可以携带质量警告")
+        if len(self.quality_warnings) != len(set(self.quality_warnings)):
+            raise ValueError("manifest 质量警告不能重复")
+        if any(
+            not item.strip() or len(item) > 500 for item in self.quality_warnings
+        ):
+            raise ValueError("manifest 质量警告必须是 1 到 500 字符的非空文本")
         roles = [item.role for item in self.artifacts]
         required = {"capture_h5", "video_mkv", "preview_mp4"}
         if set(roles) != required or len(roles) != len(required):

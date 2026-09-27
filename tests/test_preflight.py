@@ -254,6 +254,55 @@ def test_startup_revalidation_does_not_touch_uploaded_recording(
     assert coordinator.catalog.get("uploaded-recording") == summary
 
 
+def test_startup_revalidation_reclassifies_video_blockers_as_warnings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    recording_id = "historical-video-blockers"
+    directory = tmp_path / "data" / "pilot" / recording_id
+    directory.mkdir(parents=True)
+    h5_path = directory / f"{recording_id}.h5"
+    mkv_path = directory / f"{recording_id}.mkv"
+    h5_path.write_bytes(b"fixture")
+    mkv_path.write_bytes(b"fixture")
+    video_warnings = (
+        "prod video actual span FPS is below 27",
+        "video frame gap exceeds 0.2 seconds",
+    )
+    coordinator.catalog.upsert(
+        RecordingSummary(
+            recording_id=recording_id,
+            collection_id="pilot",
+            data_tier="prod",
+            state=RecordingState.NEEDS_ATTENTION,
+            started_at_utc="2026-09-27T00:00:00Z",
+            h5_path=str(h5_path),
+            mkv_path=str(mkv_path),
+            validation_issues=list(video_warnings),
+        )
+    )
+    monkeypatch.setattr(
+        "imu_data_collector.coordinator.validate_capture_h5",
+        lambda *_args, **_kwargs: ValidationReport(True, (), video_warnings, {}),
+    )
+
+    result = coordinator.revalidate_unuploaded_recordings()
+
+    updated = coordinator.catalog.get(recording_id)
+    assert result == {
+        "scanned": 1,
+        "updated": 1,
+        "ready": 1,
+        "still_blocked": 0,
+        "skipped": 0,
+    }
+    assert updated is not None
+    assert updated.state == RecordingState.READY
+    assert updated.validation_issues == []
+    assert updated.quality_warnings == list(video_warnings)
+
+
 def test_startup_revalidation_preserves_non_legacy_historical_blocker(
     tmp_path: Path,
     monkeypatch,

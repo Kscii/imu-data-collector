@@ -39,11 +39,13 @@ from imu_data_collector.models import (
     CalibrationProfile,
     CaptureManifestV2,
     DataTier,
+    DeviceConfigurationReference,
     IndexReceipt,
     PublishTarget,
     RecordingState,
     RecordingSummary,
     ReviewWorkflowState,
+    SensorReference,
     TrainingExportReference,
 )
 from imu_data_collector.publisher import _require_annotation_capabilities
@@ -141,6 +143,7 @@ def _publish_fixture(
     data_tier: DataTier = DataTier.TEST,
     manifest_schema_version: str = "2.1.0",
     source_h5_schema_version: str = CAPTURE_SCHEMA_VERSION,
+    quality_warnings: list[str] | None = None,
 ) -> str:
     source = tmp_path / f"source-{recording_id}"
     source.mkdir()
@@ -185,20 +188,51 @@ def _publish_fixture(
                 content_type=content_type,
             )
         )
-    manifest = CaptureManifestV2(
-        recording_id=recording_id,
-        collection_id="pilot",
-        participant_id="xfan0282",
-        data_tier=data_tier,
-        captured_at_utc="2026-08-26T00:00:00+00:00",
-        duration_ns=1_000_000_000,
-        source_h5_schema_version=source_h5_schema_version,
-        software_revision="test",
-        calibration=CalibrationProfile(),
-        artifacts=descriptors,
-    )
-    payload = manifest.model_dump(mode="json")
-    payload["schema_version"] = manifest_schema_version
+    if manifest_schema_version == "3.3.0":
+        manifest = CaptureManifestV2(
+            schema_version="3.3.0",
+            recording_id=recording_id,
+            collection_id="pilot",
+            data_tier=data_tier,
+            captured_at_utc="2026-08-26T00:00:00+00:00",
+            duration_ns=1_000_000_000,
+            source_h5_schema_version=source_h5_schema_version,
+            software_revision="test",
+            calibration=CalibrationProfile(),
+            sensor=SensorReference(
+                sensor_sn="IMU-0002-R01",
+                device_profile_sha256="a" * 64,
+                protocol_id="acce_gyro_abf0_v1",
+                firmware_version="fixture",
+                firmware_evidence_status="fixture",
+            ),
+            configuration=DeviceConfigurationReference(
+                snapshot_id="cfg-" + "b" * 24,
+                snapshot_sha256="c" * 64,
+                content_sha256="d" * 64,
+                source="approved",
+                approval_state_at_capture="approved",
+                si_profile_id="si-" + "e" * 24,
+            ),
+            quality_warnings=quality_warnings or [],
+            artifacts=descriptors,
+        )
+        payload = manifest.model_dump(mode="json")
+    else:
+        manifest = CaptureManifestV2(
+            recording_id=recording_id,
+            collection_id="pilot",
+            participant_id="xfan0282",
+            data_tier=data_tier,
+            captured_at_utc="2026-08-26T00:00:00+00:00",
+            duration_ns=1_000_000_000,
+            source_h5_schema_version=source_h5_schema_version,
+            software_revision="test",
+            calibration=CalibrationProfile(),
+            artifacts=descriptors,
+        )
+        payload = manifest.model_dump(mode="json")
+        payload["schema_version"] = manifest_schema_version
     store.write_json(
         f"captures/{recording_id}/manifest.json",
         payload,
@@ -478,6 +512,7 @@ def test_annotation_reads_legacy_manifests_and_publishes_v3_capability(
             "3.0.0",
             "3.1.0",
             "3.2.0",
+            "3.3.0",
         ]
         assert capabilities["accepted_capture_h5_schema_versions"] == list(
             ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS
@@ -490,6 +525,29 @@ def test_annotation_reads_legacy_manifests_and_publishes_v3_capability(
     receipt, _generation = store.read_json(f"index-receipts/{recording_id}.json")
     assert receipt["status"] == "indexed"
     assert receipt["manifest_generation"] > 0
+
+
+def test_annotation_indexes_and_exposes_manifest_quality_warnings(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    warning = "video frame gap exceeds 0.2 seconds"
+    recording_id = _publish_fixture(
+        store,
+        tmp_path,
+        manifest_schema_version="3.3.0",
+        quality_warnings=[warning],
+    )
+    app = create_annotation_app(settings, store)
+
+    with TestClient(app) as client:
+        refreshed = client.post("/api/v1/index/refresh").json()
+        summary = client.get(f"/api/v1/recordings/{recording_id}").json()
+
+    assert refreshed["imported"] == 1
+    assert refreshed["issues"] == []
+    assert summary["quality_warnings"] == [warning]
 
 
 def test_annotation_rejection_has_structured_issue_and_receipt(tmp_path: Path) -> None:

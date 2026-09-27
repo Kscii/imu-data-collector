@@ -67,7 +67,11 @@ from imu_data_collector.models import (
 from imu_data_collector.publisher import publish_recording
 from imu_data_collector.storage import create_object_store
 from imu_data_collector.upload import RcloneRemoteStore
-from imu_data_collector.validation import validate_capture_h5
+from imu_data_collector.validation import (
+    VIDEO_ACTUAL_SPAN_FPS_WARNING,
+    VIDEO_FRAME_GAP_WARNING,
+    validate_capture_h5,
+)
 from imu_data_collector.video import (
     FFmpegVideoRecorder,
     PreviewFrameHub,
@@ -76,6 +80,13 @@ from imu_data_collector.video import (
 )
 
 logger = logging.getLogger(__name__)
+RECLASSIFIABLE_VALIDATION_ISSUES = frozenset(
+    {
+        LEGACY_PACKET_RESIDUAL_ISSUE,
+        VIDEO_ACTUAL_SPAN_FPS_WARNING,
+        VIDEO_FRAME_GAP_WARNING,
+    }
+)
 
 
 class AuthenticationRequiredError(RuntimeError):
@@ -2485,9 +2496,12 @@ class RecordingCoordinator:
         for summary in self.catalog.list():
             if summary.state != RecordingState.NEEDS_ATTENTION:
                 continue
-            # 该启动迁移只负责把旧版 0.2 秒阻断规则重分类为质量警告。
-            # 其他历史结论必须保留，不能用今天的 schema/taxonomy 策略静默覆盖。
-            if LEGACY_PACKET_RESIDUAL_ISSUE not in summary.validation_issues:
+            # 只重评明确从硬阻断降级为质量警告的旧结论。只要混有其他
+            # 历史问题，就保留原判定，不能用今天的策略静默覆盖。
+            historical_issues = set(summary.validation_issues)
+            if not historical_issues or not historical_issues.issubset(
+                RECLASSIFIABLE_VALIDATION_ISSUES
+            ):
                 result["skipped"] += 1
                 continue
             if summary.upload_state in {

@@ -144,7 +144,7 @@ async def test_legacy_unassigned_capture_keeps_manifest_3_0(
     assert manifest.sensor is None
 
 
-async def test_configuration_backed_capture_publishes_manifest_3_2(
+async def test_configuration_backed_capture_publishes_manifest_3_3(
     tmp_path: Path, monkeypatch
 ) -> None:
     async def directly(function, *args, **kwargs):
@@ -205,11 +205,13 @@ async def test_configuration_backed_capture_publishes_manifest_3_2(
         duration_ns=1,
         h5_path=str(h5_path),
         mkv_path=str(mkv_path),
+        quality_warnings=["video frame gap exceeds 0.2 seconds"],
     )
 
     manifest, _paths = await prepare_publication(summary, Settings())
 
-    assert manifest.schema_version == "3.2.0"
+    assert manifest.schema_version == "3.3.0"
+    assert manifest.quality_warnings == ["video frame gap exceeds 0.2 seconds"]
     assert manifest.sensor is not None
     assert manifest.configuration is not None
     assert manifest.configuration.snapshot_id == "local-cfg-" + "b" * 24

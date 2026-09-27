@@ -1003,6 +1003,8 @@ function issueLabel(issue: string) {
     "synchronization anchors have not been verified": "同步锚点尚未验证",
     "IMU scale calibration has not been verified": "IMU 尺度校准尚未验证",
     "IMU packet timestamp maximum residual exceeds 0.5 seconds": tr("IMU 包时间戳最大残差超过 0.5 秒", "IMU packet timestamp maximum residual exceeds 0.5 seconds"),
+    "prod video actual span FPS is below 27": tr("正式录制的视频实际跨度帧率低于 27 FPS", "Production video actual span FPS is below 27"),
+    "video frame gap exceeds 0.2 seconds": tr("视频帧缺口超过 0.2 秒", "Video frame gap exceeds 0.2 seconds"),
   };
   return labels[issue] ?? userVisibleMessage(issue);
 }
@@ -3270,6 +3272,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
               onTimeUpdate={(event) => updateVideoPosition(event.currentTarget.currentTime)}
               onSeeked={(event) => updateVideoPosition(event.currentTarget.currentTime)}
             />
+            {(selectedRecording?.quality_warnings ?? []).length > 0 && <div className="warning-banner compact-banner"><strong>{tr("采集质量警告（允许标注）：", "Capture quality warnings (annotation allowed):")}</strong>{selectedRecording?.quality_warnings?.map((warning) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
             <div className="frame-controls workbench-frame-controls">
               <button title="Shift+," onClick={() => stepFrame(-5)} disabled={!frameTimes || currentFrame <= 0}>−5</button>
               <button title="," onClick={() => stepFrame(-1)} disabled={!frameTimes || currentFrame <= 0}>−1</button>

@@ -62,8 +62,9 @@ macOS 安装后从“应用程序”打开 `IMU Data Collector.app`，它作为�
 [v0.3.0 发布说明](docs/releases/v0.3.0.md)。本轮不提供新的 Windows EXE、macOS DMG 或 Linux 二进制安装包。
 
 **客户提供的文档中，换算系数与当前新设备不匹配；仍需等待正确文档或与文档匹配的设备。
-因此 Windows/macOS 新版本暂缓发布。Linux 上的新设备同样只允许 test 原始数据采集，
-不能据此宣称正式 SI 换算、训练数据或跨平台实机验收已经完成。**
+`desktop-v0.3.1-rc.4` 只统一视频质量警告与上传策略，不改变任何设备的校准审批状态。
+没有 approved 配置和 verified SI 的设备仍只允许 test 原始数据采集，不能据此宣称正式 SI
+换算、训练数据或跨平台实机验收已经完成。**
 
 普通源码 Release 使用 `v0.3.0`；`desktop-v*` 是已有 Windows/macOS 打包工作流的独立入口。
 上文的 EXE/DMG 使用方式属于已有桌面版本，不代表本次源码 Release 包含这些安装包。
