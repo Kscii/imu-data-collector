@@ -103,6 +103,7 @@ ACCEPTED_MANIFEST_SCHEMA_VERSIONS = (
     "3.0.0",
     "3.1.0",
     "3.2.0",
+    "3.3.0",
 )
 TRAINING_SNAPSHOT_SCHEMA_VERSION = "4.0.0"
 CLIENT_DELIVERY_JOB_SCHEMA_VERSION = "cw12eu_client_hdf5_job_v1"
@@ -755,6 +756,7 @@ class AnnotationService:
             "started_at_utc": manifest.captured_at_utc,
             "duration_ns": manifest.duration_ns,
             "issues": [],
+            "quality_warnings": list(manifest.quality_warnings),
             "upload_state": "published",
             "purpose": (
                 "calibration_evidence"
@@ -1814,7 +1816,12 @@ class AnnotationService:
                 "capture_schema_version": manifest.source_h5_schema_version,
                 "started_at_utc": manifest.captured_at_utc,
             }
-            if manifest.schema_version not in {"3.0.0", "3.1.0", "3.2.0"}:
+            if manifest.schema_version not in {
+                "3.0.0",
+                "3.1.0",
+                "3.2.0",
+                "3.3.0",
+            }:
                 root_expected["participant_id"] = manifest.participant_id
             if manifest.sensor is not None:
                 root_expected.update(
@@ -1908,6 +1915,7 @@ class AnnotationService:
             "3.0.0",
             "3.1.0",
             "3.2.0",
+            "3.3.0",
         }:
             subject_id = f"cw12eu:{participant_id}"
         if subject_id is None:
@@ -2530,6 +2538,7 @@ class AnnotationService:
                     "3.0.0",
                     "3.1.0",
                     "3.2.0",
+                    "3.3.0",
                 }:
                     subject_id = f"cw12eu:{participant_id}"
                 if subject_id is None:

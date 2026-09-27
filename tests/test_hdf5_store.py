@@ -476,7 +476,7 @@ def test_prod_capture_requires_verified_controls_only_when_policy_is_fixed(
     assert "prod video fixed camera controls are not verified" in report.issues
 
 
-def test_prod_capture_rejects_low_actual_span_fps(tmp_path: Path) -> None:
+def test_prod_capture_warns_for_low_actual_span_fps(tmp_path: Path) -> None:
     path = build_capture(
         tmp_path,
         data_tier=DataTier.PROD,
@@ -486,8 +486,38 @@ def test_prod_capture_rejects_low_actual_span_fps(tmp_path: Path) -> None:
 
     report = validate_capture_h5(path, taxonomy())
 
-    assert not report.ready
-    assert "prod video actual span FPS is below 27" in report.issues
+    assert report.ready
+    assert report.issues == ()
+    assert "prod video actual span FPS is below 27" in report.warnings
+
+
+@pytest.mark.parametrize(
+    ("video_interval_ns", "expect_gap_warning"),
+    [
+        (200_000_000, False),
+        (200_000_001, True),
+        (10_966_000_000, True),
+    ],
+)
+def test_video_frame_gap_is_warning_only(
+    tmp_path: Path,
+    video_interval_ns: int,
+    expect_gap_warning: bool,
+) -> None:
+    path = build_capture(
+        tmp_path,
+        data_tier=DataTier.PROD,
+        video_interval_ns=video_interval_ns,
+        camera_controls_verified=True,
+    )
+
+    report = validate_capture_h5(path, taxonomy())
+
+    assert report.ready
+    assert report.issues == ()
+    assert (
+        "video frame gap exceeds 0.2 seconds" in report.warnings
+    ) is expect_gap_warning
 
 
 def test_verified_calibration_is_frozen_and_values_si_use_target_axes(

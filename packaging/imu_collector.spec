@@ -33,6 +33,8 @@ for source in (
     "calibration_experiments.py",
     "calibration_cloud.py",
     "coordinator.py",
+    "validation.py",
+    "publisher.py",
     "models.py",
     "annotation_api.py",
     "annotation_service.py",

@@ -426,6 +426,7 @@ def create_upload_broker_app(settings: Settings | None = None) -> FastAPI:
                 "3.0.0",
                 "3.1.0",
                 "3.2.0",
+                "3.3.0",
             ],
             "accepted_capture_h5_schema_versions": list(
                 ANNOTATION_ACCEPTED_CAPTURE_SCHEMA_VERSIONS

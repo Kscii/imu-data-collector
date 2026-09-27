@@ -30,6 +30,8 @@ class ValidationReport:
 PACKET_FIT_RESIDUAL_WARNING_NS = 200_000_000
 PACKET_FIT_RESIDUAL_BLOCK_NS = 500_000_000
 IMU_NOTIFICATION_GAP_BLOCK_NS = 2_000_000_000
+VIDEO_ACTUAL_SPAN_FPS_WARNING = "prod video actual span FPS is below 27"
+VIDEO_FRAME_GAP_WARNING = "video frame gap exceeds 0.2 seconds"
 
 
 def validate_annotations(
@@ -518,7 +520,7 @@ def validate_capture_h5(
                     and data_tier == "prod"
                     and float(metrics["video_actual_span_fps"]) < 27.0
                 ):
-                    issues.append("prod video actual span FPS is below 27")
+                    warnings.append(VIDEO_ACTUAL_SPAN_FPS_WARNING)
                 control_policy = str(
                     handle["video"].attrs.get("camera_control_policy", "")
                 )
@@ -579,7 +581,7 @@ def validate_capture_h5(
                     and len(pts_deltas)
                     and np.max(pts_deltas) > 200_000_000
                 ):
-                    issues.append("video frame gap exceeds 0.2 seconds")
+                    warnings.append(VIDEO_FRAME_GAP_WARNING)
                 mkv_path = Path(str(handle["video"].attrs.get("path", "")))
                 if not mkv_path.name:
                     issues.append("video path is missing")

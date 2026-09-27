@@ -11,6 +11,8 @@ _CAPTURE_API_SOURCES = (
     "calibration_experiments.py",
     "calibration_cloud.py",
     "coordinator.py",
+    "validation.py",
+    "publisher.py",
     "models.py",
     "config.py",
     "broker_client.py",

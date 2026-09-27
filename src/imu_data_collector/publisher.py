@@ -143,7 +143,7 @@ def _put_idempotent(store: ObjectStore, path: Path, artifact: ArtifactDescriptor
 def _require_annotation_capabilities(
     store: ObjectStore,
     source_h5_schema_version: str,
-    manifest_schema_version: str = "3.2.0",
+    manifest_schema_version: str = "3.3.0",
 ) -> AnnotationCapabilities:
     """在第一个对象上传前确认生产标注端确实理解本次交接格式。"""
 
@@ -317,7 +317,7 @@ async def prepare_publication(
         )
     manifest = CaptureManifestV2(
         schema_version=(
-            "3.2.0"
+            "3.3.0"
             if configuration is not None
             else "3.1.0"
             if sensor is not None
@@ -334,6 +334,11 @@ async def prepare_publication(
         calibration=calibration,
         sensor=sensor,
         configuration=configuration,
+        quality_warnings=(
+            list(dict.fromkeys(summary.quality_warnings))
+            if configuration is not None
+            else []
+        ),
         artifacts=artifacts,
     )
     return manifest, paths
