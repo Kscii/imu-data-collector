@@ -18,6 +18,8 @@
 .temporal-workbench input[type=number] { width: 92px; }
 .temporal-workbench td small { display: block; opacity: .75; max-width: 260px; }
 .temporal-review-actions { display: grid; gap: 12px; }
-.temporal-review-actions textarea { min-height: 65px; width: 100%; }
+.temporal-review-actions label { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; width: auto; }
+.temporal-workbench input[type=checkbox] { width: auto; flex: 0 0 auto; margin: 0; }
+.temporal-review-actions textarea { min-height: 65px; width: 100%; color: inherit; background: #0d1b2d; border: 1px solid #8885; border-radius: 6px; padding: 8px; }
 .temporal-error { color: #ef6c74; }
 @media (max-width: 850px) { .temporal-columns { grid-template-columns: 1fr; } .temporal-queue { max-height: 240px; } .temporal-frame { height: 350px; } }

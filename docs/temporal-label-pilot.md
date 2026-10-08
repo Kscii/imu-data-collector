@@ -1,0 +1,52 @@
+# 动捕时间区间审核试验
+
+新增入口位于「合成运动 → 自动区间标注试验」，复用原 3D 回放和 IMU 图。
+用户检查主活动、一个可选辅助动作及时间区间；普通任务只支持通过、退回和质量排除。
+退回可指出错误区间及原因，最多自动重试两次，之后的排除建议仍需人工确认。
+
+30 段试验中，12 段先填写独立参考，再显示模型草稿；参考不可被模型结果覆盖。
+其中 4 段用于调整、8 段用于验证。参考编辑草稿暂存在浏览器，保存后写入不可变参考记录。
+已有生产候选的审核指针不被本试验替换。
+
+正式输出使用 HDF5 3.3：主辅区间、未识别原因和审核依据随同一 H5 保存。
+辅助未知不会抹去已识别主活动；无法识别的主活动不作为负样本进入训练。
+主辅拆分不会把同一个跌倒重复计数。
+
+`GET/POST /api/v1/synthetic/temporal/runs` 管理隔离任务。每个任务提供 cases、reference、
+review、report、snapshots 和 approve 接口。参考和通过/退回记录使用当前可信登录身份。
+模型草稿、来源 commit、输入文件和上一条审核哈希都要匹配，过期写入返回冲突。
+快照下载有任务归属检查，并复用既有 Range 下载接口。
+
+全量开关要求 30 段审核完成、12 段独立参考和与参考哈希绑定的报告；人工另行选择辅助标签模式。
+全量快照还检查所有当前来源候选已有人工质量结论。用户确认报告不会伪造任何单段通过记录。
+
+## 当前本机试验
+
+运行 ID：`temporal-label-pilot-20261008`。Ubuntu 上的试验目录为
+`~/.local/share/imu-motion-simulator/studies/temporal-label-pilot-20261008/`。
+30 段已完成实际模型推理，尚无人工参考或人工通过记录。
+
+离线预览使用此仓库的 `scripts/serve-temporal-preview.py`，只监听 `127.0.0.1`。
+`--local-store` 模式完全不写 GCS；即使选用云存储，它也限制写入指定 dev 任务前缀。
+真实数据存储使用试验目录内的空本地存储。原有生产网站没有被替换。
+
+在 Ubuntu 的试验 `collector` 目录启动：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/serve-temporal-preview.py \
+  --run-id temporal-label-pilot-20261008 \
+  --local-store ../pilot/local-store --state-dir ../platform-preview --port 8768
+```
+
+在本机连接：
+
+```bash
+ssh -N -L 127.0.0.1:8768:127.0.0.1:8768 -o ExitOnForwardFailure=yes ubuntu
+```
+
+打开 `http://127.0.0.1:8768/?view=synthetic&temporal_run=temporal-label-pilot-20261008&lang=zh-CN`。
+页面「查看试验报告」在参考完成前显示等待状态；不会显示虚构准确率。
+模型工作进程负责退回重试、报告更新和 H5 生成。快照完成后可下载清单及分片。
+
+云端试验上传被自动审批以「外部目的地导出尚未获得明确授权」拒绝，目前仅有离线副本。
+待用户批准后，才可将本次试验草稿和报告写到指定 GCS dev 前缀及任务索引。

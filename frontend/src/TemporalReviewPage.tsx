@@ -17,8 +17,12 @@ type Case = {entry: {candidate: {candidate_id: string; version_id: string}; sour
   review: {revision_sha256: string} | null; reference_template?: Document;
   reference?: {document: Document} | null};
 type Run = {run_id: string; phase: string; count: number};
+type Snapshot = {snapshot_id: string; state: string; candidate_count: number;
+  result: {shards: {object_key: string; byte_length: number}[]} | null};
 type Metric = {variant: string; partition: string; primary_accuracy: number | null;
-  auxiliary_accuracy: number | null; boundary_mae_s: number | null; boundary_p90_s: number | null};
+  auxiliary_accuracy: number | null; boundary_mae_s: number | null; boundary_p90_s: number | null;
+  auxiliary_boundary_mae_s: number | null; auxiliary_boundary_p90_s: number | null;
+  impact_mae_s: number | null; missed_segments: number; extra_segments: number};
 type Report = {sha256: string; report: {status: string; reference_count: number; metrics: Metric[];
   notes: string[]}; approval: unknown};
 const names: Record<string, string> = {
@@ -64,8 +68,10 @@ export function TemporalReviewPage() {
   const [busy, setBusy] = useState(false);
   const [cursorFrame, setCursorFrame] = useState(0);
   const [report, setReport] = useState<Report | null>(null);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [auxMode, setAuxMode] = useState("temporal");
   const frame = useRef<HTMLIFrameElement>(null);
+  const chartReady = useRef(false);
   const current = cases[selected];
   const id = current?.entry.candidate;
   const casePath = id ? `${root}/runs/${runId}/cases/${id.candidate_id}/${id.version_id}` : "";
@@ -78,6 +84,8 @@ export function TemporalReviewPage() {
   const refresh = async () => {
     const result = await api<{cases: Case[]; total: number}>(`${root}/runs/${runId}?offset=${offset}&limit=30`);
     setCases(result.cases); setTotal(result.total);
+    const exported = await api<{snapshots: Snapshot[]}>(`${root}/runs/${runId}/snapshots`);
+    setSnapshots(exported.snapshots);
   };
   useEffect(() => {
     api<{runs: Run[]}>(`${root}/runs`).then(value => {
@@ -87,9 +95,12 @@ export function TemporalReviewPage() {
   useEffect(() => {
     if (!runId) return;
     let live = true;
-    setCases([]); setSelected(0); setReport(null);
+    setCases([]); setSelected(0); setReport(null); setSnapshots([]);
     api<{cases: Case[]; total: number}>(`${root}/runs/${runId}?offset=${offset}&limit=30`)
       .then(value => {if (live) {setCases(value.cases); setTotal(value.total);}})
+      .catch(e => {if (live) setError(String(e));});
+    api<{snapshots: Snapshot[]}>(`${root}/runs/${runId}/snapshots`)
+      .then(value => {if (live) setSnapshots(value.snapshots);})
       .catch(e => {if (live) setError(String(e));});
     return () => {live = false;};
   }, [runId, offset]);
@@ -103,6 +114,7 @@ export function TemporalReviewPage() {
     }
     setEditor(draft);
     setFailure([]); setFailedSegments([]); setNote(""); setAck(false); setCursorFrame(0);
+    chartReady.current = false;
   }, [casePath, current?.status]);
   useEffect(() => {
     if (editor && independent && editor.candidate.candidate_id === id?.candidate_id
@@ -116,6 +128,9 @@ export function TemporalReviewPage() {
       if (event.origin !== location.origin || event.source !== frame.current?.contentWindow) return;
       if (["imu-synthetic-review-frame", "imu-synthetic-review-ready"].includes(event.data?.type)
           && Number.isInteger(event.data.frame)) setCursorFrame(event.data.frame);
+      if (event.data?.type === "imu-synthetic-review-ready" && chartReady.current) {
+        control("chart-ready", {ready: true});
+      }
       if (event.data?.type === "imu-synthetic-review-key" && event.data.key === " ") control("toggle");
     };
     addEventListener("message", onMessage);
@@ -167,7 +182,7 @@ export function TemporalReviewPage() {
       ? [{...row, stop_ns: point}, {...row, segment_id: `segment-${crypto.randomUUID()}`, start_ns: point}] : [row])};
   });
 
-  return <main className="temporal-workbench">
+  return <main className="temporal-workbench" data-no-localize>
     <header className="panel temporal-toolbar">
       <strong>自动区间标注</strong>
       <select aria-label="选择试验任务" value={runId} onChange={e => {setRunId(e.target.value); setOffset(0);}}>
@@ -196,9 +211,10 @@ export function TemporalReviewPage() {
         {current && <>
           <h2>{independent ? "独立参考标注" : "检查模型标注"} · {label(current.status)}</h2>
           {independent && <p>先根据回放标记区间和撞击点。参考保存前隐藏模型建议；只有这组参考任务允许手工编辑。</p>}
-          <iframe key={base} ref={frame} src={`${base}/files/index.html?bridge=2`} title="动捕与IMU回放" className="temporal-frame" />
+          <iframe key={base} ref={frame} src={`${base}/files/index.html?bridge=2`} title="动捕与IMU回放" className="temporal-frame"
+            onLoad={() => {if (chartReady.current) control("chart-ready", {ready: true});}} />
           <SyntheticIMUChart base={base} cursorFrame={cursorFrame}
-            onReady={ready => control("chart-ready", {ready})} onInspect={() => {}} onMetadata={() => {}}
+            onReady={ready => {chartReady.current = ready; control("chart-ready", {ready});}} onInspect={() => {}} onMetadata={() => {}}
             onSeek={index => control("seek", {frame: index})} />
           <div className="temporal-toolbar"><button onClick={() => control("toggle")}>播放／暂停</button>
             <button onClick={() => control("replay")}>从头播放</button><span>当前位置 {seconds(cursorNs)} 秒</span></div>
@@ -255,10 +271,20 @@ export function TemporalReviewPage() {
         {!current && <p>发布试验任务后，这里会显示待标注片段。</p>}
       </section>
     </div>
+    {!!snapshots.length && <section className="panel"><h2>已冻结的 HDF5 3.3 快照</h2>
+      {snapshots.map(s => <div key={s.snapshot_id}><p>{s.snapshot_id} · {s.candidate_count} 段 · {s.result ? "已生成" : s.state === "failed" ? "生成失败，请查看工作进程日志后重试" : "等待生成，稍后刷新"}</p>
+        {s.result && <><a href={`${root}/runs/${runId}/snapshots/${s.snapshot_id}/manifest`} download={`${s.snapshot_id}-result.json`}>下载清单</a>
+          {s.result.shards.map(shard => {const name = shard.object_key.split("/").at(-1)!;
+            return <a key={name} className="button-link" href={`${root}/runs/${runId}/snapshots/${s.snapshot_id}/shards/${name}`} download={name}>{name}</a>;})}</>}
+      </div>)}
+    </section>}
     {report && <section className="panel"><h2>试验报告</h2><p>独立参考：{report.report.reference_count} 段 · {report.report.status === "ready" ? "可复核" : "等待参考标注"}</p>
-      <table><thead><tr><th>方案／分组</th><th>主活动正确率</th><th>辅助正确率</th><th>边界平均误差（秒）</th><th>边界P90（秒）</th></tr></thead>
+      <table><thead><tr><th>方案／分组</th><th>主活动正确率</th><th>辅助正确率</th><th>主边界平均／P90（秒）</th><th>辅助边界平均／P90（秒）</th><th>impact 误差（秒）</th><th>漏段／多段</th></tr></thead>
         <tbody>{report.report.metrics.map(m => <tr key={`${m.variant}-${m.partition}`}><td>{m.variant} / {m.partition}</td>
-          {[m.primary_accuracy, m.auxiliary_accuracy, m.boundary_mae_s, m.boundary_p90_s].map((x, i) => <td key={i}>{x === null ? "未测得" : x.toFixed(3)}</td>)}</tr>)}</tbody></table>
+          {[m.primary_accuracy, m.auxiliary_accuracy].map((x, i) => <td key={i}>{x == null ? "未测得" : `${(x * 100).toFixed(1)}%`}</td>)}
+          <td>{m.boundary_mae_s?.toFixed(3) ?? "未测得"} / {m.boundary_p90_s?.toFixed(3) ?? "未测得"}</td>
+          <td>{m.auxiliary_boundary_mae_s?.toFixed(3) ?? "未测得"} / {m.auxiliary_boundary_p90_s?.toFixed(3) ?? "未测得"}</td>
+          <td>{m.impact_mae_s?.toFixed(3) ?? "未测得"}</td><td>{m.missed_segments} / {m.extra_segments}</td></tr>)}</tbody></table>
       {report.report.notes.map((n, i) => <p key={i}>{n}</p>)}
       <div className="temporal-toolbar"><select aria-label="全量辅助标签模式" value={auxMode} onChange={e => setAuxMode(e.target.value)}>
         <option value="temporal">主辅都精确分段</option><option value="segment_summary">辅助只作主区间摘要</option></select>

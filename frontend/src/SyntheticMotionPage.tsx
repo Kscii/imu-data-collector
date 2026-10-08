@@ -109,8 +109,8 @@ function sourceSuggestions(item: Candidate) {
 export function SyntheticMotionPage({target = "dev"}: {target?: "dev" | "prod"}) {
   const [temporal, setTemporal] = useState(new URLSearchParams(location.search).has("temporal_run"));
   return <><nav className="synthetic-tabs">
-    <button onClick={() => setTemporal(false)} aria-pressed={!temporal}>原有候选审核</button>
-    <button onClick={() => setTemporal(true)} aria-pressed={temporal}>自动区间标注试验</button>
+    <button onClick={() => setTemporal(false)} aria-pressed={!temporal}>{tr("原有候选审核", "Candidate review")}</button>
+    <button onClick={() => setTemporal(true)} aria-pressed={temporal}>{tr("自动区间标注试验", "Temporal annotation pilot")}</button>
   </nav>{temporal ? <TemporalReviewPage /> : <LegacySyntheticMotionPage target={target} />}</>;
 }
 
