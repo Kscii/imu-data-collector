@@ -66,6 +66,8 @@
 .primary-segments button { display: flex; justify-content: space-between; gap: 8px; padding: 7px 8px; text-align: left; }
 .primary-segments small { white-space: nowrap; opacity: .7; }
 .primary-fields { display: grid; gap: 8px; }
+.motion-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
+.primary-editor header > select { width: 100%; min-width: 0; }
 .primary-fields label { display: grid; gap: 4px; font-size: 11px; min-width: 0; }
 .primary-fields select, .primary-fields input, .primary-fields textarea { width: 100%; min-width: 0; margin: 0; }
 .primary-fields textarea { resize: vertical; min-height: 48px; padding: 6px; color: inherit; background: #0d1b2d; border: 1px solid #30415f; border-radius: 5px; }

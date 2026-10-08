@@ -1,5 +1,7 @@
 # 多设备 IMU 数据采集平台
 
+动捕区间审核的新生产实现、CPU 标注 worker、审核继承及部署边界见[生产动捕标注工作台](docs/motion-label-production.md)（2026-10-09，功能分支未部署）。
+
 合成运动人工审核的已定模块边界和实施待办见[合成运动标注模块](docs/synthetic-motion-module.md)。该模块已有本地 pilot，尚未上线；真实设备录制与现有标注流程保持独立。
 
 这是一个面向胸前佩戴 IMU 的数据采集与标注项目。设备由项目 SN 和版本化协议/校准档案识别，而不是写死广播名或 BLE 地址；当前同时保留已验证 CW12EU-T 和 commissioning 阶段 `acce&gyro` 设备。采集端以原生 Linux 为已验收生产基线，原生 Windows 10/11 x64 已具备独立安装包和系统后端适配；macOS 13+ 已具备 Intel 与 Apple Silicon 分架构 DMG，但仍待 Intel 真机完成 BLE、摄像头、权限和完整录制验收。WSL2 与 Android 暂不属于采集端支持范围。同一仓库提供两个独立应用：本机采集端连接 BLE IMU 与摄像头，云端标注端只读取已发布制品，不初始化任何采集硬件。HDF5 保留原始数据和实际时间戳，Matroska（MKV）保留 H.264 原始视频；同步、标注、负责人和当前有效导出单独保存在对象存储的 `review.json`。

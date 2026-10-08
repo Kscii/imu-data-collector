@@ -19,12 +19,17 @@ export function SyntheticSnapshots() {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [configurations,setConfigurations] = useState<{configuration_id:string;layout_id:string;profile_id:string;variant:string}[]>([]);
+  const [configuration,setConfiguration] = useState("");
   const refresh = async () => {
-    const [counts, list] = await Promise.all([
-      syntheticRequest<Summary>(`${syntheticRoot}/summary`),
+    const [counts, list, configs] = await Promise.all([
+      syntheticRequest<Summary>(`${syntheticRoot}/motions/summary`),
       syntheticRequest<{snapshots: Snapshot[]}>(`${syntheticRoot}/snapshots`),
+      syntheticRequest<{configurations:typeof configurations}>(`${syntheticRoot}/motions/configurations`),
     ]);
     setSummary(counts); setSnapshots(list.snapshots);
+    setConfigurations(configs.configurations);
+    setConfiguration(old=>old||configs.configurations.find(c=>c.layout_id==="chest-1"&&c.variant==="ideal")?.configuration_id||"");
   };
   useEffect(() => { refresh().catch(error => setError(String(error))); }, []);
   useEffect(() => {
@@ -35,7 +40,7 @@ export function SyntheticSnapshots() {
   const create = async () => {
     setBusy(true); setError("");
     try {
-      await syntheticRequest(`${syntheticRoot}/snapshots`, {method: "POST"});
+      await syntheticRequest(`${syntheticRoot}/motions/snapshots`, {method: "POST",body:JSON.stringify({configuration_id:configuration})});
       await refresh();
     } catch (error) { setError(String(error)); }
     finally { setBusy(false); }
@@ -49,7 +54,8 @@ export function SyntheticSnapshots() {
       {" · "}{tr("可入快照", "Snapshot eligible")} {summary.snapshot_eligible}
       {summary.latest_published_at_utc && <> · {tr("最新到达", "Latest arrival")} {new Date(summary.latest_published_at_utc).toLocaleString()}</>}</p>}
     <div className="save-row">
-      <button className="primary" disabled={busy || !summary?.snapshot_eligible || summary?.read_only || Boolean(summary?.preview_mode)}
+      <select aria-label="快照 IMU 配置" value={configuration} onChange={e=>setConfiguration(e.target.value)}><option value="">选择 IMU 配置</option>{configurations.map(c=><option key={c.configuration_id} value={c.configuration_id}>{c.layout_id} · {c.profile_id} · {c.variant} · {c.configuration_id.slice(0,8)}</option>)}</select>
+      <button className="primary" disabled={busy || !configuration || !summary?.snapshot_eligible || summary?.read_only || Boolean(summary?.preview_mode)}
         onClick={create}>{tr("创建合成训练快照", "Create synthetic training snapshot")}</button>
       <button disabled={busy} onClick={() => refresh().catch(error => setError(String(error)))}>{tr("刷新进度", "Refresh progress")}</button>
     </div>

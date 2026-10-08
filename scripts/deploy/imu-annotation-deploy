@@ -85,6 +85,22 @@ start_external_worker() {
   fi
 }
 
+stop_motion_worker() {
+  if [[ -f /etc/systemd/system/imu-motion-labels.service ]]; then
+    systemctl stop imu-motion-labels.service
+  fi
+}
+
+start_motion_worker() {
+  if [[ -f $1/configs/systemd/imu-motion-labels.service ]]; then
+    systemctl enable imu-motion-labels.service
+    systemctl restart imu-motion-labels.service
+    systemctl is-active --quiet imu-motion-labels.service
+  elif [[ -f /etc/systemd/system/imu-motion-labels.service ]]; then
+    systemctl disable imu-motion-labels.service
+  fi
+}
+
 actual_sha256=$(sha256sum "${bundle}" | cut -d ' ' -f 1)
 [[ ${actual_sha256} == "${expected_sha256}" ]] || {
   echo "部署包 SHA-256 不匹配" >&2
@@ -117,7 +133,11 @@ if [[ ! -d ${release_dir} ]]; then
   tar -xzf "${bundle}" --no-same-owner --no-same-permissions -C "${incoming}"
   chown -R kscii:kscii "${incoming}" /var/lib/imu-annotation
   mv "${incoming}" "${release_dir}"
-  if ! runuser -u kscii -- /usr/local/bin/uv sync \
+  extra_groups=()
+  if [[ -f ${release_dir}/configs/systemd/imu-motion-labels.service ]]; then
+    extra_groups=(--group motion-labels)
+  fi
+  if ! runuser -u kscii -- /usr/local/bin/uv sync "${extra_groups[@]}" \
     --frozen --no-dev --project "${release_dir}" \
     --python "${managed_python}"; then
     rm -rf -- "${release_dir}"
@@ -166,6 +186,10 @@ if [[ -f ${release_dir}/configs/systemd/imu-external-devices.service ]]; then
   install -m 0644 "${release_dir}/configs/systemd/imu-external-devices.service" \
     /etc/systemd/system/imu-external-devices.service
 fi
+if [[ -f ${release_dir}/configs/systemd/imu-motion-labels.service ]]; then
+  install -m 0644 "${release_dir}/configs/systemd/imu-motion-labels.service" \
+    /etc/systemd/system/imu-motion-labels.service
+fi
 if [[ -f ${release_dir}/scripts/deploy/imu-annotation-rollback ]]; then
   install -m 0755 "${release_dir}/scripts/deploy/imu-annotation-rollback" \
     /usr/local/sbin/imu-annotation-rollback
@@ -174,6 +198,7 @@ fi
 # Finish or interrupt the old process before switching the release it imports.
 systemctl daemon-reload
 stop_external_worker
+stop_motion_worker
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl daemon-reload
@@ -191,6 +216,7 @@ systemctl enable imu-upload-broker.service
 systemctl restart imu-upload-broker.service
 worker_started=true
 start_external_worker "${release_dir}" || worker_started=false
+start_motion_worker "${release_dir}" || worker_started=false
 
 healthy=false
 for _attempt in $(seq 1 20); do
@@ -206,6 +232,7 @@ done
 if [[ ${healthy} != true ]]; then
   if [[ -n ${previous} && -d ${previous} ]]; then
     stop_external_worker
+    stop_motion_worker
     ln -s "${previous}" "${current_link}.failed"
     mv -Tf "${current_link}.failed" "${current_link}"
     systemctl restart imu-annotation.service
@@ -215,6 +242,7 @@ if [[ ${healthy} != true ]]; then
       systemctl stop imu-upload-broker.service
     fi
     start_external_worker "${previous}"
+    start_motion_worker "${previous}"
   fi
   echo "新版本健康检查失败，已尝试切回上一版本" >&2
   exit 1

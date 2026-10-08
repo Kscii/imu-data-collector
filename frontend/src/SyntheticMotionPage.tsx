@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { tr } from "./i18n";
 import { SyntheticIMUChart, type IMUReadout, type PlaybackMetadata } from "./SyntheticIMUChart";
 import { TemporalReviewPage } from "./TemporalReviewPage";
+import { ProductionMotionPage } from "./ProductionMotionPage";
 import type {ActivityRules} from "./activityRules";
 
 export type FormalLabel = {
@@ -109,12 +110,12 @@ function sourceSuggestions(item: Candidate) {
     other.name.toLowerCase() === value.name.toLowerCase()) === index);
 }
 
-export function SyntheticMotionPage({target = "dev"}: {target?: "dev" | "prod"}) {
-  const [temporal, setTemporal] = useState(new URLSearchParams(location.search).has("temporal_run"));
+export function SyntheticMotionPage({target = "dev", isAdmin = false}: {target?: "dev" | "prod"; isAdmin?: boolean}) {
+  const [temporal, setTemporal] = useState(isAdmin && new URLSearchParams(location.search).has("temporal_run"));
   return <><nav className="synthetic-tabs">
-    <button onClick={() => setTemporal(false)} aria-pressed={!temporal}>{tr("原有候选审核", "Candidate review")}</button>
-    <button onClick={() => setTemporal(true)} aria-pressed={temporal}>{tr("自动区间标注试验", "Temporal annotation pilot")}</button>
-  </nav>{temporal ? <TemporalReviewPage /> : <LegacySyntheticMotionPage target={target} />}</>;
+    <button onClick={() => setTemporal(false)} aria-pressed={!temporal}>{tr("动捕审核", "Motion review")}</button>
+    {isAdmin && <button onClick={() => setTemporal(true)} aria-pressed={temporal}>{tr("自动区间标注试验", "Temporal annotation pilot")}</button>}
+  </nav>{temporal && isAdmin ? <TemporalReviewPage /> : <ProductionMotionPage isAdmin={isAdmin} />}</>;
 }
 
 function LegacySyntheticMotionPage({target = "dev"}: {target?: "dev" | "prod"}) {

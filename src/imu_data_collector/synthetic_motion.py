@@ -722,7 +722,14 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
     from .synthetic_provisional import register_provisional_routes
     register_provisional_routes(app, service, current_actor)
     from .synthetic_temporal import register_temporal_routes
-    register_temporal_routes(app, service, current_actor)
+    def experiment_actor(request):
+        actor = current_actor(request)
+        if not actor.is_admin:
+            raise HTTPException(403, "自动区间标注实验仅供管理员使用")
+        return actor
+    register_temporal_routes(app, service, experiment_actor)
+    from .motion_label_api import register_motion_label_routes
+    register_motion_label_routes(app, service, current_actor)
 
     @app.get("/api/v1/synthetic/candidates")
     def synthetic_candidates(request: Request):
@@ -971,6 +978,8 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
     def synthetic_review(candidate_id: str, version_id: str, body: ReviewInput,
                          request: Request):
         actor = current_actor(request)
+        if service.target == "prod":
+            raise HTTPException(410, "旧生产审核已停用，请使用动捕区间工作台")
         try:
             if service.catalog and not actor.is_admin and not body.lease_token:
                 raise ObjectConflictError("请先领取审核任务")
@@ -984,6 +993,8 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
     def synthetic_set_label(candidate_id: str, version_id: str,
                             body: LabelInput, request: Request):
         actor = current_actor(request)
+        if service.target == "prod":
+            raise HTTPException(410, "旧录制级贴标签已停用，请使用动捕区间工作台")
         try:
             return service.set_label(candidate_id, version_id, body, actor.unikey)
         except FileNotFoundError as error:
@@ -1018,6 +1029,8 @@ def register_synthetic_motion(app: FastAPI, store: ObjectStore, run_id: str | No
         if getattr(service.store, "preview_mode", None):
             raise HTTPException(status_code=403, detail="本地预览不构建云端快照")
         try:
+            if service.target == "prod":
+                return app.state.motion_label_service.create_snapshot(actor.unikey)
             return service.create_snapshot(actor.unikey)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error

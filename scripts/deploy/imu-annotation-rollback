@@ -26,6 +26,24 @@ stop_external_worker() {
   fi
 }
 
+stop_motion_worker() {
+  if [[ -f /etc/systemd/system/imu-motion-labels.service ]]; then
+    systemctl stop imu-motion-labels.service
+  fi
+}
+
+start_motion_worker() {
+  if [[ -f $1/configs/systemd/imu-motion-labels.service ]]; then
+    install -m 0644 "$1/configs/systemd/imu-motion-labels.service" /etc/systemd/system/imu-motion-labels.service
+    systemctl daemon-reload
+    systemctl enable imu-motion-labels.service
+    systemctl restart imu-motion-labels.service
+    systemctl is-active --quiet imu-motion-labels.service
+  elif [[ -f /etc/systemd/system/imu-motion-labels.service ]]; then
+    systemctl disable imu-motion-labels.service
+  fi
+}
+
 start_external_worker() {
   local candidate=$1
   if [[ -f ${candidate}/configs/systemd/imu-external-devices.service ]] \
@@ -59,6 +77,7 @@ if [[ -L ${current_link} ]]; then
 fi
 
 stop_external_worker
+stop_motion_worker
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl restart imu-annotation.service
@@ -69,6 +88,7 @@ else
 fi
 worker_started=true
 start_external_worker "${release_dir}" || worker_started=false
+start_motion_worker "${release_dir}" || worker_started=false
 
 for _attempt in $(seq 1 20); do
   if [[ ${worker_started} == true ]] \
@@ -81,6 +101,7 @@ done
 
 if [[ -n ${previous} ]]; then
   stop_external_worker
+  stop_motion_worker
   ln -s "${previous}" "${current_link}.failed"
   mv -Tf "${current_link}.failed" "${current_link}"
   systemctl restart imu-annotation.service
@@ -90,6 +111,7 @@ if [[ -n ${previous} ]]; then
     systemctl stop imu-upload-broker.service
   fi
   start_external_worker "${previous}"
+  start_motion_worker "${previous}"
 fi
 echo "回滚版本健康检查失败" >&2
 exit 1

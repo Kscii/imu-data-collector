@@ -1461,7 +1461,7 @@ export default function App() {
       {annotationApplication && tab === "annotate" && taxonomy && session && (
         <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} recordingsLoaded={recordingsLoaded} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
       )}
-      {annotationApplication && tab === "synthetic" && config?.synthetic_enabled && <SyntheticMotionPage target={config.synthetic_target ?? "dev"} />}
+      {annotationApplication && tab === "synthetic" && config?.synthetic_enabled && <SyntheticMotionPage target={config.synthetic_target ?? "dev"} isAdmin={Boolean(session?.is_admin)} />}
       {annotationApplication && tab === "data" && session && <DataManagementPage isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
       {annotationApplication && tab === "external" && session && (config?.can_view_external_devices
         ? <ExternalDevicesPage isAdmin={session.is_admin} />

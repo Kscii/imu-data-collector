@@ -33,8 +33,10 @@ dependencies = [
 imu-collector = "imu_data_collector.cli:main"
 imu-annotation = "imu_data_collector.annotation_cli:main"
 imu-upload-broker = "imu_data_collector.upload_broker:main"
+imu-motion-label-worker = "imu_data_collector.motion_label_worker:main"
 
 [dependency-groups]
+motion-labels = ["onnxruntime==1.25.1"]
 dev = [
     "httpx>=0.28.0",
     "httpx2>=2.0.0",

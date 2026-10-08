@@ -1,10 +1,12 @@
+import runpy
 from copy import deepcopy
 from pathlib import Path
-import runpy
 
 from imu_data_collector.synthetic_temporal_contract import empty_document, semantic_draft
 
-revise = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/revise-semantic-drafts.py'))['revised']
+revise = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / 'scripts/revise-semantic-drafts.py')
+)['revised']
 
 
 def test_agent_replacement_retains_original_semantics_and_never_confirms():
