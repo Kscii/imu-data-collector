@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
+from itertools import pairwise
 
 SCHEMA = "imu.temporal_annotation.v1"
+SEMANTIC_SCHEMA = "imu.temporal_annotation.v2"
 TAXONOMY_ID = "motion-temporal"
 TAXONOMY_VERSION = "1.0.0"
 PERIOD_NS = 40_000_000
@@ -65,13 +68,20 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 RUN_SCHEMA = "imu.temporal_run.v1"
 PRIMARY_RUN_SCHEMA = "imu.temporal_run.v2"
-SOURCE_PREFIX = re.compile(r"^synthetic-motion/(?:prod|dev/[A-Za-z0-9][A-Za-z0-9._-]*)/v1$")
+SEMANTIC_RUN_SCHEMA = "imu.temporal_run.v3"
+SOURCE_PREFIX = re.compile(
+    r"^synthetic-motion/(?:prod|dev/[A-Za-z0-9][A-Za-z0-9._-]*)/v1$"
+)
 
 
 def canonical_bytes(value):
     return (
         json.dumps(
-            value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
         )
         + "\n"
     ).encode()
@@ -127,19 +137,26 @@ def validate_run(run):
             "candidates",
             "full_from",
         }
-        and run.get("schema") in (RUN_SCHEMA, PRIMARY_RUN_SCHEMA),
+        and run.get("schema") in (RUN_SCHEMA, PRIMARY_RUN_SCHEMA, SEMANTIC_RUN_SCHEMA),
         "Run fields/schema",
     )
-    _require(isinstance(run["run_id"], str) and IDENTIFIER.fullmatch(run["run_id"]), "Run ID")
+    _require(
+        isinstance(run["run_id"], str) and IDENTIFIER.fullmatch(run["run_id"]), "Run ID"
+    )
     _require(
         run["phase"] in ("pilot", "full")
         and isinstance(run["source_prefix"], str)
         and SOURCE_PREFIX.fullmatch(run["source_prefix"]),
         "Run scope",
     )
-    _require(type(run["seed"]) is int and isinstance(run["created_at_utc"], str), "Run metadata")
+    _require(
+        type(run["seed"]) is int and isinstance(run["created_at_utc"], str),
+        "Run metadata",
+    )
     if run["phase"] == "pilot":
-        _require(run["full_from"] is None, "Pilot must not impersonate full-run approval")
+        _require(
+            run["full_from"] is None, "Pilot must not impersonate full-run approval"
+        )
     else:
         _require(
             isinstance(run["full_from"], dict)
@@ -149,13 +166,14 @@ def validate_run(run):
             "Full run needs pilot approval",
         )
     entries = run["candidates"]
-    primary_only = run["schema"] == PRIMARY_RUN_SCHEMA
+    primary_only = run["schema"] in (PRIMARY_RUN_SCHEMA, SEMANTIC_RUN_SCHEMA)
+    limit = 60 if run["schema"] == SEMANTIC_RUN_SCHEMA else 40 if primary_only else 30
     if primary_only:
         _require(run["phase"] == "pilot", "Primary learning runs are isolated pilots")
     _require(
         isinstance(entries, list)
         and entries
-        and (run["phase"] == "full" or len(entries) <= (40 if primary_only else 30)),
+        and (run["phase"] == "full" or len(entries) <= limit),
         "Pilot candidate limit exceeded",
     )
     identities, reference_groups = set(), {}
@@ -266,9 +284,11 @@ def empty_document(
 
 def validate_document(document, *, expected_candidate=None, expected_count=None):
     _require(
-        isinstance(document, dict) and document.get("schema") == SCHEMA,
+        isinstance(document, dict)
+        and document.get("schema") in (SCHEMA, SEMANTIC_SCHEMA),
         "Unsupported temporal annotation schema",
     )
+    semantic = document["schema"] == SEMANTIC_SCHEMA
     _require(
         set(document)
         == {
@@ -287,7 +307,8 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
     candidate = document["candidate"]
     _require(
         isinstance(candidate, dict)
-        and set(candidate) == {"candidate_id", "version_id", "commit_sha256", "input_hashes"},
+        and set(candidate)
+        == {"candidate_id", "version_id", "commit_sha256", "input_hashes"},
         "Candidate fields",
     )
     _require(
@@ -308,12 +329,20 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
         "Invalid input hashes",
     )
     if expected_candidate is not None:
-        _require(candidate == expected_candidate, "Temporal annotation candidate differs")
+        _require(
+            candidate == expected_candidate, "Temporal annotation candidate differs"
+        )
     clock = document["clock"]
     _require(
         isinstance(clock, dict)
         and set(clock)
-        == {"origin", "source_start_ns", "source_rate_hz", "sample_count", "duration_ns"},
+        == {
+            "origin",
+            "source_start_ns",
+            "source_rate_hz",
+            "sample_count",
+            "duration_ns",
+        },
         "Invalid temporal clock fields",
     )
     _require(
@@ -331,13 +360,18 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
         "Temporal duration must match the 25 Hz sample extent",
     )
     _require(
-        type(clock["source_rate_hz"]) in (float, int) and 0 < clock["source_rate_hz"] < 100_000,
+        type(clock["source_rate_hz"]) in (float, int)
+        and 0 < clock["source_rate_hz"] < 100_000,
         "Invalid source rate",
     )
     if expected_count is not None:
         _require(count == expected_count, "Temporal annotation sample count differs")
-    _require(document["taxonomy"] == taxonomy(), "Unfrozen or unknown temporal taxonomy")
-    _require(document["auxiliary_mode"] in ("temporal", "segment_summary"), "Auxiliary mode")
+    _require(
+        document["taxonomy"] == taxonomy(), "Unfrozen or unknown temporal taxonomy"
+    )
+    _require(
+        document["auxiliary_mode"] in ("temporal", "segment_summary"), "Auxiliary mode"
+    )
     _require(
         isinstance(document["producer"], dict)
         and document["producer"].get("kind")
@@ -364,7 +398,12 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
                 "resolution",
                 "reason",
                 "fall_event_id",
-            },
+            }
+            | (
+                {"semantic_text", "review_state", "pending_reasons", "notes"}
+                if semantic
+                else set()
+            ),
             "Segment fields",
         )
         sid = segment["segment_id"]
@@ -382,13 +421,63 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
             "Segment coverage gap/overlap",
         )
         cursor = stop
+        if semantic:
+            _require(
+                isinstance(segment["semantic_text"], str), "Interval semantic text"
+            )
+            state, pending = segment["review_state"], segment["pending_reasons"]
+            _require(
+                state in ("pending", "confirmed", "excluded"), "Interval review state"
+            )
+            _require(
+                isinstance(pending, list)
+                and len(pending) == len(set(pending))
+                and set(pending) <= {"class", "boundary", "vocabulary"}
+                and (bool(pending) if state == "pending" else not pending),
+                "Pending interval needs a discussion reason",
+            )
+            _require(
+                state != "confirmed" or segment["resolution"] == "identified",
+                "Only identified intervals can be confirmed",
+            )
+            _require(
+                state != "excluded" or segment["resolution"] != "identified",
+                "Explicit exclusions need a reason and no formal class",
+            )
+            _require(isinstance(segment["notes"], list), "Interval notes")
+            note_ids = set()
+            for note in segment["notes"]:
+                _require(
+                    isinstance(note, dict)
+                    and set(note) == {"note_id", "start_ns", "stop_ns", "text"},
+                    "Interval note fields",
+                )
+                nid = note["note_id"]
+                _require(
+                    isinstance(nid, str)
+                    and IDENTIFIER.fullmatch(nid)
+                    and nid not in note_ids,
+                    "Interval note identity",
+                )
+                note_ids.add(nid)
+                _require(
+                    type(note["start_ns"]) is int
+                    and type(note["stop_ns"]) is int
+                    and 0 <= note["start_ns"] < note["stop_ns"] <= clock["duration_ns"]
+                    and isinstance(note["text"], str),
+                    "Note original range/text",
+                )
         resolution, code = segment["resolution"], segment["primary_code"]
         _require(resolution in RESOLUTIONS, "Unknown resolution")
         if resolution == "identified":
-            _require(code in PRIMARY and segment["reason"] is None, "Unresolved primary code")
+            _require(
+                code in PRIMARY and segment["reason"] is None, "Unresolved primary code"
+            )
         else:
             _require(
-                code is None and isinstance(segment["reason"], str) and segment["reason"].strip(),
+                code is None
+                and isinstance(segment["reason"], str)
+                and segment["reason"].strip(),
                 "Exclusion needs an explicit reason",
             )
         auxiliary, status = segment["auxiliary_code"], segment["auxiliary_status"]
@@ -403,28 +492,34 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
             "Excluded segment cannot carry a formal auxiliary",
         )
         event_id = segment["fall_event_id"]
-        if code in FALLS:
+        if code in FALLS and (not semantic or segment["review_state"] == "confirmed"):
             _require(
                 isinstance(event_id, str) and IDENTIFIER.fullmatch(event_id),
                 "Fall segment needs an event ID",
             )
             event_segments.setdefault(event_id, []).append(segment)
         else:
-            _require(event_id is None, "Non-fall segment cannot reference a fall event")
+            _require(
+                event_id is None, "Only confirmed falls can reference a fall event"
+            )
     _require(cursor == clock["duration_ns"], "Incomplete temporal coverage")
     seen = set()
     for event in events:
         _require(
             isinstance(event, dict)
-            and set(event) == {"event_id", "code", "start_ns", "impact_ns", "stop_ns", "evidence"},
+            and set(event)
+            == {"event_id", "code", "start_ns", "impact_ns", "stop_ns", "evidence"},
             "Fall event fields",
         )
         eid = event["event_id"]
-        _require(eid in event_segments and eid not in seen, "Orphan or duplicate fall event")
+        _require(
+            eid in event_segments and eid not in seen, "Orphan or duplicate fall event"
+        )
         seen.add(eid)
         parts = event_segments[eid]
         _require(
-            event["code"] in FALLS and all(p["primary_code"] == event["code"] for p in parts),
+            event["code"] in FALLS
+            and all(p["primary_code"] == event["code"] for p in parts),
             "Inconsistent fall event class",
         )
         _require(
@@ -432,7 +527,7 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
             and type(event["stop_ns"]) is int
             and event["start_ns"] == parts[0]["start_ns"]
             and event["stop_ns"] == parts[-1]["stop_ns"]
-            and all(a["stop_ns"] == b["start_ns"] for a, b in zip(parts, parts[1:], strict=False)),
+            and all(a["stop_ns"] == b["start_ns"] for a, b in pairwise(parts)),
             "Fall event must cover contiguous segments",
         )
         _require(
@@ -445,6 +540,98 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
     _require(seen == set(event_segments), "Missing fall event/impact")
     canonical_bytes(document)  # Reject NaN and unserializable evidence.
     return document
+
+
+def semantic_draft(document):
+    """Convert legacy evidence into an unconfirmed draft; never import acceptance."""
+    validate_document(document)
+    result = deepcopy(document)
+    if result["schema"] == SEMANTIC_SCHEMA:
+        return result
+    result["schema"] = SEMANTIC_SCHEMA
+    if result["fall_events"]:
+        result["source_evidence"].append(
+            {"kind": "legacy-fall-proposals", "fall_events": result["fall_events"]}
+        )
+    result["fall_events"] = []
+    for segment in result["segments"]:
+        segment.update(
+            semantic_text="",
+            review_state="pending",
+            pending_reasons=["class", "boundary"],
+            notes=[],
+            fall_event_id=None,
+        )
+    return validate_document(result)
+
+
+def confirmed(segment, document):
+    return segment["resolution"] == "identified" and (
+        document["schema"] == SCHEMA or segment["review_state"] == "confirmed"
+    )
+
+
+def _append_note(notes, note):
+    nid, copy = note["note_id"], 2
+    while nid in notes:
+        if all(notes[nid][k] == note[k] for k in ("start_ns", "stop_ns", "text")):
+            return
+        nid, copy = f"{note['note_id']}-{copy}", copy + 1
+    notes[nid] = {**note, "note_id": nid}
+
+
+def normalize_semantic(document):
+    """Coalesce confirmed actions while retaining original note ranges and fall IDs."""
+    validate_document(document)
+    result = deepcopy(document)
+    if result["schema"] != SEMANTIC_SCHEMA:
+        return result
+    merged = []
+    for segment in result["segments"]:
+        previous = merged[-1] if merged else None
+        if (
+            previous
+            and confirmed(previous, result)
+            and confirmed(segment, result)
+            and all(
+                previous[k] == segment[k]
+                for k in (
+                    "primary_code",
+                    "auxiliary_code",
+                    "auxiliary_status",
+                    "fall_event_id",
+                )
+            )
+        ):
+            # Archive both semantic descriptions before removing the artificial boundary.
+            notes = {n["note_id"]: n for n in previous["notes"]}
+            for part in (previous, segment):
+                if part["semantic_text"].strip():
+                    note = {
+                        "note_id": "semantic-" + part["segment_id"],
+                        "start_ns": part["start_ns"],
+                        "stop_ns": part["stop_ns"],
+                        "text": "原语义：" + part["semantic_text"],
+                    }
+                    _append_note(notes, note)
+                for note in part["notes"]:
+                    _append_note(notes, note)
+            previous["notes"] = list(notes.values())
+            previous["semantic_text"] = ""
+            previous["stop_ns"] = segment["stop_ns"]
+        else:
+            merged.append(segment)
+    result["segments"] = merged
+    return validate_document(result)
+
+
+def confirmed_spans(document):
+    """Single conservative projection shared by training, metrics and HDF5 export."""
+    return [
+        (start, stop, code)
+        for _, kind, start, stop, code in project_annotations(document)
+        if kind == "activity"
+    ]
 
 
 def _ceil_sample(ns):
@@ -463,8 +650,12 @@ def project_annotations(document, *, sequence_index=0):
     events = {e["event_id"]: e for e in document["fall_events"]}
     ranges = []
     for segment in document["segments"]:
-        excluded = segment["resolution"] != "identified"
-        start = segment["start_ns"] // PERIOD_NS if excluded else _ceil_sample(segment["start_ns"])
+        excluded = not confirmed(segment, document)
+        start = (
+            segment["start_ns"] // PERIOD_NS
+            if excluded
+            else _ceil_sample(segment["start_ns"])
+        )
         stop = min(count, _ceil_sample(segment["stop_ns"]))
         ranges.append(
             [
@@ -472,7 +663,7 @@ def project_annotations(document, *, sequence_index=0):
                 stop,
                 "exclude" if excluded else "activity",
                 "other" if excluded else segment["primary_code"],
-                segment["fall_event_id"],
+                None if excluded else segment["fall_event_id"],
             ]
         )
     # Conservatively expand exclusions to overlapping grid cells, trimming neighbours.
@@ -521,7 +712,9 @@ def project_annotations(document, *, sequence_index=0):
                     (sequence_index, "impact", impact, impact, code),
                 )
             )
-    _require(cursor == count and used == set(events), "Quantized event/coverage mismatch")
+    _require(
+        cursor == count and used == set(events), "Quantized event/coverage mismatch"
+    )
     order = {"activity": 0, "onset": 1, "impact": 2, "exclude": 3}
     return sorted(rows, key=lambda r: (r[0], r[2], order[r[1]], r[3], r[4]))
 
@@ -550,7 +743,10 @@ def validate_embedded(refs, annotations, *, sequence_index, sample_count):
     )
     document = embedded["document"]
     validate_document(document, expected_count=sample_count)
-    _require(document_sha256(document) == embedded["sha256"], "Temporal annotation hash mismatch")
+    _require(
+        document_sha256(document) == embedded["sha256"],
+        "Temporal annotation hash mismatch",
+    )
     for role in ("motion", "sensors"):
         _require(
             document["candidate"]["input_hashes"][role] == refs[role]["sha256"],
@@ -559,7 +755,8 @@ def validate_embedded(refs, annotations, *, sequence_index, sample_count):
     review = refs.get("review", {})
     raw = review.get("document_json")
     _require(
-        isinstance(raw, str) and hashlib.sha256(raw.encode()).hexdigest() == review.get("sha256"),
+        isinstance(raw, str)
+        and hashlib.sha256(raw.encode()).hexdigest() == review.get("sha256"),
         "Missing or mismatched embedded human review",
     )
     accepted = json.loads(raw)

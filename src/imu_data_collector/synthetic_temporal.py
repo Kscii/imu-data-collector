@@ -12,13 +12,17 @@ from .http_download import object_download_response
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
     IDENTIFIER,
+    SEMANTIC_SCHEMA,
     SHA256,
+    confirmed_spans,
     document_sha256,
     empty_document,
     formal_labels,
+    normalize_semantic,
     project_annotations,
     run_prefix,
     run_root,
+    semantic_draft,
     validate_document,
     validate_run,
 )
@@ -43,6 +47,7 @@ class ReviewBody(BaseModel):
     decision: str
     proposal_sha256: str
     expected_review_sha256: str | None = None
+    expected_draft_sha256: str | None = None
     reason_codes: list[str] = Field(default_factory=list)
     failed_segment_ids: list[str] = Field(default_factory=list)
     reason: str = ""
@@ -52,7 +57,11 @@ class ReviewBody(BaseModel):
 
 
 def primary_run(run):
-    return run["schema"] == "imu.temporal_run.v2"
+    return run["schema"] in ("imu.temporal_run.v2", "imu.temporal_run.v3")
+
+
+def semantic_run(run):
+    return run["schema"] == "imu.temporal_run.v3"
 
 
 def needs_reference(run, entry):
@@ -166,9 +175,89 @@ class TemporalReviewService:
     def reference(self, run, entry):
         return self.optional(self.case_root(run, entry) + "/reference.json")[0]
 
+    def draft(self, run, entry):
+        pointer, generation = self.optional(self.case_root(run, entry) + "/draft.json")
+        if not pointer:
+            return None, generation
+        value = self.read(pointer["revision_key"])
+        if document_sha256(value) != pointer["revision_sha256"]:
+            raise ValueError("Draft revision hash differs")
+        self.check_semantic_document(entry, value["document"])
+        return {**pointer, "document": value["document"]}, generation
+
+    @staticmethod
+    def check_semantic_document(entry, document):
+        validate_document(
+            document,
+            expected_candidate=entry["candidate"],
+            expected_count=entry["clock"]["sample_count"],
+        )
+        if document["schema"] != SEMANTIC_SCHEMA or document["clock"] != entry["clock"]:
+            raise ValueError("Semantic draft schema/clock differs")
+        if any(
+            s["auxiliary_code"] is not None or s["auxiliary_status"] != "unrecognized"
+            for s in document["segments"]
+        ):
+            raise ValueError("Only primary activity is reviewed in this run")
+
+    def save_draft(self, run, entry, body, actor):
+        if not semantic_run(run):
+            raise ValueError("Interval drafts require a v3 run")
+        prior, generation = self.draft(run, entry)
+        expected = prior["revision_sha256"] if prior else None
+        if body.get("expected_draft_sha256") != expected:
+            raise ObjectConflictError("草稿已在其他页面更新，请重新载入后核对；本地内容仍保留")
+        doc = body["document"]
+        self.check_semantic_document(entry, doc)
+        doc = normalize_semantic(doc)
+        if prior and prior["document"] == doc:
+            return prior
+        value = {
+            "schema": "imu.temporal_draft.v1",
+            "document": doc,
+            "previous_revision_sha256": expected,
+            "author": actor,
+            "created_at_utc": now(),
+        }
+        digest = document_sha256(value)
+        key = self.case_root(run, entry) + "/drafts/" + digest + ".json"
+        self.immutable(key, value)
+        pointer = {"revision_key": key, "revision_sha256": digest}
+        self.store.write_json(
+            self.case_root(run, entry) + "/draft.json", pointer, if_generation_match=generation
+        )
+        return {**pointer, "document": doc}
+
+    def checked_draft(self, run, entry, digest, document):
+        draft, _ = self.draft(run, entry)
+        if not draft or draft["revision_sha256"] != digest or draft["document"] != document:
+            raise ObjectConflictError("保存的草稿已变化，请先保存并核对最新区间")
+        return draft
+
+    def eligible_review(self, run, entry, pointer=None):
+        pointer = pointer or self.pointer(run, entry)[0]
+        if not pointer or pointer["decision"] != "pass":
+            return False
+        if not semantic_run(run):
+            return True
+        revision = self.read(pointer["revision_key"])
+        draft, _ = self.draft(run, entry)
+        return bool(
+            draft
+            and revision.get("draft_sha256") == draft["revision_sha256"]
+            and confirmed_spans(revision["temporal_annotation"])
+        )
+
     def save_reference(self, run, entry, document, actor):
         if not needs_reference(run, entry):
             raise ValueError("Manual precision editing is limited to the frozen reference subset")
+        if semantic_run(run):
+            body = document
+            document = body["document"]
+            self.check_semantic_document(entry, document)
+            self.checked_draft(run, entry, body.get("expected_draft_sha256"), document)
+            if any(s["review_state"] == "pending" for s in document["segments"]):
+                raise ValueError("独立参考仍有待讨论区间，请先保存草稿")
         validate_document(
             document,
             expected_candidate=entry["candidate"],
@@ -309,6 +398,18 @@ class TemporalReviewService:
                     source_rate_hz=entry["clock"]["source_rate_hz"],
                     producer={"kind": "independent-human-reference"},
                 )
+            if semantic_run(run):
+                result["draft"] = self.draft(run, entry)[0]
+                if hidden:
+                    result["reference_template"] = semantic_draft(result["reference_template"])
+                elif proposal:
+                    result["editor_template"] = semantic_draft(
+                        result["reviewed_document"] or proposal["document"]
+                    )
+        if semantic_run(run) and pointer and pointer["decision"] == "pass":
+            result["status"] = (
+                "accepted" if self.eligible_review(run, entry, pointer) else "pending_review"
+            )
         return result
 
     def review(self, run, entry, body, actor):
@@ -326,6 +427,17 @@ class TemporalReviewService:
         ):
             raise ValueError("Invalid review decision/reason")
         doc = proposal["document"]
+        draft_sha = None
+        if semantic_run(run) and body.decision == "pass":
+            if body.corrected_document is None:
+                raise ValueError("请提交明确确认的区间；保存草稿不会通过审核")
+            self.check_semantic_document(entry, body.corrected_document)
+            draft = self.checked_draft(
+                run, entry, body.expected_draft_sha256, body.corrected_document
+            )
+            draft_sha = draft["revision_sha256"]
+            if not confirmed_spans(body.corrected_document):
+                raise ValueError("至少确认一个可用区间；其他语义可保存为待讨论草稿")
         if body.corrected_document is not None:
             if not primary_run(run) or body.decision != "pass":
                 raise ValueError("Primary corrections must be explicitly accepted")
@@ -357,6 +469,7 @@ class TemporalReviewService:
         if (
             body.decision == "pass"
             and any(s["resolution"] != "identified" for s in doc["segments"])
+            and not semantic_run(run)
             and not body.acknowledge_exclusions
         ):
             raise ValueError("Explicitly confirm the intervals excluded from training")
@@ -382,6 +495,8 @@ class TemporalReviewService:
             "review_seconds": body.review_seconds,
             "corrected": body.corrected_document is not None,
         }
+        if semantic_run(run):
+            revision["draft_sha256"] = draft_sha
         digest = document_sha256(revision)
         cid, vid = entry["candidate"]["candidate_id"], entry["candidate"]["version_id"]
         key = f"{run_prefix(run)}/reviews/{cid}/{vid}/revisions/temporal-{digest}.json"
@@ -440,7 +555,7 @@ class TemporalReviewService:
             pointer, _ = self.pointer(run, entry)
             if pointer and pointer["decision"] == "reject":
                 continue
-            if not pointer or pointer["decision"] != "pass":
+            if not self.eligible_review(run, entry, pointer):
                 unresolved += 1
                 continue
             revision = self.read(pointer["revision_key"])
@@ -638,6 +753,11 @@ def register_temporal_routes(app: FastAPI, source, current_actor):
     def reference(run_id: str, cid: str, vid: str, body: dict, request: Request):
         actor = current_actor(request)
         return invoke(service.save_reference, *invoke(locate, run_id, cid, vid), body, actor.unikey)
+
+    @app.post(root + "/runs/{run_id}/cases/{cid}/{vid}/draft")
+    def draft(run_id: str, cid: str, vid: str, body: dict, request: Request):
+        actor = current_actor(request)
+        return invoke(service.save_draft, *invoke(locate, run_id, cid, vid), body, actor.unikey)
 
     @app.post(root + "/runs/{run_id}/cases/{cid}/{vid}/review")
     def review(run_id: str, cid: str, vid: str, body: ReviewBody, request: Request):

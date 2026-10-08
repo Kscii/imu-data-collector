@@ -92,3 +92,7 @@
 .primary-actions label { width: auto; justify-content: flex-start; }
 .primary-actions button { padding: 6px 8px; }
 .primary-actions input[type=checkbox] { width: 14px; min-width: 14px; height: 14px; }
+
+.primary-note-list { display: grid; gap: 8px; }
+.primary-actions > small { font-size: 11px; opacity: .75; }
+.primary-fields .primary-boundaries select { padding-left: 8px; padding-right: 4px; }

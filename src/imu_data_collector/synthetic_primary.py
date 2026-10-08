@@ -64,10 +64,8 @@ def register_primary_routes(app, service, current_actor):
         ready = []
         for entry in run["candidates"]:
             pointer = service.pointer(run, entry)[0]
-            if (
-                entry["reference_role"] == "development"
-                and pointer
-                and pointer["decision"] == "pass"
+            if entry["reference_role"] == "development" and service.eligible_review(
+                run, entry, pointer
             ):
                 ready.append(pointer["revision_sha256"])
         result = invoke(jobs, run)
@@ -96,10 +94,8 @@ def register_primary_routes(app, service, current_actor):
         reviews = []
         for entry in run["candidates"]:
             pointer = service.pointer(run, entry)[0]
-            if (
-                entry["reference_role"] == "development"
-                and pointer
-                and pointer["decision"] == "pass"
+            if entry["reference_role"] == "development" and service.eligible_review(
+                run, entry, pointer
             ):
                 reviews.append(
                     {
