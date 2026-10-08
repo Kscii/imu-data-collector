@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DeviceEvents, DeviceFields, SleepReports, externalRequest as request, type EventSeries, type Preparation } from "./ExternalDeviceInsights";
 import { ExternalDeviceChart } from "./ExternalDeviceChart";
 import { beijingDay, beijingTime, dayRange, externalViewUrl, localTimeInput, readExternalView,
-  resolveExternalRange, type AggregateSeries, type ExternalView, type TimePreset, type TimeRange } from "./externalDeviceData";
+  resolveExternalRange, chooseExternalMetric, metricPreferenceKey, quickMetricKeys, latestMetricRange, type AggregateSeries, type ExternalView, type TimePreset, type TimeRange } from "./externalDeviceData";
 import "./externalDevices.css";
 
+type DrawerTab = "records" | "reports" | "events" | "fields" | "status" | "manage";
 const base = "/api/v1/external-devices";
+const noEvents: EventSeries["points"] = [];
 const connectPointsPreference = "imu-external-connect-points-v1";
 type Device = {id: string; kind: "radar-watch" | "mattress"; device_no: string; display_name: string;
   product_key: string | null; listed: boolean; first_seen: string; first_record: string | null;
@@ -32,12 +35,6 @@ type Detail = {record_json: string; raw_payload: string | null};
 const presets: [TimePreset, string, string][] = [["1d", "近1日", "过去24小时"], ["7d", "近1周", "过去7天"],
   ["30d", "近1月", "过去30天"], ["365d", "近1年", "过去365天"], ["all", "全部", "全部已归档时间"]];
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(base + path, {...options, headers: {"Content-Type": "application/json", ...options.headers}});
-  const body = await response.json();
-  if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : body.detail?.message ?? `HTTP ${response.status}`);
-  return body as T;
-}
 
 function download(id: string) {
   const link = document.createElement("a");
@@ -141,7 +138,8 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
   const viewRef = useRef(view); viewRef.current = view;
   const [devices, setDevices] = useState<Device[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
-  const [metadata, setMetadata] = useState<{device: string; ready: boolean; metrics: Metric[]} | null>(null);
+  const [metadata, setMetadata] = useState<{device: string; ready: boolean; preparation: Preparation; metrics: Metric[]} | null>(null);
+  const [events, setEvents] = useState<EventSeries | null>(null);
   const [series, setSeries] = useState<AggregateSeries | null>(null);
   const [clock, setClock] = useState(Date.now());
   const [refresh, setRefresh] = useState(0);
@@ -156,7 +154,7 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
   const [customOpen, setCustomOpen] = useState(false);
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
-  const [drawer, setDrawer] = useState<"records" | "status" | "manage" | null>(null);
+  const [drawer, setDrawer] = useState<DrawerTab | null>(null);
   const [inspectRange, setInspectRange] = useState<TimeRange | null>(null);
   const [zoomHistory, setZoomHistory] = useState<ExternalView[]>([]);
   const [budget, setBudget] = useState(800);
@@ -171,6 +169,7 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
   const metric = metrics.find(item => item.key === view.metric);
   const range = useMemo(() => resolveExternalRange(view, clock, device?.first_record ?? device?.first_seen),
     [view.preset, view.from, view.to, clock, device?.first_record, device?.first_seen]);
+  const eventOnlySeries: AggregateSeries = {metric: "events", label: "报警上报", unit: "", method: "events", interval_ms: 1, count: 0, points: [], coverage: {complete: true, gaps: []}};
   const update = (patch: Partial<ExternalView>, replace = false) => {
     const next = {...viewRef.current, ...patch};
     viewRef.current = next; setView(next);
@@ -220,20 +219,35 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
     setClock(Date.now());
     const load = async () => {
       try {
-        const result = await request<{ready: boolean; metrics: Metric[]}>(`/devices/${view.device}/metrics`, {signal: abort.signal});
+        const result = await request<{ready: boolean; preparation: Preparation; metrics: Metric[]}>(`/devices/${view.device}/metrics`, {signal: abort.signal});
         if (abort.signal.aborted) return;
         setMetadata({...result, device: view.device});
-        if (!result.ready) timer = window.setTimeout(() => void load(), 2000);
+        if (!result.ready || !result.preparation.ready) timer = window.setTimeout(() => void load(), 2000);
       } catch (reason) {if (!abort.signal.aborted) setError(String(reason));}
     };
     void load();
     return () => {abort.abort(); clearTimeout(timer);};
   }, [view.device, device?.last_success, status?.generation, refresh]);
   useEffect(() => {
-    if (!metrics.length || metric) return;
-    const aliases: Record<string, string> = {HR: "HeartRate", HeartRate: "HR", BRR: "RespiratoryRate", RespiratoryRate: "BRR"};
-    update({metric: metrics.find(item => item.key === aliases[view.metric])?.key ?? metrics[0].key}, true);
-  }, [metadata, view.metric]);
+    if (!metrics.length || metric || !device) return;
+    if (!metadata?.preparation.ready && ["Amp_value", "CO", "distance_km", "STTIME", "energy_kcal"].includes(view.metric)) return;
+    let remembered = "";
+    try {remembered = localStorage.getItem(metricPreferenceKey(device.kind)) ?? "";} catch { /* Storage may be disabled. */ }
+    update({metric: chooseExternalMetric(device.kind, metrics.map(item => item.key), view.metric, remembered)}, true);
+  }, [metadata, view.metric, device?.kind]);
+  const chooseMetric = (key: string) => {
+    if (device) try {localStorage.setItem(metricPreferenceKey(device.kind), key);} catch { /* Keep URL state available. */ }
+    update({metric: key});
+  };
+  useEffect(() => {
+    setEvents(null);
+    if (!view.device) return;
+    const abort = new AbortController();
+    request<EventSeries>(`/devices/${view.device}/events?${new URLSearchParams({...range, point_budget: String(budget)})}`, {signal: abort.signal})
+      .then(value => {if (!abort.signal.aborted) setEvents(value);})
+      .catch(reason => {if (!abort.signal.aborted) setError(String(reason));});
+    return () => abort.abort();
+  }, [view.device, range.start, range.end, budget, device?.last_success, status?.generation, metadata?.preparation.ready, refresh]);
   useEffect(() => {
     if (!plotArea.current) return;
     let timer = 0;
@@ -258,8 +272,7 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
   const zoom = (next: TimeRange) => {setZoomHistory(previous => [...previous, view]); update({preset: "custom", from: next.start, to: next.end});};
   const latest = () => {
     if (!metric) return;
-    const end = Date.parse(metric.last_record) + 1;
-    zoom({start: new Date(end - 86400_000).toISOString(), end: new Date(end).toISOString()});
+    zoom(latestMetricRange(metric.last_record));
   };
   useEffect(() => {if (status?.history_start) setHistoryDate(beijingDay(new Date(status.history_start)));}, [status?.history_start]);
   const taskBusy = Boolean(status?.task && ["pending", "running"].includes(status.task.state));
@@ -277,10 +290,10 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
   };
   const stale = !status?.worker_online;
   const syncLabel = status?.paused ? "同步暂停" : stale ? "未连接同步服务" : status?.error ? "同步异常" : "同步正常";
-  const openDetails = (tab: "records" | "status" | "manage") => {setInspectRange(null); setDrawer(tab);};
+  const openDetails = (tab: DrawerTab) => {setInspectRange(null); setDrawer(tab);};
   const renderDevice = (item: Device) => <div className={`external-device-row ${view.device === item.id ? "active" : ""}`} key={item.id}>
-    <button className="external-device-select" onClick={() => {setZoomHistory([]); update({device: item.id});}} title={`${item.display_name}${item.product_key ? ` · ${item.product_key}` : ""}\n最新数据 ${beijingTime(item.last_record)}`}>
-      <strong>{item.device_no}</strong><small>{item.initial_sync ? `${item.total.toLocaleString()} 条 · ${taskBusy ? "首次同步中" : "首次同步待完成"}` : item.listed ? `${item.total.toLocaleString()} 条记录` : "已归档 · 不在上游列表"}</small>
+    <button className="external-device-select" onClick={() => {setZoomHistory([]); update({device: item.id, metric: ""});}} title={`${item.display_name}${item.product_key ? ` · ${item.product_key}` : ""}\n最新数据 ${beijingTime(item.last_record)}`}>
+      <strong>{item.device_no}</strong><small>{item.initial_sync ? `${item.total.toLocaleString()} 条 · ${taskBusy ? "首次同步中" : "首次同步待完成"}` : item.listed ? `${item.total.toLocaleString()} 条记录` : "已归档 · 不在上游列表"}</small><small className="external-device-last">最近 {beijingTime(item.last_record)}</small>
     </button><DownloadButton device={item.id} />
   </div>;
   return <section className="external-page">
@@ -309,17 +322,29 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
         <div className="external-toolbar-top"><button className="external-mobile-only" onClick={() => setDirectoryOpen(true)}>设备 ☰</button>
           <div className="external-device-heading"><strong>{device?.device_no ?? "外部设备数据"}</strong><span>{device?.kind === "radar-watch" ? "手表" : device ? "床垫" : ""}</span></div>
           {isAdmin && <button className="external-refresh-button" disabled={action || taskBusy || stale} title={stale ? "请先启动已配置密钥的同步进程" : "更新全部设备：发现新设备并拉取新增数据"} onClick={() => void perform("/sync")}>{taskBusy ? "处理中…" : "更新数据"}</button>}
-          <label className="external-metric">指标<select aria-label="图表指标" value={metric?.key ?? ""} onChange={event => update({metric: event.target.value})} disabled={!metrics.length}>
-            {!metrics.length && <option value="">暂无指标</option>}{metrics.map(item => <option key={item.key} value={item.key}>{item.label} · {item.unit}</option>)}
-          </select></label><button className="external-details-button" onClick={() => openDetails(device ? "records" : isAdmin ? "manage" : "status")}>详情</button>
+          {device?.kind === "mattress" && <button className="external-reports-button" onClick={() => openDetails("reports")}>睡眠报告</button>}
+          <button className="external-details-button" onClick={() => openDetails(device ? "records" : isAdmin ? "manage" : "status")}>详情</button>
         </div>
-        {(status?.task || notice || stale) && <div className="external-operation-line" role="status">
-          {status?.task && <button onClick={() => openDetails(isAdmin ? "manage" : "status")}>{taskLabel(status.task)}</button>}
+        {(taskBusy || status?.task?.state === "failed" || notice || stale) && <div className="external-operation-line" role="status">
+          {status?.task && status.task.state !== "done" && <button onClick={() => openDetails(isAdmin ? "manage" : "status")}>{taskLabel(status.task)}</button>}
           {notice && <span>{notice}</span>}{stale && <span>未连接同步服务</span>}
         </div>}
+        <div className="external-metric-toolbar" aria-label="指标选择">
+          <div className="external-quick-metrics">{(quickMetricKeys[device?.kind ?? ""] ?? []).map(key => metrics.find(item => item.key === key)).filter((item): item is Metric => !!item).map(item =>
+            <button key={item.key} className={metric?.key === item.key ? "active" : ""} aria-pressed={metric?.key === item.key} onClick={() => chooseMetric(item.key)}>{item.label}</button>)}</div>
+          <label className="external-metric"><select aria-label="更多指标" value={metric && !(quickMetricKeys[device?.kind ?? ""] ?? []).includes(metric.key) ? metric.key : ""} onChange={event => {if (event.target.value) chooseMetric(event.target.value);}} disabled={!metrics.length}>
+            <option value="">更多指标</option>{metrics.filter(item => !(quickMetricKeys[device?.kind ?? ""] ?? []).includes(item.key)).map(item => <option key={item.key} value={item.key}>{item.label} · {item.unit}</option>)}
+          </select></label>
+          <span className="external-metric-unit">{metric?.unit}</span>
+          {metadata?.device === view.device && !metadata.preparation.ready && <small>正在整理新增指标…</small>}
+        </div>
         <div className="external-time-toolbar"><div className="external-presets">{presets.map(([key, label, title]) => <button key={key} title={title} className={view.preset === key ? "active" : ""} onClick={() => choosePreset(key)}>{label}</button>)}
           <button className={view.preset === "custom" ? "active" : ""} onClick={() => {setCustomStart(localTimeInput(range.start)); setCustomEnd(localTimeInput(range.end)); setCustomOpen(true);}}>自定义</button>
         </div>{zoomHistory.length > 0 && <button className="external-zoom-back" onClick={() => {const previous = zoomHistory.at(-1)!; setZoomHistory(items => items.slice(0, -1)); update(previous);}}>← 返回上个范围</button>}
+        </div>
+        <div className="external-latest"><span>{metric ? `${metric.label}最近上报 · ${beijingTime(metric.last_record)}` : `设备最近上报 · ${beijingTime(device?.last_record)}`}</span>
+          <button disabled={!metric} onClick={latest}>跳到最新数据</button>
+          {!!events?.total && <button className="external-event-count" onClick={() => openDetails("events")}>△ {events.total} 条报警上报</button>}
         </div>
         <div className="external-range-summary"><span>{beijingTime(range.start)} — {beijingTime(range.end)} <small>北京时间</small></span>
           <span className="external-badges">{device && !device.history_complete && <button onClick={() => openDetails("status")}>历史未补齐</button>}
@@ -330,11 +355,12 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
       <div className="external-plot-panel" ref={plotArea}>
         {error ? <div className="external-empty" role="alert"><strong>暂时无法读取数据</strong><p>{error}</p><button onClick={() => setRefresh(n => n + 1)}>重试</button></div>
           : busy ? <div className="external-empty" role="status">正在读取趋势…</div>
-          : series && series.count > 0 ? <ExternalDeviceChart series={series} range={range} onZoom={zoom} connectPoints={connectPoints}
+          : (series && series.count > 0) || (events?.total ?? 0) > 0 ? <ExternalDeviceChart series={series ?? eventOnlySeries} range={range} onZoom={zoom} connectPoints={connectPoints}
               onConnectPointsChange={connected => {
                 setConnectPoints(connected);
                 try {localStorage.setItem(connectPointsPreference, String(connected));} catch { /* Keep the preference for this visit if storage is unavailable. */ }
               }}
+              events={events?.points ?? noEvents} onInspectEvent={selectedRange => {setInspectRange(selectedRange); setDrawer("events");}}
               onInspect={selectedRange => {setInspectRange(selectedRange); setDrawer("records");}} />
           : <div className="external-empty"><span className="external-empty-icon">⌁</span><strong>{metadata?.ready === false ? "正在准备统计索引" : "这个时间范围内暂无数据"}</strong>
             <p>{metric ? `所选指标：${metric.label}。可以扩大范围，或定位最近一次记录。` : "设备有可视化指标后会显示在这里。"}</p>
@@ -361,9 +387,13 @@ export function ExternalDevicesPage({isAdmin}: {isAdmin: boolean}) {
     </div>}
     {drawer && (device || drawer !== "records") && <aside className="external-detail-drawer" role="dialog" aria-label="设备详情">
       <div className="external-drawer-heading"><strong>{device?.device_no ?? "外部设备数据"}</strong><button aria-label="关闭详情" onClick={() => setDrawer(null)}>✕</button></div>
-      <div className="external-drawer-tabs">{(["records", "status", ...(isAdmin ? ["manage"] : [])] as const).map(tab => <button key={tab} className={drawer === tab ? "active" : ""} onClick={() => setDrawer(tab as typeof drawer)}>{tab === "records" ? "原始记录" : tab === "status" ? "同步与覆盖" : "管理"}</button>)}</div>
+      <div className="external-drawer-tabs">{(["records", ...(device?.kind === "mattress" ? ["reports"] : []), "events", "fields", "status", ...(isAdmin ? ["manage"] : [])] as DrawerTab[]).map(tab => <button key={tab} className={drawer === tab ? "active" : ""} onClick={() => setDrawer(tab as typeof drawer)}>{({records: "记录", reports: "睡眠", events: "报警", fields: "字段", status: "同步", manage: "管理"})[tab]}</button>)}</div>
       <div className="external-drawer-scroll">
         {drawer === "records" && device && <RecordList key={`${status?.generation}:${device.id}:${(inspectRange ?? range).start}:${(inspectRange ?? range).end}`} device={device.id} range={inspectRange ?? range} />}
+        {drawer === "reports" && device && <SleepReports key={`${status?.generation}:${device.id}`} device={device.id} />}
+        {drawer === "events" && device && <DeviceEvents key={`${status?.generation}:${device.id}:${(inspectRange ?? range).start}:${(inspectRange ?? range).end}`} device={device.id} range={inspectRange ?? range} />}
+        {drawer === "fields" && device && <DeviceFields key={`${status?.generation}:${device.id}`} device={device.id} />}
+        {drawer === "status" && status?.task && <p>{taskLabel(status.task)}</p>}
         {drawer === "status" && device && <><dl className="external-facts">
           <dt>最新数据</dt><dd>{beijingTime(device.last_record)}</dd><dt>最近同步</dt><dd>{beijingTime(device.last_success)}</dd>
           <dt>增量连续覆盖至</dt><dd>{beijingTime(device.synced_until)}</dd><dt>设备身份</dt><dd>{device.product_key ? `${device.product_key} / ` : ""}{device.device_no}</dd>
