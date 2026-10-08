@@ -72,6 +72,8 @@ def metrics(record: dict, device_kind: str) -> dict[str, float | None]:
                 if (value is not None and value >= 0 and value.is_integer())
                 else None
             )
+        if record.get("messageType") == "REALTIME":
+            result["Amp_value"] = numeric(values.get("Amp_value"))
         return result
     fields = {
         "UHR": ("HR",),
@@ -81,7 +83,17 @@ def metrics(record: dict, device_kind: str) -> dict[str, float | None]:
         "UBRR": ("BRR",),
         "LK": ("BP", "ST", "CST", "KCAL"),
     }.get(record.get("operation"), ())
-    return {field: numeric(payload.get(field)) for field in fields}
+    result = {field: numeric(payload.get(field)) for field in fields}
+    if record.get("operation") == "LK":
+        for source, target, divisor in (
+            ("CO", "CO", 1),
+            ("DTC", "distance_km", 100),
+            ("STTIME", "STTIME", 1),
+            ("KCAL", "energy_kcal", 10),
+        ):
+            value = numeric(payload.get(source))
+            result[target] = value / divisor if value is not None else None
+    return result
 
 
 def is_synthetic(record: dict) -> bool:

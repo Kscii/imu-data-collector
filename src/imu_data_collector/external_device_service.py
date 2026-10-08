@@ -19,6 +19,7 @@ from pathlib import Path
 import requests
 
 from imu_data_collector import external_device_aggregation as aggregation
+from imu_data_collector import external_device_insights as insights
 from imu_data_collector.config import Settings
 from imu_data_collector.external_device_catalog import ExternalDeviceCatalog
 from imu_data_collector.external_device_domain import (
@@ -27,6 +28,7 @@ from imu_data_collector.external_device_domain import (
     PREFIX,
     digest,
     json_bytes,
+    metrics,
     now,
     timestamp,
     utc,
@@ -169,6 +171,11 @@ METRIC_LABELS = {
     "CST": ("区间步数", "步"),
     "KCAL": ("热量原值", "原值 ×0.1 kcal"),
 }
+
+# Keep the original CSV columns in their original positions; new columns are appended.
+LEGACY_METRIC_KEYS = tuple(METRIC_LABELS)
+
+METRIC_LABELS.update({key: value[:2] for key, value in insights.NEW_METRICS.items()})
 
 
 class ExternalDeviceService:
@@ -347,6 +354,8 @@ class ExternalDeviceService:
 
     def metric_metadata(self, identifier: str) -> dict:
         rows = self.catalog.rows("SELECT * FROM metric_metadata WHERE device_id=?", (identifier,))
+        preparation = insights.preparation(self.catalog, identifier)
+        kind = self.catalog.device(identifier)["kind"]
         preferred = ("HeartRate", "HR", "RespiratoryRate", "BRR")
         rows.sort(
             key=lambda row: (
@@ -356,17 +365,28 @@ class ExternalDeviceService:
         )
         return {
             "ready": self.catalog.get_meta("aggregation_version") == 1,
+            "preparation": preparation,
             "metrics": [
                 {
                     "key": row["metric"],
                     "label": METRIC_LABELS.get(row["metric"], (row["metric"], "原值"))[0],
                     "unit": METRIC_LABELS.get(row["metric"], (row["metric"], "原值"))[1],
                     "method": aggregation.method(row["metric"]),
+                    "quick": row["metric"] in insights.QUICK_METRICS[kind],
+                    "group": insights.NEW_METRICS.get(
+                        row["metric"],
+                        (
+                            None,
+                            None,
+                            "常用" if row["metric"] in insights.QUICK_METRICS[kind] else "更多指标",
+                        ),
+                    )[2],
                     "count": row["count"],
                     "first_record": row["first_record"],
                     "last_record": row["last_record"],
                 }
                 for row in rows
+                if preparation["ready"] or row["metric"] not in insights.NEW_METRICS
             ],
         }
 
@@ -477,13 +497,17 @@ class ExternalDeviceService:
         }
 
     @staticmethod
-    def public_record(row: dict) -> dict:
+    def public_record(row: dict, *, additions_ready: bool = True) -> dict:
         return {
             "id": row["id"],
             "source_id": row["source_id"],
             "message_type": row["message_type"],
             "received_at": row["received_at"],
-            "metrics": json.loads(row["metric_json"]),
+            "metrics": {
+                key: value
+                for key, value in json.loads(row["metric_json"]).items()
+                if additions_ready or key not in insights.NEW_METRICS
+            },
             "synthetic": bool(row["synthetic"]),
         }
 
@@ -494,6 +518,7 @@ class ExternalDeviceService:
         counts: dict = {}
         previous: dict = {}
         kind = self.catalog.device(identifier)["kind"]
+        additions_ready = insights.preparation(self.catalog, identifier)["ready"]
         gap_ms = 10000 if kind == "mattress" else 1800000
         with self.catalog.connect() as db:
             rows = db.execute(
@@ -505,6 +530,8 @@ class ExternalDeviceService:
                 t = timestamp(row["received_at"]).timestamp() * 1000
                 index = min(bins - 1, int((t - lower) / span))
                 for field, value in json.loads(row["metric_json"]).items():
+                    if not additions_ready and field in insights.NEW_METRICS:
+                        continue
                     if field in previous and t - previous[field] > gap_ms:
                         gap_time = previous[field] + 1
                         gap_index = min(bins - 1, int((gap_time - lower) / span))
@@ -566,9 +593,10 @@ class ExternalDeviceService:
                     "received_at",
                     "message_type",
                     "synthetic",
-                    *METRIC_LABELS,
+                    *LEGACY_METRIC_KEYS,
                     "payload_json",
                     "rawPayload",
+                    *insights.NEW_METRICS,
                 ]
             )
             rows = db.execute(
@@ -583,15 +611,17 @@ class ExternalDeviceService:
                     output.write(",\n")
                 json.dump(record, output, ensure_ascii=False, allow_nan=False)
                 values = json.loads(row["metric_json"])
+                additions = metrics(record, device["kind"])
                 cells = [
                     row["id"],
                     row["source_id"],
                     row["received_at"],
                     row["message_type"],
                     bool(row["synthetic"]),
-                    *(values.get(key) for key in METRIC_LABELS),
+                    *(values.get(key) for key in LEGACY_METRIC_KEYS),
                     json.dumps(record.get("payload"), ensure_ascii=False),
                     record.get("rawPayload"),
+                    *(additions.get(key) for key in insights.NEW_METRICS),
                 ]
                 writer.writerow(
                     [
@@ -619,6 +649,10 @@ class ExternalDeviceService:
             "history_start_confirmed": self.catalog.get_meta("confirmed_history_start"),
             "csv_notes": "Missing values are empty; formula-like source strings are prefixed "
             "with an apostrophe. JSON preserves source types and strings.",
+            "csv_additions": {
+                key: {"label": label, "unit": unit}
+                for key, (label, unit, _) in insights.NEW_METRICS.items()
+            },
             "files": {
                 p.name: {"sha256": self.file_hash(p), "size_bytes": p.stat().st_size}
                 for p in (records_path, csv_path)
