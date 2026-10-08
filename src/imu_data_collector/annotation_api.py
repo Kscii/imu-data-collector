@@ -40,6 +40,7 @@ from imu_data_collector.device_configuration import (
     ConfigurationReviewAction,
     DeviceConfigurationStore,
 )
+from imu_data_collector.external_device_api import register_external_devices
 from imu_data_collector.host import resource_path
 from imu_data_collector.http_download import object_download_response
 from imu_data_collector.model_catalog import ModelCatalog
@@ -181,6 +182,8 @@ def create_annotation_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
+    register_external_devices(app, active, object_store, current_actor)
+
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
         return {
@@ -200,6 +203,8 @@ def create_annotation_app(
             "auth_mode": active.auth.mode,
             "current_unikey": actor.unikey,
             "can_view_models": actor.unikey in MODEL_VIEWERS,
+            "can_view_external_devices": active.external_devices.enabled and (
+                actor.is_admin or active.external_devices.access == "members"),
             "can_manage_device_configuration": actor.is_admin,
             "catalog_refresh_interval_s": active.annotation.catalog_refresh_interval_s,
             "synthetic_run_id": active.annotation.synthetic_run_id,

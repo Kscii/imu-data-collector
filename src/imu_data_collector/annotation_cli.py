@@ -137,6 +137,9 @@ def main() -> None:
             "member-list",
             "member-add",
             "member-remove",
+            "external-sync",
+            "external-sync-once",
+            "external-rebuild-index",
         ),
     )
     parser.add_argument("--min-age-days", type=int, default=7)
@@ -167,6 +170,33 @@ def main() -> None:
         _manage_member(args)
         return
     settings = load_settings(args.config)
+    if args.command.startswith("external-"):
+        from imu_data_collector.external_device_runtime import ExternalDeviceRuntime
+        from imu_data_collector.external_device_worker import ExternalDeviceWorker
+
+        if not settings.external_devices.enabled:
+            parser.error("external_devices.enabled must be true")
+        store = create_object_store(
+            settings.storage.backend,
+            settings.storage.root,
+            settings.storage.bucket,
+            settings.storage.project,
+        )
+        external = ExternalDeviceRuntime(settings, store)
+        if args.command == "external-rebuild-index":
+            from imu_data_collector.file_lock import exclusive_file_lock
+
+            with exclusive_file_lock(external.control.path.with_suffix(".worker.lock")):
+                external.recover()
+                print(json.dumps({"generation": external.generation, "state": "recovered"}))
+        else:
+            import signal
+
+            stop = threading.Event()
+            signal.signal(signal.SIGTERM, lambda *_: stop.set())
+            signal.signal(signal.SIGINT, lambda *_: stop.set())
+            ExternalDeviceWorker(external).run(stop, once=args.command == "external-sync-once")
+        return
     if args.command in {
         "cleanup-orphans",
         "reexport-completed-training",

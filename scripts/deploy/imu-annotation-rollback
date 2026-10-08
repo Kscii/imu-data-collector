@@ -20,6 +20,28 @@ preflight_release() {
     "${config_path}"
 }
 
+stop_external_worker() {
+  if [[ -f /etc/systemd/system/imu-external-devices.service ]]; then
+    systemctl stop imu-external-devices.service
+  fi
+}
+
+start_external_worker() {
+  local candidate=$1
+  if [[ -f ${candidate}/configs/systemd/imu-external-devices.service ]] \
+    && runuser -u kscii -- "${candidate}/.venv/bin/python" -c \
+      'from pathlib import Path; import sys; from imu_data_collector.config import load_settings; s=load_settings(Path(sys.argv[1])); sys.exit(0 if getattr(getattr(s, "external_devices", None), "enabled", False) else 1)' \
+      "${config_path}"; then
+    install -m 0644 "${candidate}/configs/systemd/imu-external-devices.service" \
+      /etc/systemd/system/imu-external-devices.service
+    systemctl daemon-reload
+    systemctl enable imu-external-devices.service
+    systemctl restart imu-external-devices.service
+  elif [[ -f /etc/systemd/system/imu-external-devices.service ]]; then
+    systemctl disable imu-external-devices.service
+  fi
+}
+
 [[ -d ${release_dir} && -f ${release_dir}/.deployment-ready ]] || {
   echo "服务器没有这个已部署版本：${release_id}" >&2
   exit 1
@@ -36,6 +58,7 @@ if [[ -L ${current_link} ]]; then
   }
 fi
 
+stop_external_worker
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl restart imu-annotation.service
@@ -44,9 +67,12 @@ if [[ -x ${release_dir}/.venv/bin/imu-upload-broker ]]; then
 else
   systemctl stop imu-upload-broker.service
 fi
+worker_started=true
+start_external_worker "${release_dir}" || worker_started=false
 
 for _attempt in $(seq 1 20); do
-  if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null; then
+  if [[ ${worker_started} == true ]] \
+    && curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null; then
     echo "回滚完成：${release_id}"
     exit 0
   fi
@@ -54,6 +80,7 @@ for _attempt in $(seq 1 20); do
 done
 
 if [[ -n ${previous} ]]; then
+  stop_external_worker
   ln -s "${previous}" "${current_link}.failed"
   mv -Tf "${current_link}.failed" "${current_link}"
   systemctl restart imu-annotation.service
@@ -62,6 +89,7 @@ if [[ -n ${previous} ]]; then
   else
     systemctl stop imu-upload-broker.service
   fi
+  start_external_worker "${previous}"
 fi
 echo "回滚版本健康检查失败" >&2
 exit 1

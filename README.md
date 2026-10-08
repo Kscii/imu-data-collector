@@ -163,6 +163,9 @@ WebUI 的“IMU 表征”页逐阶段操作，详见
 
 配置文件为 [configs/default.yaml](configs/default.yaml)。也可用 `IMU_COLLECTOR_CONFIG` 指向服务器私有 YAML，或用 `IMU_COLLECTOR_DATA_ROOT` 临时覆盖落盘根目录。结构化配置与用户角色放 YAML，真正的秘密只放私有 env；两者都不提交真实值。
 
+外部手表与床垫的历史同步、曲线浏览和下载见
+[外部设备历史数据](docs/external-device-history.md)。
+
 ## 数据安全
 
 - `.partial.h5` / `.partial.mkv` 表示录制中断或尚未完整收尾，不能当作可训练数据。
