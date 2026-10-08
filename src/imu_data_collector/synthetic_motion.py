@@ -85,12 +85,13 @@ REJECTION_CODES = {
 VIEWER_BRIDGE = b"""<script>
 (() => {
   if (parent === window) return;
-  const version = 2;
+  const version = 3;
+  const isPlaying = () => document.querySelector('#play')?.textContent.trim() === '\\u275a\\u275a';
   const report = () => {
     const slider = document.querySelector('#time');
     parent.postMessage({type: 'imu-synthetic-review-ready', version,
       frame: slider ? Number(slider.value) : 0,
-      maxFrame: slider ? Number(slider.max) : 0}, location.origin);
+      maxFrame: slider ? Number(slider.max) : 0, playing: isPlaying()}, location.origin);
   };
   report();
   addEventListener('load', report);
@@ -111,10 +112,12 @@ VIEWER_BRIDGE = b"""<script>
         || event.data?.type !== 'imu-synthetic-review-control') return;
     const play = document.querySelector('#play');
     if (event.data.action === 'toggle') play?.click();
+    if (event.data.action === 'pause' && isPlaying()) play?.click();
+    if (event.data.action === 'play' && !isPlaying()) play?.click();
     if (event.data.action === 'replay') {
       const slider = document.querySelector('#time');
       if (slider) { slider.value = '0'; slider.dispatchEvent(new Event('input')); }
-      play?.click();
+      if (!isPlaying()) play?.click();
     }
     if (event.data.action === 'seek' && Number.isInteger(event.data.frame)) {
       const slider = document.querySelector('#time');
@@ -127,15 +130,23 @@ VIEWER_BRIDGE = b"""<script>
       const plot = document.querySelector('#plot');
       if (plot) plot.style.display = event.data.ready ? 'none' : '';
     }
+    if (['pause', 'play', 'toggle', 'seek', 'replay'].includes(event.data.action)) {
+      const slider = document.querySelector('#time');
+      if (slider) parent.postMessage({type: 'imu-synthetic-review-frame',
+        frame: Number(slider.value), playing: isPlaying()}, location.origin);
+    }
   });
   let sentFrame = -1;
+  let sentPlaying = null;
   setInterval(() => {
     const slider = document.querySelector('#time');
     if (!slider || parent === window) return;
     const frame = Number(slider.value);
-    if (frame !== sentFrame) {
+    const playing = isPlaying();
+    if (frame !== sentFrame || playing !== sentPlaying) {
       sentFrame = frame;
-      parent.postMessage({type: 'imu-synthetic-review-frame', frame}, location.origin);
+      sentPlaying = playing;
+      parent.postMessage({type: 'imu-synthetic-review-frame', frame, playing}, location.origin);
     }
   }, 80);
   setInterval(report, 1000);

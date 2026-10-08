@@ -125,8 +125,30 @@ export function SyntheticLabelManagement({isAdmin, section, refreshKey, onChange
         : tr("合成运动自动映射", "Synthetic motion mappings")}</div>
     {error && <div className="error-banner">{error}</div>}
     {section === "concepts" && <>
-      <p>{tr("仅在合成运动中可选；每个标签仍属于跌倒或非跌倒。共用标签在上方两组维护。", "Only selectable for synthetic motion; each remains a fall or non-fall label. Shared labels are managed in the two groups above.")}</p>
-      <div className="synthetic-concept-list">{catalog?.concepts.filter(item => item.scope === "motion" && item.active)
+      {catalog?.temporal && <>
+        <p>{tr("统一主活动定义；共用标签保留真实数据的代码和历史。", "Unified primary definitions; shared labels retain real-data codes and history.")}
+          {" "}{catalog.temporal.primary.length} {tr("类标注", "annotation classes")} · {catalog.temporal.training_profile.codes.length} {tr("类默认训练", "default training classes")}
+          {" · "}<small>{catalog.temporal.version}</small></p>
+        {!!catalog.definition_conflicts?.length && <div className="error-banner">{tr("与既有词表存在分类冲突，原标签保持不变：", "Existing taxonomy conflicts; original labels preserved: ")}{catalog.definition_conflicts.join(", ")}</div>}
+        <details className="activity-rule-principles"><summary>{tr("统一切分规则与训练映射", "Segmentation rules and training mapping")}</summary>
+          <ul>{catalog.temporal.principles.map(p => <li key={p}>{p}</li>)}</ul>
+          <p>{tr("前、后、左、右、方向不明跌倒在默认 IMU 训练中合并为 fall；其余保持独立。翻滚仍处于专项试验阶段。", "The five fall labels map to fall for default IMU training; other classes remain distinct. Rolling is experimental.")}</p>
+        </details>
+        <div className="activity-rule-list">{catalog.temporal.primary.map(rule => {
+          const shared = catalog.concepts.find(c => c.code === rule.code)?.scope === "shared";
+          return <details key={rule.code} className="activity-rule-card">
+            <summary><strong>{rule.name_zh}</strong><code>{rule.code}</code><span>{shared ? tr("与真实数据共用", "Shared with real data") : tr("合成扩展", "Synthetic extension")}</span></summary>
+            <p>{rule.definition}</p><dl>
+              <dt>{tr("包括", "Includes")}</dt><dd>{rule.includes}</dd>
+              <dt>{tr("不包括", "Excludes")}</dt><dd>{rule.excludes}</dd>
+              <dt>{tr("区间切分", "Boundaries")}</dt><dd>{rule.boundaries}</dd>
+              <dt>{tr("例子", "Example")}</dt><dd>{rule.example}</dd>
+              <dt>{tr("默认训练类别", "Default training class")}</dt><dd><code>{catalog.temporal!.training_profile.mapping[rule.code]}</code></dd>
+            </dl></details>;
+        })}</div>
+      </>}
+      <p>{tr("其他自定义合成标签；共用标签仍在真实标签区域维护。", "Additional custom synthetic labels; shared labels are maintained in the real-data section.")}</p>
+      <div className="synthetic-concept-list">{catalog?.concepts.filter(item => item.scope === "motion" && item.active && !item.managed_by)
         .map(item => <div key={item.code} className="taxonomy-row">
           <button className="taxonomy-name-tag" disabled={!isAdmin}
             onClick={() => { setEditCode(item.code); setEditName(item.name); setEditActive(item.active); }}

@@ -13,6 +13,8 @@ type Props = {
   cursorTime?: number;
   markers?: PlotMarker[];
   regions?: PlotRegion[];
+  timeRange?: [number, number];
+  onPlotBounds?: (bounds: {left: number; right: number}) => void;
   selectionLabels?: PlotSelectionLabel[];
   controlledCursor?: boolean;
   showMarkerKey?: boolean;
@@ -73,10 +75,10 @@ function alignedData(time: number[], values: number[][], axisCount: number): uPl
   return [time, ...columns];
 }
 
-function fitTimeRange(plot: uPlot, time: number[]) {
+function fitTimeRange(plot: uPlot, time: number[], extent?: [number, number]) {
   if (!time.length) return;
-  const first = time[0];
-  const last = time[time.length - 1];
+  const first = extent?.[0] ?? time[0];
+  const last = extent?.[1] ?? time[time.length - 1];
   if (!Number.isFinite(first) || !Number.isFinite(last)) return;
   const padding = first === last ? Math.max(Math.abs(first) * 0.01, 0.5) : 0;
   plot.setScale("x", { min: first - padding, max: last + padding });
@@ -105,7 +107,7 @@ function formatPlotValue(value: number | undefined) {
   return value.toFixed(3).replace(/\.000$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
 
-export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, seriesLabels = defaultLabels, seriesColors = defaultColors, showReadout = true, cursorColor = "#f8fafc", scrubOnDrag = false, snapSelection = true, splitAfter, leftAxisLabel, rightAxisLabel, onSelectTime, onSelectLabel }: Props) {
+export default function Plot({ time, values, cursorTime, markers = noMarkers, regions = noRegions, timeRange, onPlotBounds, selectionLabels = [], controlledCursor = false, showMarkerKey = true, height = 290, seriesLabels = defaultLabels, seriesColors = defaultColors, showReadout = true, cursorColor = "#f8fafc", scrubOnDrag = false, snapSelection = true, splitAfter, leftAxisLabel, rightAxisLabel, onSelectTime, onSelectLabel }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const onSelectTimeRef = useRef(onSelectTime);
@@ -115,6 +117,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
   const regionsRef = useRef(regions);
   const cursorTimeRef = useRef(cursorTime);
   const colorsRef = useRef(seriesColors);
+  const rangeRef = useRef(timeRange), boundsRef = useRef(onPlotBounds);
 
   timeRef.current = time;
   valuesRef.current = values;
@@ -122,6 +125,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
   regionsRef.current = regions;
   cursorTimeRef.current = cursorTime;
   colorsRef.current = seriesColors;
+  rangeRef.current = timeRange; boundsRef.current = onPlotBounds;
 
   useEffect(() => {
     onSelectTimeRef.current = onSelectTime;
@@ -129,7 +133,11 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
 
   useEffect(() => {
     if (!host.current) return;
-    const width = Math.max(480, host.current.clientWidth);
+    const width = Math.max(240, host.current.clientWidth);
+    const reportBounds = (u: uPlot) => boundsRef.current?.({
+      left: u.bbox.left / uPlot.pxRatio,
+      right: u.width - (u.bbox.left + u.bbox.width) / uPlot.pxRatio,
+    });
     plot.current = new uPlot(
       {
         width,
@@ -138,6 +146,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
         legend: { show: !controlledCursor },
         scales: { x: { time: false } },
         hooks: {
+          ready: [reportBounds], setSize: [reportBounds],
           draw: [
             (u: uPlot) => {
               const currentTime = timeRef.current;
@@ -145,11 +154,13 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
               if (!currentTime.length) return;
               const { ctx, bbox } = u;
               const pixelRatio = uPlot.pxRatio;
+              const rangeStart = rangeRef.current?.[0] ?? currentTime[0];
+              const rangeEnd = rangeRef.current?.[1] ?? currentTime[currentTime.length - 1];
               ctx.save();
               for (const region of regionsRef.current) {
-                if (region.end < currentTime[0] || region.start > currentTime[currentTime.length - 1]) continue;
-                const start = Math.max(region.start, currentTime[0]);
-                const end = Math.min(region.end, currentTime[currentTime.length - 1]);
+                if (region.end < rangeStart || region.start > rangeEnd) continue;
+                const start = Math.max(region.start, rangeStart);
+                const end = Math.min(region.end, rangeEnd);
                 const left = u.valToPos(start, "x", true);
                 const right = u.valToPos(end, "x", true);
                 ctx.fillStyle = region.color;
@@ -158,9 +169,17 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
                   ctx.fillStyle = region.borderColor;
                   ctx.fillRect(left, bbox.top, Math.max(1, right - left), 4 * pixelRatio);
                 }
+                if (region.label) {
+                  ctx.font = `${10 * pixelRatio}px sans-serif`;
+                  if (right - left > ctx.measureText(region.label).width + 10 * pixelRatio) {
+                    ctx.fillStyle = "#b8c8db";
+                    ctx.textAlign = "center";
+                    ctx.fillText(region.label, (left + right) / 2, bbox.top + 15 * pixelRatio);
+                  }
+                }
               }
               for (const marker of markersRef.current) {
-                if (marker.time < currentTime[0] || marker.time > currentTime[currentTime.length - 1]) continue;
+                if (marker.time < rangeStart || marker.time > rangeEnd) continue;
                 const x = Math.round(u.valToPos(marker.time, "x", true));
                 ctx.strokeStyle = marker.color;
                 ctx.lineWidth = 2 * pixelRatio;
@@ -189,7 +208,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
               }
               if (controlledCursor && cursorTimeRef.current !== undefined) {
                 const playhead = cursorTimeRef.current;
-                if (playhead >= currentTime[0] && playhead <= currentTime[currentTime.length - 1]) {
+                if (playhead >= rangeStart && playhead <= rangeEnd) {
                   const x = Math.round(u.valToPos(playhead, "x", true));
                   ctx.setLineDash([]);
                   ctx.strokeStyle = "rgba(2, 6, 23, 0.95)";
@@ -237,7 +256,7 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
       alignedData(timeRef.current, valuesRef.current, seriesLabels.length),
       host.current
     );
-    fitTimeRange(plot.current, timeRef.current);
+    fitTimeRange(plot.current, timeRef.current, rangeRef.current);
     fitValueRange(plot.current, valuesRef.current, 0,
       splitAfter ?? seriesLabels.length, "y");
     if (splitAfter !== undefined) fitValueRange(plot.current, valuesRef.current,
@@ -299,13 +318,13 @@ export default function Plot({ time, values, cursorTime, markers = noMarkers, re
     plot.current.batch(() => {
       plot.current?.setData(alignedData(time, values, seriesLabels.length), true);
       if (plot.current) {
-        fitTimeRange(plot.current, time);
+        fitTimeRange(plot.current, time, rangeRef.current);
         fitValueRange(plot.current, values, 0, splitAfter ?? seriesLabels.length, "y");
         if (splitAfter !== undefined) fitValueRange(plot.current, values,
           splitAfter, seriesLabels.length, "gyro");
       }
     });
-  }, [time, values, seriesLabels.length, splitAfter]);
+  }, [time, values, seriesLabels.length, splitAfter, timeRange?.[0], timeRange?.[1]]);
 
   useEffect(() => {
     if (!plot.current || cursorTime === undefined || !time.length) return;

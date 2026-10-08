@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from imu_data_collector.storage import ObjectConflictError, ObjectStore
+from imu_data_collector.synthetic_temporal_contract import activity_rules
 
 CODE = re.compile(r"^[a-z][a-z0-9_]*$")
 RULE_ORIGINS = {"babel-1.0", "stageii-source-member"}
@@ -55,12 +56,24 @@ class SyntheticLabelRegistry:
              "active": item.active, "scope": "shared"}
             for group in ("fall", "non_fall") for item in getattr(real, group)
         ]
+        rules = activity_rules()
+        existing = {item["code"]: item for item in shared + motion["concepts"]}
+        additions = [
+            {"code": item["code"], "name": item["name_zh"], "is_fall": item["is_fall"],
+             "active": True, "scope": "motion", "managed_by": "primary-activity-rules"}
+            for item in rules["primary"] if item["code"] not in existing
+        ]
+        conflicts = [item["code"] for item in rules["primary"]
+                     if item["code"] in existing
+                     and existing[item["code"]]["is_fall"] != item["is_fall"]]
         return {
             "taxonomy_id": "motion-actions",
-            "version": f"{real.version}.motion-r{motion['revision']}",
+            "version": f"{real.version}.motion-r{motion['revision']}.rules-{rules['version']}",
             "motion_revision": motion["revision"],
-            "concepts": shared + motion["concepts"],
+            "concepts": shared + motion["concepts"] + additions,
             "rules": motion["rules"],
+            "temporal": rules,
+            "definition_conflicts": conflicts,
         }
 
     def concept(self, code: str) -> dict:

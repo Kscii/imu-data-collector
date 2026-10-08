@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { tr } from "./i18n";
 import { SyntheticIMUChart, type IMUReadout, type PlaybackMetadata } from "./SyntheticIMUChart";
 import { TemporalReviewPage } from "./TemporalReviewPage";
+import type {ActivityRules} from "./activityRules";
 
 export type FormalLabel = {
   code: string; name: string; is_fall: boolean;
@@ -18,7 +19,9 @@ export type Candidate = {
 };
 export type Catalog = {
   taxonomy_id: string; version: string; motion_revision: number;
-  concepts: (FormalLabel & {active: boolean; scope: string})[];
+  concepts: (FormalLabel & {active: boolean; scope: string; managed_by?: string})[];
+  temporal?: ActivityRules;
+  definition_conflicts?: string[];
   rules: {rule_id: string; origin: string; source_value: string;
     source_dataset: string | null; target_code: string; state: string}[];
 };

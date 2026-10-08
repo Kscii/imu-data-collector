@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Plot from "./Plot";
+import Plot, {type PlotRegion, type PlotMarker} from "./Plot";
 import { tr } from "./i18n";
 import { extremumIndices } from "./syntheticTraceSampling";
 
@@ -39,11 +39,13 @@ async function loadChart(base: string, signal: AbortSignal): Promise<ChartData> 
   return {manifest, force, gyro, samples: a.shape[0], mounts: a.shape[1]};
 }
 
-export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect, onMetadata, compact = false}: {
+export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect, onMetadata, compact = false, cursorTime, duration, regions, markers, onPlotBounds}: {
   base: string; cursorFrame: number; onSeek: (frame: number) => void;
   onReady: (ready: boolean) => void; onInspect: (value: IMUReadout | null) => void;
   onMetadata?: (value: PlaybackMetadata | null) => void;
   compact?: boolean;
+  cursorTime?: number; duration?: number; regions?: PlotRegion[]; markers?: PlotMarker[];
+  onPlotBounds?: (bounds: {left: number; right: number}) => void;
 }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [error, setError] = useState("");
@@ -142,7 +144,8 @@ export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect
         <span style={{color: "#06b6d4"}}>gz</span>
       </div>}
       <Plot time={traces.time} values={traces.values}
-        cursorTime={cursorSample / data.manifest.sensor_rate_hz} controlledCursor
+        cursorTime={cursorTime ?? cursorFrame * data.manifest.frame_period_s} controlledCursor
+        timeRange={duration ? [0, duration] : undefined} regions={regions} markers={markers} onPlotBounds={onPlotBounds}
         seriesLabels={viewMode === "magnitude" ? ["|a|", "|ω|"]
           : ["ax", "ay", "az", "gx", "gy", "gz"]}
         seriesColors={viewMode === "magnitude" ? ["#38bdf8", "#f472b6"]

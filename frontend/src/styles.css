@@ -673,6 +673,15 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .synthetic-concept-list button { text-align: left; padding: 6px 9px; border: 1px solid #354765; border-radius: 8px; }
 .synthetic-concept-list button.inactive { opacity: .55; }
 .synthetic-concept-list small { display: block; color: #9eb0c8; }
+.activity-rule-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 8px; margin: 12px 0; }
+.activity-rule-card { border: 1px solid #34465f; border-radius: 7px; padding: 10px; min-width: 0; align-self: start; font-size: 12px; }
+.activity-rule-card summary { cursor: pointer; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.activity-rule-card summary span { color: #9eb0c8; font-size: 11px; }
+.activity-rule-card p, .activity-rule-card dd { line-height: 1.6; overflow-wrap: anywhere; }
+.activity-rule-card dl { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; }
+.activity-rule-card dd { margin: 0; }
+.activity-rule-card dt { color: #9eb0c8; }
+.activity-rule-principles { font-size: 12px; line-height: 1.7; }
 .synthetic-label-management, .synthetic-preview { display: grid; gap: 12px; }
 .synthetic-scope-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0; color: #9eb0c8; font-size: 12px; }
 .synthetic-scope-links a { padding: 6px 9px; border: 1px solid #354765; border-radius: 7px; color: #bfdbfe; text-decoration: none; }

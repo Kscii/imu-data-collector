@@ -3,6 +3,8 @@ import {LegacyTemporalReviewPage} from "./LegacyTemporalReviewPage";
 import {SyntheticIMUChart} from "./SyntheticIMUChart";
 import "./temporalReview.css";
 import {anchoredNotes, coalesce, joined, pending, type SemanticFields} from "./semanticEditing";
+import {intervalDecorations, partAt, partProgress, sourceFrame} from "./annotationPlayback";
+import type {ActivityRules} from "./activityRules";
 const root = "/api/v1/synthetic/temporal/runs";
 type Segment = SemanticFields & {segment_id: string; start_ns: number; stop_ns: number; primary_code: string | null;
   auxiliary_code: null; auxiliary_status: string; resolution: string; reason: string | null; fall_event_id: string | null};
@@ -25,14 +27,13 @@ type Metric = {variant: string; partition: string; macro_f1: number | null; iden
 type Report = {report: {reference_count: number; reference_completed?: number; reference_excluded?: number; development_count?: number; metrics: Metric[]}};
 type Snapshot = {snapshot_id: string; state: string; candidate_count: number; result: {shards: {object_key: string}[]} | null};
 const names: Record<string, string> = {standing: "站立", walking: "行走", running: "跑步", sitting: "坐姿",
-  lying: "躺姿", squatting: "蹲姿", sit_down: "坐下", stand_up: "起立", lie_down: "躺下", get_up: "起身",
+  lying: "卧姿", squatting: "蹲姿", sit_down: "坐下", stand_up: "起立（坐姿到站立）", lie_down: "躺下", get_up: "起身（其他低位姿态到站立）",
   squatting_down: "蹲下", stair_up: "上楼", stair_down: "下楼", bend_or_pick_up: "弯腰／拾物",
-  stumble_recovery: "失衡后恢复", jumping: "跳跃", turning: "转身／转向", crawling: "爬行", kneeling: "跪姿",
+  stumble_recovery: "失衡恢复", jumping: "跳跃", turning: "原地转向", crawling: "爬行", kneeling: "跪姿",
   forward_fall: "向前跌倒", backward_fall: "向后跌倒", left_lateral_fall: "向左跌倒", right_lateral_fall: "向右跌倒",
   fall_unspecified: "跌倒，方向不明", unrecognized: "无法识别", uncovered: "词表未覆盖", uncertain_boundary: "边界无法确定",
   reference_needed: "待独立标注", accepted: "已通过", rejected: "质量不合格", pending_review: "待检查",
   inference_pending: "待模型处理", queued: "排队中", complete: "已完成", failed: "失败", pending: "待讨论", confirmed: "已确认", excluded: "明确排除"};
-const label = (code: string | null) => code ? names[code] ?? code : "无法识别";
 const secs = (ns: number) => (ns / 1e9).toFixed(2);
 const percent = (n: number | null | undefined) => n == null ? "—" : `${(100 * n).toFixed(1)}%`;
 async function api<T>(path: string, body?: unknown): Promise<T> {
@@ -62,6 +63,10 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
   const [editorKey, setEditorKey] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [ack, setAck] = useState(false), [note, setNote] = useState(""), [cursorFrame, setCursorFrame] = useState(0);
+  const [playing, setPlaying] = useState(false), [rules, setRules] = useState<ActivityRules | null>(null);
+  const [plotBounds, setPlotBounds] = useState({left: 50, right: 50});
+  const loadedCase = useRef(""), followPlayback = useRef(true), selectedTime = useRef(0);
+  const segmentList = useRef<HTMLDivElement>(null);
   const [training, setTraining] = useState<Training | null>(null), [models, setModels] = useState<Model[]>([]);
   const [report, setReport] = useState<Report | null>(null), [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const frame = useRef<HTMLIFrameElement>(null), chartReady = useRef(false), began = useRef(Date.now());
@@ -74,6 +79,13 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
   const dirty = editor && JSON.stringify(editor) !== JSON.stringify(original);
   const segment = editor?.segments[part], sourceRate = current?.entry.clock.source_rate_hz ?? 25;
   const cursorNs = Math.round(cursorFrame / sourceRate * 1e9), duration = editor?.clock.duration_ns ?? 0;
+  const activePart = partAt(editor?.segments ?? [], Math.min(cursorNs, duration));
+  const activeSegment = editor?.segments[activePart];
+  const progress = activeSegment ? partProgress(activeSegment, cursorNs) : null;
+  const decorations = intervalDecorations(editor?.segments ?? [], activePart);
+  const label = (code: string | null) => rules?.primary.find(p => p.code === code)?.name_zh ?? (code ? names[code] ?? code : "无法识别");
+  const definition = rules?.primary.find(p => p.code === segment?.primary_code);
+  selectedTime.current = segment?.start_ns ?? 0;
   const excluded = editor?.segments.some(s => s.resolution !== "identified");
   const hasPending = editor?.segments.some(s => s.review_state === "pending");
   const legacyNotes = historicalNotes(editor);
@@ -81,7 +93,13 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
   const developmentTotal = cases.filter(c => c.entry.reference_role === "development").length;
   const validationTotal = cases.filter(c => c.entry.reference_role === "validation").length;
   const control = (action: string, fields = {}) => frame.current?.contentWindow?.postMessage({type: "imu-synthetic-review-control", action, ...fields}, location.origin);
-  const seek = (ns: number) => control("seek", {frame: Math.round(ns / 1e9 * sourceRate)});
+  const pauseEditing = () => {followPlayback.current = false; setPlaying(false); control("pause");};
+  const seek = (ns: number, intervalStart = false) => {
+    setPlaying(false); control("seek", {frame: sourceFrame(ns, sourceRate, intervalStart)});
+  };
+  const selectPart = (index: number) => {pauseEditing(); setPart(index); seek(editor!.segments[index].start_ns, true);};
+  const scrub = (ns: number) => {followPlayback.current = true; seek(ns);};
+  const togglePlayback = () => {followPlayback.current = true; control("toggle");};
   const refresh = async () => {const data = await api<{cases: Case[]}>(`${path}?limit=100`); setCases(data.cases);};
   const refreshDetails = async () => {
     const [t, m, r, s] = await Promise.all([api<Training>(`${path}/training`), api<{models: Model[]}>(`${path}/models`),
@@ -89,6 +107,8 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
     setTraining(t); setModels(m.models); setReport(r); setSnapshots(s.snapshots);
   };
   useEffect(() => {void refresh().catch(e => setError(String(e)));}, [path]);
+  useEffect(() => {void api<{temporal?: ActivityRules}>("/api/v1/synthetic/labels")
+    .then(c => setRules(c.temporal ?? null)).catch(() => {});}, []);
   useEffect(() => {
     if (!details) return;
     const update = () => void refreshDetails().catch(e => setError(String(e)));
@@ -97,8 +117,24 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
   useEffect(() => {
     let draft = original ? structuredClone(original) : null;
     try {const saved = localStorage.getItem(draftKey); if (saved) draft = JSON.parse(saved) as Annotation;} catch { /* Use server copy. */ }
-    setEditor(draft); setEditorKey(draftKey); setPart(0); setAck(false); setNote(""); setCursorFrame(0); began.current = Date.now(); chartReady.current = false;
+    const changedCase = loadedCase.current !== casePath;
+    const retained = partAt(draft?.segments ?? [], selectedTime.current);
+    setEditor(draft); setEditorKey(draftKey); setPart(changedCase ? 0 : Math.max(0, retained)); setAck(false); setNote("");
+    if (changedCase) {
+      setCursorFrame(0); setPlaying(false); setNotice(""); setError("");
+      followPlayback.current = true; chartReady.current = false; loadedCase.current = casePath;
+      began.current = Date.now();
+    }
   }, [draftKey, current?.status]);
+  useEffect(() => {
+    if (followPlayback.current && activePart >= 0) setPart(activePart);
+    if (!playing || !followPlayback.current) return;
+    const list = segmentList.current, item = list?.children[activePart] as HTMLElement | undefined;
+    if (!list || !item) return;
+    const area = list.getBoundingClientRect(), bounds = item.getBoundingClientRect();
+    if (bounds.top < area.top) list.scrollTop -= area.top - bounds.top;
+    else if (bounds.bottom > area.bottom) list.scrollTop += bounds.bottom - area.bottom;
+  }, [activePart, playing]);
   useEffect(() => {
     if (!editor || editorKey !== draftKey || editor.candidate.candidate_id !== id?.candidate_id) return;
     try {localStorage.setItem(draftKey, JSON.stringify(editor));} catch {setError("无法暂存本地草稿，请保持页面并保存。");}
@@ -107,12 +143,13 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
     const listener = (e: MessageEvent) => {
       if (e.origin !== location.origin || e.source !== frame.current?.contentWindow) return;
       if (["imu-synthetic-review-frame", "imu-synthetic-review-ready"].includes(e.data?.type) && Number.isInteger(e.data.frame)) setCursorFrame(e.data.frame);
+      if (typeof e.data?.playing === "boolean") setPlaying(e.data.playing);
       if (e.data?.type === "imu-synthetic-review-ready") control("chart-ready", {ready: chartReady.current});
-      if (e.data?.type === "imu-synthetic-review-key" && e.data.key === " ") control("toggle");
+      if (e.data?.type === "imu-synthetic-review-key" && e.data.key === " ") togglePlayback();
     };
     const keyboard = (e: KeyboardEvent) => {
       if (e.code === "Space" && !(e.target instanceof HTMLElement && e.target.closest("input,select,textarea,button")) && !details && !queue) {
-        e.preventDefault(); control("toggle");}
+        e.preventDefault(); togglePlayback();}
     };
     addEventListener("message", listener); addEventListener("keydown", keyboard);
     return () => {removeEventListener("message", listener); removeEventListener("keydown", keyboard);};
@@ -162,7 +199,9 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
     const segments = semantic ? coalesce(editor.segments) : editor.segments;
     const events = new Map<string, Segment[]>();
     for (const s of segments) if (s.fall_event_id) events.set(s.fall_event_id, [...(events.get(s.fall_event_id) ?? []), s]);
-    return {...editor, segments, fall_events: [...events].map(([event_id, parts]) => {
+    const evidence = Array.isArray(editor.source_evidence) ? editor.source_evidence : [];
+    return {...editor, ...(rules ? {source_evidence: [...evidence.filter(e => e?.kind !== "activity-rules" || e.version !== rules.version),
+      {kind: "activity-rules", version: rules.version, rules}]} : {}), segments, fall_events: [...events].map(([event_id, parts]) => {
       const event = editor.fall_events.find(e => e.event_id === event_id);
       if (!event) throw new Error("请填写跌倒撞击时刻。");
       return {...event, code: parts[0].primary_code!, start_ns: parts[0].start_ns, stop_ns: parts[parts.length - 1].stop_ns};
@@ -193,12 +232,12 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
     localStorage.removeItem(draftKey);
   }, independent ? "独立参考已冻结，可以查看模型建议。" : decision === "pass" ? "人工审核已保存。" : "处理结果已保存。");
   const fall = segment?.fall_event_id ? editor?.fall_events.find(f => f.event_id === segment.fall_event_id) : null;
-  return <main className="primary-workbench" data-no-localize>
+  return <main className="primary-workbench" data-no-localize data-playing={playing}>
     <header className="primary-toolbar panel"><button onClick={() => setQueue(true)}>片段队列 · {selected + 1}/{cases.length || run.count}</button>
       <strong>主活动标注</strong><span className="primary-task" title={current?.entry.source_member}>{current?.entry.source_dataset} · {current?.entry.source_member}</span>
       <button disabled={busy || selected === 0} onClick={() => setSelected(s => s - 1)}>上一段</button>
       <button disabled={busy || selected >= cases.length - 1} onClick={() => setSelected(s => s + 1)}>下一段</button><button onClick={() => setDetails(true)}>报告与模型</button></header>
-    {(error || notice) && <div className={`primary-notice ${error ? "primary-error" : ""}`} role={error ? "alert" : "status"}><span>{error || notice}</span>
+    {error && <div className="primary-notice primary-error" role="alert"><span>{error}</span>
       {semantic && error && <button onClick={() => {
         const blob = new Blob([JSON.stringify(editor, null, 2)], {type: "application/json"});
         const url = URL.createObjectURL(blob), link = document.createElement("a");
@@ -208,19 +247,33 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
     {current && <div className="primary-body"><section className="primary-viewer panel">
       <iframe key={base} ref={frame} src={`${base}/files/index.html?bridge=2`} title="动捕与IMU回放" onLoad={() => control("chart-ready", {ready: chartReady.current})} />
       <SyntheticIMUChart compact base={base} cursorFrame={cursorFrame} onInspect={() => {}}
-        onReady={ready => {chartReady.current = ready; control("chart-ready", {ready});}} onSeek={index => control("seek", {frame: index})} />
-      <div className="primary-timeline" aria-label="活动时间轴">{editor?.segments.map((s, i) => <button key={s.segment_id}
-        title={`${label(s.primary_code ?? s.resolution)} ${secs(s.start_ns)}–${secs(s.stop_ns)} 秒`} style={{flexGrow: s.stop_ns - s.start_ns}}
-        className={`${s.primary_code && (!semantic || s.review_state === "confirmed") ? "identified" : "unknown"} ${i === part ? "selected" : ""}`} onClick={() => {setPart(i); seek(s.start_ns);}}>{label(s.primary_code ?? s.resolution)}</button>)}</div>
-      <div className="primary-playback"><button onClick={() => control("toggle")}>播放／暂停</button><button onClick={() => control("replay")}>重播</button>
+        cursorTime={cursorNs / 1e9} duration={duration / 1e9} {...decorations}
+        onPlotBounds={b => setPlotBounds(old => old.left === b.left && old.right === b.right ? old : b)}
+        onReady={ready => {chartReady.current = ready; control("chart-ready", {ready});}} onSeek={index => scrub(index / sourceRate * 1e9)} />
+      <div className="primary-time-context" aria-label="当前区间位置">{activeSegment && progress ? <>
+        <strong>第 {activePart + 1} 段 · {label(activeSegment.primary_code ?? activeSegment.resolution)}</strong>
+        <span>{secs(activeSegment.start_ns)}–{secs(activeSegment.stop_ns)} 秒</span>
+        <span>段内 {secs(progress.elapsed)} / {secs(progress.duration)} 秒（{Math.round(progress.fraction * 100)}%）</span>
+      </> : "暂无区间"}</div>
+      <div className="primary-timeline" aria-label="活动时间轴" style={{marginLeft: plotBounds.left + 7, marginRight: plotBounds.right + 7}}>{editor?.segments.map((s, i) => <button key={s.segment_id}
+        title={`第 ${i + 1} 段 · ${label(s.primary_code ?? s.resolution)} · ${label(s.review_state ?? "pending")} · ${secs(s.start_ns)}–${secs(s.stop_ns)} 秒`}
+        aria-label={`第 ${i + 1} 段 ${label(s.primary_code ?? s.resolution)}`} aria-current={i === activePart ? "step" : undefined}
+        style={{width: `${100 * (s.stop_ns - s.start_ns) / duration}%`}}
+        className={`${i % 2 ? "alternate" : ""} ${s.review_state === "pending" ? "unknown" : ""} ${i === activePart ? "playing" : ""} ${i === part ? "selected" : ""}`}
+        onClick={() => selectPart(i)}>{i + 1} · {label(s.primary_code ?? s.resolution)}</button>)}</div>
+      <div className="primary-playback"><button onClick={togglePlayback}>{playing ? "暂停" : "播放"}</button><button onClick={() => {followPlayback.current = true; control("replay");}}>重播</button>
         <input type="range" aria-label="播放位置" min={0} max={duration / 1e9} step={1 / sourceRate} value={Math.min(cursorNs, duration) / 1e9}
-          onChange={e => seek(Number(e.target.value) * 1e9)} /><span>{secs(cursorNs)} / {secs(duration)} 秒</span></div></section>
+          onChange={e => scrub(Number(e.target.value) * 1e9)} /><span>{secs(cursorNs)} / {secs(duration)} 秒</span></div></section>
       <aside className="primary-editor panel"><header><strong>{independent ? "独立参考标注" : "检查与纠正"}</strong><span>{label(current.status)}</span>
         <small>{independent ? "先看回放并标注；保存后显示模型结果。" : semantic ? "先写语义，再确认类别和边界；待讨论区间暂不训练。" : "核对动作和时间边界，必要时直接修改。"}</small></header>
-        <div className="primary-editor-scroll"><div className="primary-segments" aria-label="活动区间">{editor?.segments.map((s, i) => <button key={s.segment_id}
-          className={part === i ? "selected" : ""} onClick={() => {setPart(i); seek(s.start_ns);}}><span>{i + 1}. {label(s.primary_code ?? s.resolution)}{semantic ? ` · ${label(s.review_state ?? "pending")}` : ""}</span>
+        <div className="primary-editor-scroll"><div ref={segmentList} className="primary-segments" aria-label="活动区间">{editor?.segments.map((s, i) => <button key={s.segment_id}
+          aria-current={i === activePart ? "step" : undefined} className={`${part === i ? "selected" : ""} ${activePart === i ? "playing" : ""}`} onClick={() => selectPart(i)}><span>{i + 1}. {label(s.primary_code ?? s.resolution)}{semantic ? ` · ${label(s.review_state ?? "pending")}` : ""}</span>
           <small>{secs(s.start_ns)}–{secs(s.stop_ns)} s</small></button>)}</div>
-          {segment && <div className="primary-fields">{semantic && <label>区间语义<textarea aria-label="区间语义" rows={2} value={segment.semantic_text ?? ""} onChange={e => change({semantic_text: e.target.value})} placeholder="用自己的话描述当前区间，可以不在标签列表中" /></label>}
+          {segment && <div className="primary-fields" onFocusCapture={e => {if ((e.target as HTMLElement).matches("input,textarea,select")) pauseEditing();}}>
+            {definition && <details className="primary-definition"><summary>标签定义 · {definition.name_zh}</summary>
+              <p>{definition.definition}</p><p>包括：{definition.includes}</p><p>不包括：{definition.excludes}</p>
+              <p>切分：{definition.boundaries}</p><p>{definition.example}</p><small>规则 {rules?.version}</small></details>}
+            {semantic && <label>区间语义<textarea aria-label="区间语义" rows={2} value={segment.semantic_text ?? ""} onChange={e => change({semantic_text: e.target.value})} placeholder="用自己的话描述当前区间，可以不在标签列表中" /></label>}
             <div className={semantic ? "primary-boundaries" : ""}><label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e => changePrimary(e.target.value)}>
             {editor?.taxonomy.primary.map(t => <option key={t.code} value={t.code}>{label(t.code)}</option>)}
             {["unrecognized", "uncovered", "uncertain_boundary"].map(c => <option key={c} value={c}>{label(c)}</option>)}</select></label>{semantic && <label>确认状态<select aria-label="确认状态" value={segment.review_state} onChange={e => stateChange(e.target.value)}>
@@ -245,7 +298,7 @@ function PrimaryReviewPage({run, runs}: {run: Run; runs: Run[]}) {
               <button onClick={() => change({notes: [...(segment.notes ?? []), {note_id: `note-${crypto.randomUUID()}`, start_ns: segment.start_ns, stop_ns: segment.stop_ns, text: ""}]})}>添加区间备注</button>
               {!!legacyNotes.length && <details><summary>旧录制备注（{legacyNotes.length}）</summary><small>旧版备注针对整个录制，保留原文供核对。</small>{legacyNotes.map((text, i) => <p key={i}>{text}</p>)}</details>}
             </> : <label>备注（可选）<textarea rows={2} value={note} onChange={e => setNote(e.target.value)} placeholder="动作含义或回放质量问题" /></label>}</div>}
-        </div><footer className="primary-actions">{semantic ? <>
+        </div><footer className="primary-actions"><div className="primary-save-status" role="status">{notice || (dirty ? "有未保存修改" : "提交后保持当前录制，手动进入下一段")}</div>{semantic ? <>
           <div><button disabled={busy || !editor} onClick={() => void act(saveDraft, "区间草稿已保存，尚未提交人工通过。")}>保存区间草稿</button>
           <button className="primary-save" disabled={busy || !editor || !ack || (independent ? !!hasPending : !confirmedCount)} onClick={() => save()}>
             {independent ? "冻结独立参考" : "提交已确认区间"}</button></div>

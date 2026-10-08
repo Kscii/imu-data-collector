@@ -126,3 +126,15 @@ ssh -N -L 127.0.0.1:8768:127.0.0.1:8768 -o ExitOnForwardFailure=yes ubuntu
 
 云端试验上传被自动审批以「外部目的地导出尚未获得明确授权」拒绝，目前仅有离线副本。
 待用户批准后，才可将本次试验草稿和报告写到指定 GCS dev 前缀及任务索引。
+
+## Unified activity rules and playback review (2026-10-09)
+
+The [generated handbook](activity-taxonomy.zh-CN.md) defines 24 primary annotation classes and the opt-in `imu-primary-20-v1` IMU training projection. Five directional fall labels map to `fall`; real-only `syncope_fall` requires an explicit real source. HDF5 3.3 and prior accepted revisions remain unchanged.
+
+Run `python tools/sync_activity_rules.py --collector ../imu-data-collector-temporal-labels --benchmark ../imu-fall-benchmark-temporal-labels --check` from the simulator checkout to verify all portable copies and handbooks. Operational rule version is independent of the unchanged wire taxonomy. New training manifests bind the rules and `weak_targets_version`; training recomputes labels from immutable cached geometry, so old conflicting source targets cannot leak into the next model.
+
+The curve, proportional interval strip and list share source time. The current interval shows elapsed/total time and percentage. Selecting an interval pauses and seeks to its first source frame on or after the boundary. Focusing an editor field pauses playback and pins selection. Save/submit preserve position and selection; next recording remains manual.
+
+Ubuntu evidence lives in `studies/primary-semantic-pilot-20261008/`: `semantic-rules-plan.json`, `rules-audit-dry-run.json`, and `rules-audit-applied.json`. Nine accepted originals were checked; cases 1–3 retain exact draft hashes, and cases 4–9 have new agent-authored pending proposals. No human pass was written. The old whole-recording comments and anchored interval notes remain available.
+
+The isolated `studies/rolling-preflight-20261009/` stores inventory SHA, excluded validation groups, exact source inputs, FK arrays, pose sequences and `agent-screening.json`. All 15,569 inventory clips were searched: 49 keyword hits, one held-out hit, 22 plausible candidates after limb-word filtering, plus 40 negative candidates. Agent screening found 11 plausible ground-roll events in 5 source groups, including one previously discussed event. Four cartwheels and six upright/kneeling clips were false keyword positives; two clips remain ambiguous. These are proxy observations, not human truth. The ≥20-event gate fails, so rolling remains pending/masked and neither event accuracy nor formal grouped IMU separability is claimed. No extra user audit or new training was triggered.
