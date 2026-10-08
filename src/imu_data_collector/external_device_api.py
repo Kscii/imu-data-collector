@@ -11,6 +11,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from imu_data_collector import external_device_insights as insights
 from imu_data_collector.auth import Actor
 from imu_data_collector.config import Settings
 from imu_data_collector.external_device_domain import PREFIX, now, timestamp, utc
@@ -170,8 +171,11 @@ def register_external_devices(
             GROUP BY message_type""",
             (identifier, start, end),
         )
+        additions_ready = insights.preparation(service.catalog, identifier)["ready"]
         return {
-            "records": [service.public_record(row) for row in rows],
+            "records": [
+                service.public_record(row, additions_ready=additions_ready) for row in rows
+            ],
             "next_cursor": next_cursor,
             "types": counts,
             "total": sum(row["count"] for row in counts),
@@ -223,6 +227,78 @@ def register_external_devices(
     def metrics(identifier: str):
         device(identifier)
         return service.metric_metadata(identifier)
+
+    @router.get("/devices/{identifier}/fields")
+    def fields(identifier: str):
+        device(identifier)
+        return insights.fields(service.catalog, identifier)
+
+    def insight_page(identifier, category, start, end, limit, cursor, valid=None):
+        device(identifier)
+        start, end = interval(start, end)
+        before = None
+        if cursor:
+            try:
+                before = json.loads(base64.urlsafe_b64decode(cursor))
+                if (
+                    not isinstance(before, list)
+                    or len(before) != 2
+                    or not isinstance(before[1], str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", before[1])
+                ):
+                    raise ValueError
+                before[0] = utc(timestamp(before[0]))
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                raise HTTPException(422, "无效分页游标") from None
+        result = insights.entries(
+            service.catalog, identifier, category, start, end, limit, before, valid
+        )
+        next_page = result.pop("next")
+        result["next_cursor"] = (
+            base64.urlsafe_b64encode(json.dumps(next_page).encode()).decode() if next_page else None
+        )
+        return result
+
+    @router.get("/devices/{identifier}/reports")
+    def reports(
+        identifier: str,
+        start: str = "1000-01-01T00:00:00.000Z",
+        end: str = "9998-01-01T00:00:00.000Z",
+        limit: int = Query(30, ge=1, le=100),
+        cursor: str | None = None,
+        valid: bool | None = None,
+    ):
+        return insight_page(identifier, "reports", start, end, limit, cursor, valid)
+
+    @router.get("/devices/{identifier}/reports/{rid}")
+    def report(identifier: str, rid: str):
+        device(identifier)
+        if not insights.preparation(service.catalog, identifier)["ready"]:
+            raise HTTPException(503, "正在准备报告索引")
+        rows = service.catalog.rows(
+            "SELECT * FROM insight_reports WHERE device_id=? AND id=?", (identifier, rid)
+        )
+        if not rows:
+            raise HTTPException(404, "找不到该睡眠报告")
+        return {**rows[0], "summary": json.loads(rows[0]["summary"])}
+
+    @router.get("/devices/{identifier}/events")
+    def events(
+        identifier: str, start: str, end: str, point_budget: int = Query(800, ge=100, le=2000)
+    ):
+        device(identifier)
+        start, end = interval(start, end)
+        return insights.events(service.catalog, identifier, start, end, point_budget)
+
+    @router.get("/devices/{identifier}/events/records")
+    def event_records(
+        identifier: str,
+        start: str,
+        end: str,
+        limit: int = Query(100, ge=1, le=500),
+        cursor: str | None = None,
+    ):
+        return insight_page(identifier, "events", start, end, limit, cursor)
 
     def enqueue(mode, expected_start=None):
         try:

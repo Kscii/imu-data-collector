@@ -84,3 +84,18 @@ export function durationLabel(ms: number): string {
   if (ms >= 60000) return `${ms / 60000} 分钟`;
   return `${ms / 1000} 秒`;
 }
+
+export const quickMetricKeys: Record<string, string[]> = {
+  mattress: ["HeartRate", "RespiratoryRate", "in_bed", "sleep_stage"],
+  "radar-watch": ["HR", "SPO", "ST", "energy_kcal"],
+};
+export const metricPreferenceKey = (kind: string) => `imu-external-metric-v1-${kind}`;
+export function chooseExternalMetric(kind: string, available: string[], explicit: string, remembered: string): string {
+  const aliases: Record<string, string> = {HR: "HeartRate", HeartRate: "HR", BRR: "RespiratoryRate", RespiratoryRate: "BRR"};
+  return [explicit, remembered, aliases[explicit], ...(quickMetricKeys[kind] ?? []), ...available]
+    .find(key => key && available.includes(key)) ?? "";
+}
+export function latestMetricRange(last: string): TimeRange {
+  const end = Date.parse(last) + 1;
+  return {start: new Date(end - 86400_000).toISOString(), end: new Date(end).toISOString()};
+}

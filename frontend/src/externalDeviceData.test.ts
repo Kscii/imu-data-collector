@@ -43,3 +43,20 @@ test("bad ranges fall back safely and all history starts at the earliest record"
   const range = resolveExternalRange(readExternalView("?range=all"), Date.parse("2026-10-08T12:00:00Z"), "2026-01-01T01:02:03.004Z");
   assert.equal(range.start, "2026-01-01T01:02:03.004Z");
 });
+
+import { chooseExternalMetric, latestMetricRange, metricPreferenceKey } from "./externalDeviceData.ts";
+test("explicit URL metric wins; device type remembers selection; unavailable values fall back", () => {
+  const available = ["HR", "ST", "KCAL", "energy_kcal"];
+  assert.equal(chooseExternalMetric("radar-watch", available, "KCAL", "ST"), "KCAL");
+  assert.equal(chooseExternalMetric("radar-watch", available, "", "ST"), "ST");
+  assert.equal(chooseExternalMetric("radar-watch", available, "", "missing"), "HR");
+  assert.equal(chooseExternalMetric("mattress", ["HeartRate", "sleep_stage"], "", "sleep_stage"), "sleep_stage");
+  assert.notEqual(metricPreferenceKey("mattress"), metricPreferenceKey("radar-watch"));
+  assert.equal(chooseExternalMetric("mattress", [], "", ""), "");
+});
+test("jump to latest covers 24 hours and includes the final sample in a half-open range", () => {
+  const last = "2026-10-01T10:55:00.000Z";
+  const range = latestMetricRange(last);
+  assert.equal(Date.parse(range.end), Date.parse(last) + 1);
+  assert.equal(Date.parse(range.end) - Date.parse(range.start), 86400_000);
+});

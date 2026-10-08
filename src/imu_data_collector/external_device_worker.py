@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import timedelta
 
 from imu_data_collector.external_device_domain import DEVICE_TYPES, PREFIX, now, timestamp, utc
+from imu_data_collector.external_device_insights import backfill_step
 from imu_data_collector.external_device_runtime import ExternalDeviceRuntime
 from imu_data_collector.external_device_service import (
     CredentialsError,
@@ -296,9 +298,11 @@ class ExternalDeviceWorker:
         with exclusive_file_lock(lock), self.heartbeat(), ThreadPoolExecutor(max_workers=1) as pool:
             self.initialize()
             export = None
+            projection_cache = OrderedDict()
             while not stop.is_set():
                 try:
                     worked = self.step()
+                    worked = backfill_step(self.runtime.current, cache=projection_cache) or worked
                     if export is None or export.done():
                         jobs = [
                             (source, job)

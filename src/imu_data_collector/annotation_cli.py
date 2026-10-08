@@ -184,10 +184,16 @@ def main() -> None:
         )
         external = ExternalDeviceRuntime(settings, store)
         if args.command == "external-rebuild-index":
+            from collections import OrderedDict
+
+            from imu_data_collector.external_device_insights import backfill_step
             from imu_data_collector.file_lock import exclusive_file_lock
 
             with exclusive_file_lock(external.control.path.with_suffix(".worker.lock")):
                 external.recover()
+                cache = OrderedDict()
+                while backfill_step(external.current, cache=cache):
+                    pass
                 print(json.dumps({"generation": external.generation, "state": "recovered"}))
         else:
             import signal

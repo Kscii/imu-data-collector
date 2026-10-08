@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
+from imu_data_collector import external_device_insights as insights
 from imu_data_collector.external_device_aggregation import LEVELS, millis, refresh_minutes
 from imu_data_collector.external_device_domain import (
     device_id,
@@ -98,6 +99,7 @@ class ExternalDeviceCatalog:
                     object_key TEXT, sha256 TEXT, size_bytes INTEGER, error TEXT
                 );
             """)
+            db.executescript(insights.SCHEMA)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(exports)")}
             if "scope_json" not in columns:
                 db.execute("ALTER TABLE exports ADD COLUMN scope_json TEXT")
@@ -297,6 +299,7 @@ class ExternalDeviceCatalog:
             )
             db.execute("INSERT OR IGNORE INTO device_stats(device_id) VALUES (?)", (identifier,))
             added, synthetic_delta = 0, 0
+            insights.ensure_device(db, identifier)
             dirty_minutes = set()
             for index, record in enumerate(records):
                 message = record["messageType" if device["kind"] == "mattress" else "operation"]
@@ -338,11 +341,12 @@ class ExternalDeviceCatalog:
                     ),
                 )
                 if changed.rowcount:
+                    projection_changed = insights.index_record(db, device, rid, sha, record)
                     added += int(previous is None)
                     synthetic_delta += int(is_synthetic(record)) - (
                         previous["synthetic"] if previous else 0
                     )
-                    if previous is None or previous["hash"] != sha:
+                    if projection_changed or previous is None or previous["hash"] != sha:
                         dirty_minutes.add(millis(record["receivedAt"]) // LEVELS[0] * LEVELS[0])
                         if previous:
                             dirty_minutes.add(

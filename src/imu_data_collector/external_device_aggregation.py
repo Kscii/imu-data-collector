@@ -10,7 +10,7 @@ from itertools import groupby
 from imu_data_collector.external_device_domain import timestamp, utc
 
 LEVELS = (60_000, 3_600_000, 86_400_000)
-STATE_FIELDS = {"in_bed", "sleep_stage", "moving", "People_flag", "D"}
+STATE_FIELDS = {"in_bed", "sleep_stage", "moving", "People_flag", "D", "CO"}
 
 
 def millis(value: str) -> int:
@@ -26,7 +26,7 @@ def method(key: str) -> str:
         "mode"
         if key in STATE_FIELDS
         else "last"
-        if key == "ST"
+        if key in {"ST", "distance_km", "STTIME", "energy_kcal"}
         else "sum"
         if key == "CST"
         else "mean"
@@ -144,14 +144,15 @@ def refresh_parents(db, device: str, minutes: set[int]) -> None:
     )
 
 
-def refresh_minutes(db, device: str, minutes: set[int]) -> None:
+def refresh_minutes(db, device: str, minutes: set[int], *, parents: bool = True) -> None:
     if not minutes:
         return
     for bucket in sorted(minutes):
         write_bucket(
             db, device, LEVELS[0], bucket, raw_statistics(db, device, bucket, bucket + LEVELS[0])
         )
-    refresh_parents(db, device, minutes)
+    if parents:
+        refresh_parents(db, device, minutes)
 
 
 def rebuild(catalog) -> None:
