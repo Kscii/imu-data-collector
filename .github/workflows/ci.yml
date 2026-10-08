@@ -199,6 +199,7 @@ jobs:
             configs/systemd/imu-annotation-gc.timer \
             configs/systemd/imu-upload-broker.service \
             configs/systemd/imu-external-devices.service \
+            configs/systemd/imu-motion-labels.service \
             scripts/deploy/imu-annotation-rollback \
             frontend/dist-annotation src
           install -m 0755 scripts/deploy/imu-annotation-deploy "${deployer}"
