@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -163,6 +164,39 @@ class AuthSettings:
 
 
 @dataclass(slots=True)
+class ExternalDeviceSettings:
+    """External history is opt-in; credentials exist only in the worker environment."""
+
+    enabled: bool = False
+    access: Literal["admins", "members"] = "members"
+    sync_interval_s: int = 900
+    window_s: int = 86400
+    overlap_s: int = 0  # Legacy config accepted; task synchronization is append-only.
+    history_start: str = "2026-08-31T16:00:00.000Z"
+    request_timeout_s: int = 75
+    max_response_bytes: int = 16 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if self.access not in {"admins", "members"}:
+            raise ValueError("external_devices.access must be admins or members")
+        if not 60 <= self.sync_interval_s <= 86400 or not 60 <= self.window_s <= 86400:
+            raise ValueError("Invalid external device synchronization interval")
+        if self.overlap_s < 0 or self.request_timeout_s < 1 or self.max_response_bytes < 1024:
+            raise ValueError("Invalid external device request limits")
+        try:
+            origin = datetime.fromisoformat(self.history_start.replace("Z", "+00:00"))
+            if origin.tzinfo is None:
+                raise ValueError
+            self.history_start = (
+                origin.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            )
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError(
+                "External history_start must include a valid date and timezone"
+            ) from None
+
+
+@dataclass(slots=True)
 class AnnotationSettings:
     server_host: str = "127.0.0.1"
     server_port: int = 8766
@@ -232,6 +266,7 @@ class Settings:
     storage: StorageSettings = field(default_factory=StorageSettings)
     auth: AuthSettings = field(default_factory=AuthSettings)
     annotation: AnnotationSettings = field(default_factory=AnnotationSettings)
+    external_devices: ExternalDeviceSettings = field(default_factory=ExternalDeviceSettings)
     identity: IdentitySettings = field(default_factory=IdentitySettings)
     device_registry_bootstrap_path: Path | None = field(default=None, init=False)
     device_registry_source: str = field(default="bundled", init=False)
@@ -381,6 +416,7 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
     if "catalog_path" in annotation_values:
         annotation_values["catalog_path"] = Path(annotation_values["catalog_path"])
     annotation = AnnotationSettings(**annotation_values)
+    external_devices = ExternalDeviceSettings(**values.pop("external_devices", {}))
     identity_values = values.pop("identity", {})
     for tuple_key in ("allowed_unikeys", "admins"):
         if tuple_key in identity_values:
@@ -432,6 +468,7 @@ def _construct_settings(payload: dict[str, Any]) -> Settings:
         storage=storage,
         auth=auth,
         annotation=annotation,
+        external_devices=external_devices,
         identity=identity,
         **values,
     )

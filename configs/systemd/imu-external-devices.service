@@ -1,0 +1,26 @@
+[Unit]
+Description=External watch and mattress history synchronization
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/imu-annotation/current/src/imu_data_collector/external_device_worker.py
+
+[Service]
+Type=simple
+User=kscii
+Group=kscii
+WorkingDirectory=/opt/imu-annotation/current
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/imu-annotation/external-devices.env
+ExecStart=/opt/imu-annotation/current/.venv/bin/imu-annotation --config /etc/imu-annotation/config.yaml external-sync
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/imu-annotation
+
+[Install]
+WantedBy=multi-user.target

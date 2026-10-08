@@ -63,6 +63,28 @@ preflight_release() {
     "${config_path}"
 }
 
+external_worker_enabled() {
+  [[ -f $1/configs/systemd/imu-external-devices.service ]] || return 1
+  runuser -u kscii -- "$1/.venv/bin/python" -c \
+    'from pathlib import Path; import sys; from imu_data_collector.config import load_settings; s=load_settings(Path(sys.argv[1])); sys.exit(0 if getattr(getattr(s, "external_devices", None), "enabled", False) else 1)' \
+    "${config_path}"
+}
+
+stop_external_worker() {
+  if [[ -f /etc/systemd/system/imu-external-devices.service ]]; then
+    systemctl stop imu-external-devices.service
+  fi
+}
+
+start_external_worker() {
+  if external_worker_enabled "$1"; then
+    systemctl enable imu-external-devices.service
+    systemctl restart imu-external-devices.service
+  elif [[ -f /etc/systemd/system/imu-external-devices.service ]]; then
+    systemctl disable imu-external-devices.service
+  fi
+}
+
 actual_sha256=$(sha256sum "${bundle}" | cut -d ' ' -f 1)
 [[ ${actual_sha256} == "${expected_sha256}" ]] || {
   echo "部署包 SHA-256 不匹配" >&2
@@ -125,6 +147,12 @@ if [[ -n ${previous} ]]; then
     exit 1
   }
 fi
+if external_worker_enabled "${release_dir}"; then
+  [[ -s /etc/imu-annotation/external-devices.env ]] || {
+    echo "外部设备同步已启用，但私有凭据文件不存在；未切换 current" >&2
+    exit 1
+  }
+fi
 
 install -m 0644 "${release_dir}/configs/systemd/imu-annotation.service" \
   /etc/systemd/system/imu-annotation.service
@@ -134,7 +162,18 @@ install -m 0644 "${release_dir}/configs/systemd/imu-annotation-gc.timer" \
   /etc/systemd/system/imu-annotation-gc.timer
 install -m 0644 "${release_dir}/configs/systemd/imu-upload-broker.service" \
   /etc/systemd/system/imu-upload-broker.service
+if [[ -f ${release_dir}/configs/systemd/imu-external-devices.service ]]; then
+  install -m 0644 "${release_dir}/configs/systemd/imu-external-devices.service" \
+    /etc/systemd/system/imu-external-devices.service
+fi
+if [[ -f ${release_dir}/scripts/deploy/imu-annotation-rollback ]]; then
+  install -m 0755 "${release_dir}/scripts/deploy/imu-annotation-rollback" \
+    /usr/local/sbin/imu-annotation-rollback
+fi
 
+# Finish or interrupt the old process before switching the release it imports.
+systemctl daemon-reload
+stop_external_worker
 ln -s "${release_dir}" "${current_link}.next"
 mv -Tf "${current_link}.next" "${current_link}"
 systemctl daemon-reload
@@ -150,10 +189,13 @@ systemctl enable --now imu-annotation-gc.timer
 systemctl restart imu-annotation.service
 systemctl enable imu-upload-broker.service
 systemctl restart imu-upload-broker.service
+worker_started=true
+start_external_worker "${release_dir}" || worker_started=false
 
 healthy=false
 for _attempt in $(seq 1 20); do
-  if curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null \
+  if [[ ${worker_started} == true ]] \
+    && curl --fail --silent http://127.0.0.1:8766/api/v1/health >/dev/null \
     && curl --fail --silent http://127.0.0.1:8770/health >/dev/null; then
     healthy=true
     break
@@ -163,6 +205,7 @@ done
 
 if [[ ${healthy} != true ]]; then
   if [[ -n ${previous} && -d ${previous} ]]; then
+    stop_external_worker
     ln -s "${previous}" "${current_link}.failed"
     mv -Tf "${current_link}.failed" "${current_link}"
     systemctl restart imu-annotation.service
@@ -171,6 +214,7 @@ if [[ ${healthy} != true ]]; then
     else
       systemctl stop imu-upload-broker.service
     fi
+    start_external_worker "${previous}"
   fi
   echo "新版本健康检查失败，已尝试切回上一版本" >&2
   exit 1

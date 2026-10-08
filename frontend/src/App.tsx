@@ -5,6 +5,7 @@ import { SyntheticMotionPage } from "./SyntheticMotionPage";
 import { SyntheticSnapshots } from "./SyntheticSnapshots";
 import { SyntheticLabelManagement } from "./SyntheticLabelManagement";
 import { DataManagementPage } from "./DataManagementPage";
+import { ExternalDevicesPage } from "./ExternalDevicesPage";
 import {
   type BleScanSummary,
   CaptureSettingsPage,
@@ -34,7 +35,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数据采集", "IMU Data Capture");
 
-type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
+type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "external" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
@@ -75,7 +76,7 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", synthetic: "synthetic", data: "data", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
+    ? { annotate: "annotate", synthetic: "synthetic", data: "data", external: "external", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
     : { capture: "capture", records: "library", settings: "settings", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -294,6 +295,7 @@ type AppConfig = {
   operator_unikeys?: string[];
   admin_unikeys?: string[];
   can_view_models?: boolean;
+  can_view_external_devices?: boolean;
   can_manage_device_configuration?: boolean;
   data_tiers?: ("test" | "prod")[];
   default_data_tier?: "test" | "prod";
@@ -1383,16 +1385,16 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""} ${annotationApplication && tab === "synthetic" ? "synthetic-workbench-shell" : ""} ${annotationApplication && tab === "data" ? "data-manager-shell" : ""}`}>
-      <header className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data") ? "workbench-header" : ""}>
+    <div className={`app-shell ${annotationApplication && tab === "annotate" ? "annotation-workbench-shell" : ""} ${annotationApplication && tab === "synthetic" ? "synthetic-workbench-shell" : ""} ${annotationApplication && tab === "data" ? "data-manager-shell" : ""} ${annotationApplication && tab === "external" ? "external-workbench-shell" : ""}`}>
+      <header className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data" || tab === "external") ? "workbench-header" : ""}>
         <div>
           <span className="eyebrow">{annotationApplication ? tr("CW12EU-T · 独立标注", "CW12EU-T · Annotation") : tr("多设备 IMU · 本机采集", "Multi-device IMU · Local capture")}</span>
           <h1>{annotationApplication ? tr("IMU 数据标注平台", "IMU Annotation Platform") : tr("IMU 数据采集", "IMU Data Capture")}</h1>
         </div>
         <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
-      <nav className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data") ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_enabled && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}{config.synthetic_target === "dev" ? tr(" · 测试", " · Test") : ""}</button>}<button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>{tr("数据管理", "Data management")}</button><button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+      <nav className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data" || tab === "external") ? "workbench-nav" : ""}>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_enabled && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}{config.synthetic_target === "dev" ? tr(" · 测试", " · Test") : ""}</button>}<button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>{tr("数据管理", "Data management")}</button>{config?.can_view_external_devices && <button className={tab === "external" ? "active" : ""} onClick={() => selectTab("external")}>{tr("外部设备数据", "External device data")}</button>}<button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
           <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
@@ -1461,6 +1463,9 @@ export default function App() {
       )}
       {annotationApplication && tab === "synthetic" && config?.synthetic_enabled && <SyntheticMotionPage target={config.synthetic_target ?? "dev"} />}
       {annotationApplication && tab === "data" && session && <DataManagementPage isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
+      {annotationApplication && tab === "external" && session && (config?.can_view_external_devices
+        ? <ExternalDevicesPage isAdmin={session.is_admin} />
+        : <section className="panel">{tr("外部设备数据尚未启用，或当前账号没有访问权限。", "External device data is disabled or unavailable to this account.")}</section>)}
       {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <LabelManagementWorkspace taxonomy={taxonomy} onChanged={setTaxonomy} isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}

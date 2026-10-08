@@ -61,3 +61,15 @@ storage:
   bucket: "soft3888-label"
   project: "project-51b589c7-8d5e-4e78-a10"
   cache_root: "/var/lib/imu-annotation/cache"
+
+# External history has its own worker and index. API credentials belong only in
+# /etc/imu-annotation/external-devices.env, loaded by imu-external-devices.service.
+external_devices:
+  enabled: false
+  access: members
+  sync_interval_s: 900
+  window_s: 86400
+  overlap_s: 0
+  history_start: "2026-08-31T16:00:00.000Z" # 2026-09-01 00:00 Asia/Shanghai
+  request_timeout_s: 75
+  max_response_bytes: 16777216
