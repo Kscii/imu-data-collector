@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { tr } from "./i18n";
 import { SyntheticIMUChart, type IMUReadout, type PlaybackMetadata } from "./SyntheticIMUChart";
+import { TemporalReviewPage } from "./TemporalReviewPage";
 
 export type FormalLabel = {
   code: string; name: string; is_fall: boolean;
@@ -106,6 +107,14 @@ function sourceSuggestions(item: Candidate) {
 }
 
 export function SyntheticMotionPage({target = "dev"}: {target?: "dev" | "prod"}) {
+  const [temporal, setTemporal] = useState(new URLSearchParams(location.search).has("temporal_run"));
+  return <><nav className="synthetic-tabs">
+    <button onClick={() => setTemporal(false)} aria-pressed={!temporal}>原有候选审核</button>
+    <button onClick={() => setTemporal(true)} aria-pressed={temporal}>自动区间标注试验</button>
+  </nav>{temporal ? <TemporalReviewPage /> : <LegacySyntheticMotionPage target={target} />}</>;
+}
+
+function LegacySyntheticMotionPage({target = "dev"}: {target?: "dev" | "prod"}) {
   const deepLink = useRef(new URLSearchParams(location.search)).current;
   // A fresh URL avoids reusing a player cached before the bridge was updated.
   const viewerCacheKey = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`).current;

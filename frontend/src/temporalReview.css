@@ -1,0 +1,23 @@
+.temporal-workbench { padding: 16px; max-width: 1700px; margin: auto; }
+.temporal-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+.temporal-columns { display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); gap: 16px; }
+.temporal-queue { max-height: 85vh; overflow-y: auto; }
+.temporal-queue > button { display: grid; gap: 4px; text-align: left; width: 100%; margin-bottom: 8px; }
+.temporal-queue small { overflow-wrap: anywhere; opacity: .7; }
+.temporal-queue button.selected { outline: 2px solid #58a6ff; }
+.temporal-frame { width: 100%; height: 470px; border: 0; border-radius: 8px; }
+.temporal-track { display: flex; min-height: 38px; gap: 2px; margin: 16px 0; overflow: hidden; }
+.temporal-track button { flex-basis: 0; min-width: 3px; padding: 4px 0; overflow: hidden; white-space: nowrap; color: #fff; border: 0; border-radius: 3px; }
+.temporal-track .activity { background: #246652; }
+.temporal-track .fall { background: #a03e48; }
+.temporal-track .excluded { background: #6c6173; }
+.temporal-table-wrap { overflow-x: auto; }
+.temporal-workbench table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+.temporal-workbench th, .temporal-workbench td { text-align: left; padding: 10px; border-bottom: 1px solid #8885; }
+.temporal-workbench tr.current { outline: 2px solid #58a6ff; outline-offset: -2px; }
+.temporal-workbench input[type=number] { width: 92px; }
+.temporal-workbench td small { display: block; opacity: .75; max-width: 260px; }
+.temporal-review-actions { display: grid; gap: 12px; }
+.temporal-review-actions textarea { min-height: 65px; width: 100%; }
+.temporal-error { color: #ef6c74; }
+@media (max-width: 850px) { .temporal-columns { grid-template-columns: 1fr; } .temporal-queue { max-height: 240px; } .temporal-frame { height: 350px; } }
