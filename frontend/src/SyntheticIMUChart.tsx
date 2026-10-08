@@ -39,10 +39,11 @@ async function loadChart(base: string, signal: AbortSignal): Promise<ChartData> 
   return {manifest, force, gyro, samples: a.shape[0], mounts: a.shape[1]};
 }
 
-export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect, onMetadata}: {
+export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect, onMetadata, compact = false}: {
   base: string; cursorFrame: number; onSeek: (frame: number) => void;
   onReady: (ready: boolean) => void; onInspect: (value: IMUReadout | null) => void;
   onMetadata?: (value: PlaybackMetadata | null) => void;
+  compact?: boolean;
 }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [error, setError] = useState("");
@@ -146,7 +147,7 @@ export function SyntheticIMUChart({base, cursorFrame, onSeek, onReady, onInspect
           : ["ax", "ay", "az", "gx", "gy", "gz"]}
         seriesColors={viewMode === "magnitude" ? ["#38bdf8", "#f472b6"]
           : ["#ef4444", "#22c55e", "#3b82f6", "#f59e0b", "#a855f7", "#06b6d4"]}
-        splitAfter={viewMode === "magnitude" ? 1 : 3} height={190} showReadout={false}
+        splitAfter={viewMode === "magnitude" ? 1 : 3} height={compact ? 100 : 190} showReadout={false}
         showMarkerKey={false} cursorColor="#facc15" scrubOnDrag snapSelection={false}
         onSelectTime={selectTime} />
     </div> : <div className="synthetic-chart-empty">{error

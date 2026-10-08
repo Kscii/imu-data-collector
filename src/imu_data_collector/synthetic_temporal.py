@@ -47,6 +47,20 @@ class ReviewBody(BaseModel):
     failed_segment_ids: list[str] = Field(default_factory=list)
     reason: str = ""
     acknowledge_exclusions: bool = False
+    corrected_document: dict | None = None
+    review_seconds: float = Field(default=0, ge=0, le=86400)
+
+
+def primary_run(run):
+    return run["schema"] == "imu.temporal_run.v2"
+
+
+def needs_reference(run, entry):
+    return (
+        entry["reference_role"] == "validation"
+        if primary_run(run)
+        else entry["reference_role"] != "none"
+    )
 
 
 class TemporalReviewService:
@@ -92,6 +106,7 @@ class TemporalReviewService:
         return [
             {
                 "run_id": r["run_id"],
+                "schema": r["schema"],
                 "phase": r["phase"],
                 "count": len(r["candidates"]),
                 "created_at_utc": r["created_at_utc"],
@@ -152,7 +167,7 @@ class TemporalReviewService:
         return self.optional(self.case_root(run, entry) + "/reference.json")[0]
 
     def save_reference(self, run, entry, document, actor):
-        if entry["reference_role"] == "none":
+        if not needs_reference(run, entry):
             raise ValueError("Manual precision editing is limited to the frozen reference subset")
         validate_document(
             document,
@@ -174,7 +189,12 @@ class TemporalReviewService:
         return value
 
     def pointer(self, run, entry):
-        return self.optional(self.case_root(run, entry) + "/review.json")
+        pointer, generation = self.optional(self.case_root(run, entry) + "/review.json")
+        if pointer:
+            revision = self.read(pointer["revision_key"])
+            if document_sha256(revision) != pointer["revision_sha256"]:
+                raise ValueError("Review revision hash differs")
+        return pointer, generation
 
     def proposals(self, run, entry):
         prefix = self.case_root(run, entry) + "/proposals/"
@@ -191,7 +211,7 @@ class TemporalReviewService:
 
     def current_proposal(self, run, entry, pointer):
         proposals = self.proposals(run, entry)
-        if pointer is not None and pointer["decision"] in ("pass", "reject"):
+        if pointer is not None and (primary_run(run) or pointer["decision"] in ("pass", "reject")):
             matching = [p for p in proposals if document_sha256(p) == pointer["proposal_sha256"]]
         else:
             base = pointer["revision_sha256"] if pointer else None
@@ -250,7 +270,7 @@ class TemporalReviewService:
     def case(self, run, entry, *, summary=False):
         pointer, _ = self.pointer(run, entry)
         reference = self.reference(run, entry)
-        hidden = entry["reference_role"] != "none" and reference is None
+        hidden = needs_reference(run, entry) and reference is None
         proposal = self.current_proposal(run, entry, pointer)
         status = (
             "reference_needed"
@@ -276,6 +296,11 @@ class TemporalReviewService:
         }
         if not summary:
             result.update(proposal=None if hidden else proposal, reference=reference)
+            result["reviewed_document"] = (
+                self.read(pointer["revision_key"])["temporal_annotation"]
+                if pointer and not hidden
+                else None
+            )
             if hidden:
                 result["reference_template"] = empty_document(
                     **entry["candidate"],
@@ -291,7 +316,7 @@ class TemporalReviewService:
         expected = pointer["revision_sha256"] if pointer else None
         if body.expected_review_sha256 != expected:
             raise ObjectConflictError("Review has changed; reload this candidate")
-        if entry["reference_role"] != "none" and self.reference(run, entry) is None:
+        if needs_reference(run, entry) and self.reference(run, entry) is None:
             raise ValueError("Complete the independent reference before viewing model suggestions")
         proposal = self.current_proposal(run, entry, pointer)
         if proposal is None or document_sha256(proposal) != body.proposal_sha256:
@@ -301,6 +326,30 @@ class TemporalReviewService:
         ):
             raise ValueError("Invalid review decision/reason")
         doc = proposal["document"]
+        if body.corrected_document is not None:
+            if not primary_run(run) or body.decision != "pass":
+                raise ValueError("Primary corrections must be explicitly accepted")
+            doc = validate_document(
+                body.corrected_document,
+                expected_candidate=entry["candidate"],
+                expected_count=entry["clock"]["sample_count"],
+            )
+            if doc["clock"] != entry["clock"]:
+                raise ValueError("Correction clock differs")
+            if any(
+                s["auxiliary_code"] is not None or s["auxiliary_status"] != "unrecognized"
+                for s in doc["segments"]
+            ):
+                raise ValueError("Primary-only corrections leave auxiliary labels unrecognized")
+            doc = {
+                **doc,
+                "producer": {
+                    "kind": "human-primary-correction",
+                    "reviewer": actor,
+                    "proposal_sha256": body.proposal_sha256,
+                },
+            }
+            project_annotations(doc)
         if not set(body.failed_segment_ids) <= {s["segment_id"] for s in doc["segments"]}:
             raise ValueError("Unknown failed segment")
         if body.decision in ("return", "reject") and not body.reason_codes:
@@ -330,6 +379,8 @@ class TemporalReviewService:
             "labels": formal_labels(doc),
             "temporal_annotation": doc,
             "temporal_annotation_sha256": document_sha256(doc),
+            "review_seconds": body.review_seconds,
+            "corrected": body.corrected_document is not None,
         }
         digest = document_sha256(revision)
         cid, vid = entry["candidate"]["candidate_id"], entry["candidate"]["version_id"]
@@ -346,7 +397,7 @@ class TemporalReviewService:
         self.store.write_json(
             self.case_root(run, entry) + "/review.json", current, if_generation_match=generation
         )
-        if body.decision == "return":
+        if body.decision == "return" and not primary_run(run):
             self.immutable(
                 run_root(run) + "/retry-jobs/" + digest + ".json",
                 {
@@ -430,6 +481,8 @@ class TemporalReviewService:
         return {"snapshot_id": snapshot_id, "request_key": key}
 
     def approve(self, run, report_sha256, auxiliary_mode, actor):
+        if primary_run(run):
+            raise ValueError("Primary learning is a local pilot; full production is not enabled")
         if (
             run["phase"] != "pilot"
             or auxiliary_mode not in ("temporal", "segment_summary")
@@ -525,6 +578,9 @@ def validate_proposal(value, entry):
 def register_temporal_routes(app: FastAPI, source, current_actor):
     service = TemporalReviewService(source.store, source)
     app.state.temporal_review_service = service
+    from .synthetic_primary import register_primary_routes
+
+    register_primary_routes(app, service, current_actor)
     root = "/api/v1/synthetic/temporal"
 
     def invoke(function, *args):

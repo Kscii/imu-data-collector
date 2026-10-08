@@ -23,3 +23,72 @@
 .temporal-review-actions textarea { min-height: 65px; width: 100%; color: inherit; background: #0d1b2d; border: 1px solid #8885; border-radius: 6px; padding: 8px; }
 .temporal-error { color: #ef6c74; }
 @media (max-width: 850px) { .temporal-columns { grid-template-columns: 1fr; } .temporal-queue { max-height: 240px; } .temporal-frame { height: 350px; } }
+
+.primary-workbench { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
+.primary-workbench .panel { margin: 0; padding: 10px; min-width: 0; }
+.primary-workbench button, .primary-workbench input, .primary-workbench select, .primary-workbench textarea { font-size: 12px; }
+.primary-toolbar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.primary-toolbar button { flex: 0 0 auto; }
+.primary-task { flex: 1; min-width: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; font-size: 12px; opacity: .75; }
+.primary-notice { display: flex; align-items: center; gap: 10px; font-size: 12px; flex: 0 0 auto; }
+.primary-notice span { flex: 1; overflow-wrap: anywhere; }
+.primary-notice button { padding: 2px 8px; }
+.primary-error { color: #fb8792; }
+.primary-body { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 10px; flex: 1; min-height: 0; }
+.primary-viewer { display: grid; grid-template-rows: minmax(100px, 1fr) auto 28px 32px; gap: 6px; min-height: 0; }
+.primary-viewer iframe { width: 100%; height: 100%; min-height: 0; border: 0; border-radius: 6px; }
+.primary-viewer .synthetic-chart { padding: 4px 6px; }
+.primary-viewer .synthetic-chart-header { margin-bottom: 2px; gap: 6px; font-size: 10px; }
+.primary-viewer .synthetic-chart-header > span:not(.synthetic-chart-sensor) { display: none; }
+.primary-viewer .synthetic-trace-legend { font-size: 10px; padding: 0; gap: 8px; }
+.primary-timeline { display: flex; gap: 2px; overflow: hidden; }
+.primary-timeline button { flex-basis: 0; min-width: 3px; padding: 2px; border: 0; overflow: hidden; white-space: nowrap; border-radius: 3px; }
+.primary-timeline .identified { background: #245e52; }
+.primary-timeline .unknown { background: #505369; }
+.primary-workbench .selected { outline: 2px solid #60a5fa; outline-offset: -2px; }
+.primary-playback { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
+.primary-playback input { flex: 1; min-width: 40px; width: auto; margin: 0; }
+.primary-playback button, .primary-playback span { flex: 0 0 auto; }
+.primary-playback button { padding: 5px 8px; }
+.primary-editor { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 8px; min-height: 0; }
+.primary-editor header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.primary-editor header > span { margin-left: auto; font-size: 11px; color: #9db6d4; }
+.primary-editor header > small { width: 100%; font-size: 11px; opacity: .75; }
+.primary-editor-scroll { overflow-y: auto; min-height: 0; padding: 2px; }
+.primary-segments { display: grid; gap: 4px; max-height: 135px; overflow-y: auto; margin-bottom: 12px; }
+.primary-segments button { display: flex; justify-content: space-between; gap: 8px; padding: 7px 8px; text-align: left; }
+.primary-segments small { white-space: nowrap; opacity: .7; }
+.primary-fields { display: grid; gap: 8px; }
+.primary-fields label { display: grid; gap: 4px; font-size: 11px; min-width: 0; }
+.primary-fields select, .primary-fields input, .primary-fields textarea { width: 100%; min-width: 0; margin: 0; }
+.primary-fields textarea { resize: vertical; min-height: 48px; padding: 6px; color: inherit; background: #0d1b2d; border: 1px solid #30415f; border-radius: 5px; }
+.primary-boundaries, .primary-edit-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.primary-actions { border-top: 1px solid #30415f; padding-top: 8px; display: grid; gap: 6px; }
+.primary-actions label { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+.primary-actions input[type=checkbox] { width: auto; margin: 0; }
+.primary-actions > div { display: flex; gap: 6px; }
+.primary-actions > div button { flex: 1; }
+.primary-save { background: #215b83; border-color: #4083b0; }
+.primary-overlay { position: fixed; inset: 0; z-index: 80; display: flex; background: #050b16b3; }
+.primary-drawer { width: 390px; max-width: 95vw; display: flex; flex-direction: column; gap: 12px; }
+.primary-overlay header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.primary-queue-list { min-height: 0; overflow-y: auto; display: grid; gap: 6px; }
+.primary-queue-list button { display: grid; text-align: left; gap: 4px; }
+.primary-queue-list small { overflow-wrap: anywhere; opacity: .7; }
+.primary-details { width: min(920px, 95vw); max-height: calc(100dvh - 40px); margin: auto !important; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 14px; }
+.primary-details-scroll { overflow-y: auto; min-height: 0; padding: 0 8px 10px; }
+.primary-details h3 { font-size: 14px; margin: 18px 0 8px; }
+.primary-details p { font-size: 12px; overflow-wrap: anywhere; }
+.primary-model { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 0; }
+.primary-model small { width: 100%; }
+.primary-details a { color: #7db8fc; margin-right: 10px; }
+.primary-details-actions { display: flex; gap: 8px; }
+.primary-metrics { overflow-x: auto; }
+.primary-metrics table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.primary-metrics th, .primary-metrics td { padding: 7px; border-bottom: 1px solid #30415f; text-align: left; }
+@media (max-height: 720px) { .primary-workbench .panel { padding: 7px; } .primary-segments { max-height: 90px; } .primary-editor-scroll { scrollbar-width: thin; } }
+@media (max-width: 1050px) { .primary-body { grid-template-columns: minmax(0, 1fr) 300px; } .primary-toolbar > strong { display: none; } .primary-playback span { font-size: 10px; } }
+.primary-actions input[type=checkbox] { flex: 0 0 auto; }
+.primary-actions label { width: auto; justify-content: flex-start; }
+.primary-actions button { padding: 6px 8px; }
+.primary-actions input[type=checkbox] { width: 14px; min-width: 14px; height: 14px; }

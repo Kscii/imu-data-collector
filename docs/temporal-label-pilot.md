@@ -1,5 +1,52 @@
 # 动捕时间区间审核试验
 
+## 当前：第二轮主活动审核
+
+运行 ID `primary-label-pilot-20261008`，合同 `imu.temporal_run.v2`。只编辑 24 类主活动，
+辅助字段保留未知，HDF5 仍为正式 3.3。原始六轴数据及第一轮试验不覆盖。
+
+40 段分为 20 段开发纠正和 20 段独立验证。开发段直接显示骨架模型建议，可通过或修改
+类别、边界、切分/合并；相邻边界联动保持连续。验证段先盲标，再显示模型建议。
+浏览器按任务、候选及审核版本暂存草稿。保存始终校验时钟、候选和父审核哈希。
+
+「报告与模型」提供一键批次训练、候选模型下载、独立验证比较及 H5 快照。
+训练请求只冻结已通过的开发段；验证段不会进入训练。候选模型不会自动替换当前草稿或
+生产模型。失败后可再次点击创建新批次。未知区间继续排除，未审片段不能导出已审核快照。
+
+骨架模型需要 25 Hz 的 22 个 SMPL+H 世界坐标关节位置；不能直接输入六轴 IMU。
+完整 ZIP 内有 ONNX、joint order、float32 输入约定、独立适配器、示例与校验文件。
+首轮 TCN 15/24 类达到弱标签训练支持门槛，40 段草稿出现 12 类，47.4% 时长未知。
+当前人工通过和独立参考均为 0，不能把草稿覆盖率当准确率。
+
+预览地址：
+`http://127.0.0.1:8769/?view=synthetic&temporal_run=primary-label-pilot-20261008&lang=zh-CN`。
+
+Ubuntu 隔离根目录：`~/.local/share/imu-motion-simulator/studies/primary-label-pilot-20261008/`。
+在其 `collector/` 目录启动预览（复用第一轮已经安装的只读 Python 运行环境）：
+
+```bash
+PYTHONPATH=src ../../temporal-label-pilot-20261008/collector/.venv/bin/python \
+  scripts/serve-temporal-preview.py --run-id primary-label-pilot-20261008 \
+  --local-store ../local-store --state-dir ../preview-state --port 8769
+```
+
+本机转发：
+
+```bash
+ssh -N -L 127.0.0.1:8769:127.0.0.1:8769 -o ExitOnForwardFailure=yes ubuntu
+```
+
+新增接口 `/runs/{run_id}/training` 冻结/查询训练请求，`/models` 列出候选模型，
+`/models/{model_id}/{filename}` 提供哈希绑定的下载，`/cases/{cid}/{vid}/correction`
+保存明确通过的纠正。不启用 V2 的全量批准。后台 worker 在同一隔离目录处理人工请求，
+`pilot/PAUSE` 可暂停新任务；运行说明见模拟器同名文档。
+
+页面沿用现有合成运动页布局：队列抽屉、回放与紧凑 IMU、右侧区间编辑、固定底部操作。
+1366×768、1440×900、1920×1080 和 1366×650 的浏览器布局检查通过，无外层溢出。
+实际回放、盲标、切分/合并、边界编辑、草稿恢复、模型下载分别验证；未代写人工结论。
+
+## 保留的第一轮试验
+
 新增入口位于「合成运动 → 自动区间标注试验」，复用原 3D 回放和 IMU 图。
 用户检查主活动、一个可选辅助动作及时间区间；普通任务只支持通过、退回和质量排除。
 退回可指出错误区间及原因，最多自动重试两次，之后的排除建议仍需人工确认。

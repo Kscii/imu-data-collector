@@ -64,6 +64,7 @@ RESOLUTIONS = {"identified", "unrecognized", "uncovered", "uncertain_boundary"}
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 RUN_SCHEMA = "imu.temporal_run.v1"
+PRIMARY_RUN_SCHEMA = "imu.temporal_run.v2"
 SOURCE_PREFIX = re.compile(r"^synthetic-motion/(?:prod|dev/[A-Za-z0-9][A-Za-z0-9._-]*)/v1$")
 
 
@@ -126,7 +127,7 @@ def validate_run(run):
             "candidates",
             "full_from",
         }
-        and run.get("schema") == RUN_SCHEMA,
+        and run.get("schema") in (RUN_SCHEMA, PRIMARY_RUN_SCHEMA),
         "Run fields/schema",
     )
     _require(isinstance(run["run_id"], str) and IDENTIFIER.fullmatch(run["run_id"]), "Run ID")
@@ -148,9 +149,14 @@ def validate_run(run):
             "Full run needs pilot approval",
         )
     entries = run["candidates"]
+    primary_only = run["schema"] == PRIMARY_RUN_SCHEMA
+    if primary_only:
+        _require(run["phase"] == "pilot", "Primary learning runs are isolated pilots")
     _require(
-        isinstance(entries, list) and entries and (run["phase"] == "full" or len(entries) <= 30),
-        "Pilot accepts at most 30 candidates",
+        isinstance(entries, list)
+        and entries
+        and (run["phase"] == "full" or len(entries) <= (40 if primary_only else 30)),
+        "Pilot candidate limit exceeded",
     )
     identities, reference_groups = set(), {}
     for entry in entries:
@@ -187,7 +193,15 @@ def validate_run(run):
             "Source grouping",
         )
         role = entry["reference_role"]
-        _require(role in ("none", "adjustment", "validation"), "Reference role")
+        _require(
+            role
+            in (
+                ("development", "validation")
+                if primary_only
+                else ("none", "adjustment", "validation")
+            ),
+            "Reference role",
+        )
         if role != "none":
             group = entry["group_key"]
             _require(
@@ -558,6 +572,7 @@ def validate_embedded(refs, annotations, *, sequence_index, sample_count):
     )
     expected = project_annotations(document, sequence_index=sequence_index)
     actual = []
+
     def decode(value):
         return value.decode() if isinstance(value, bytes) else str(value)
 
