@@ -118,6 +118,7 @@ jobs:
           scripts/update-local-capture.sh
           scripts/install-user-service.sh
           scripts/deploy/imu-annotation-deploy
+          scripts/deploy/imu-annotation-rollback
       - name: Pytest
         if: needs.scope.outputs.backend == 'true'
         run: uv run pytest -q
@@ -197,6 +198,8 @@ jobs:
             configs/systemd/imu-annotation-gc.service \
             configs/systemd/imu-annotation-gc.timer \
             configs/systemd/imu-upload-broker.service \
+            configs/systemd/imu-external-devices.service \
+            scripts/deploy/imu-annotation-rollback \
             frontend/dist-annotation src
           install -m 0755 scripts/deploy/imu-annotation-deploy "${deployer}"
           {
