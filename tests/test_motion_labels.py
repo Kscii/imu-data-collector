@@ -952,3 +952,45 @@ def test_interval_issues_survive_api_error_envelope(tmp_path):
         assert detail["code"] == "annotation_issues"
         assert detail["issues"][0]["segment_ids"] == ["t-0", "t-1"]
         assert service.state(mid)[0]["accepted"] is None
+
+
+def test_isolated_calibration_routes_cannot_publish_or_change_main_reviews(tmp_path):
+    import runpy
+    from pathlib import Path
+
+    main_store, _, _, mid, _ = seed(tmp_path / "main")
+    seed(tmp_path / "calibration")
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = main_store.root
+    settings.storage.cache_root = tmp_path / "main-cache"
+    settings.annotation.catalog_path = tmp_path / "main-state/catalog.sqlite3"
+    settings.annotation.synthetic_target = "prod"
+    settings.annotation.synthetic_run_id = None
+    settings.auth.mode = "local"
+    settings.auth.local_actor_id = "test-member"
+    settings.identity.allowed_unikeys += ("test-member",)
+    settings.identity.admins += ("test-member",)
+    app = create_annotation_app(settings)
+    mount = runpy.run_path(str(Path(__file__).parents[1] / "scripts/serve-motion-preview.py"))[
+        "mount_calibration"
+    ]
+    child = mount(app, settings, tmp_path / "calibration/objects", tmp_path / "calibration-state")
+    main = app.state.motion_label_service
+    isolated = child.state.motion_label_service
+    main.refresh(force=True)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/synthetic/motions").json()["total"] == 1
+        response = client.get("/calibration/api/v1/synthetic/motions")
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 1
+        lease = client.post(f"/calibration/api/v1/synthetic/motions/{mid}/claim", json={})
+        assert lease.status_code == 200
+        assert isolated.state(mid)[0]["lease"]
+        assert main.state(mid)[0]["lease"] is None
+        for path in ("snapshots", "models/test/activate", "models/retry-failed"):
+            assert (
+                client.post("/calibration/api/v1/synthetic/motions/" + path, json={}).status_code
+                == 403
+            )
+        assert isolated.state(mid)[0]["accepted"] is None

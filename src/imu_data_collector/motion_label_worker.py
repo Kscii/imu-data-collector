@@ -26,9 +26,16 @@ from .motion_label_runtime import (
     sequence_decode,
 )
 from .motion_label_service import MotionLabelService, now
+from .production_gate import validated_capabilities
 from .storage import ObjectConflictError, create_object_store
 from .synthetic_motion import SyntheticReviewService
-from .synthetic_temporal_contract import PRIMARY, PRODUCTION_PRIMARY, document_sha256
+from .synthetic_temporal_contract import (
+    CURRENT_PRIMARY,
+    FALLS,
+    PRIMARY,
+    PRODUCTION_PRIMARY,
+    document_sha256,
+)
 
 
 def sha(path):
@@ -125,7 +132,7 @@ class MotionLabelWorker:
             ).read_text()
         )
         require(
-            tuple(metadata["labels"]) in (PRIMARY, PRODUCTION_PRIMARY),
+            tuple(metadata["labels"]) in (PRIMARY, PRODUCTION_PRIMARY, CURRENT_PRIMARY),
             "Model labels differ",
         )
         with np.load(data, allow_pickle=False) as saved:
@@ -226,7 +233,13 @@ class MotionLabelWorker:
             impacts = impact_candidates(
                 indices, impact_scores, metadata["labels"], metadata["decoder"]["impact_threshold"]
             )
-            high = decoded["high_confidence_indices"]
+            capabilities = validated_capabilities(model.get("validation") or {})
+            fall_validated = capabilities["fall"]["passed"]
+            high = decoded["high_confidence_indices"].copy()
+            if not fall_validated:
+                high[
+                    np.isin(high, [i for i, code in enumerate(metadata["labels"]) if code in FALLS])
+                ] = -1
             high_impacts = impact_candidates(
                 high, impact_scores, metadata["labels"], metadata["decoder"]["impact_threshold"]
             )
@@ -252,7 +265,9 @@ class MotionLabelWorker:
                         "score": float(decoded["reliability"][a:b].mean()),
                         "high_confidence_fraction": fraction,
                         "boundary_reliable": False,
-                        "reason": "boundary_not_validated"
+                        "reason": "experimental_fall"
+                        if s["primary_code"] == "fall" and not fall_validated
+                        else "boundary_not_validated"
                         if fraction == 1
                         else "low_confidence_candidate",
                     }
@@ -260,6 +275,7 @@ class MotionLabelWorker:
             quality = {
                 "schema": "imu.motion_prediction_quality.v2",
                 "intervals": intervals,
+                "capabilities": capabilities,
                 "calibration": metadata["decoder"].get("calibration"),
                 "high_confidence_document": high_doc,
                 "decoder_sha256": document_sha256(metadata["decoder"]),

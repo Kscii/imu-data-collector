@@ -29,7 +29,31 @@ def default_sequence_decoder(labels):
         "kneeling": ("stand_up",),
         "crawling": ("get_up",),
     }
-    transitions = {"sit_down", "stand_up", "get_up", "lie_down", "squatting_down", "fall"}
+    if "posture_transition" in labels:
+        supports = (
+            "standing",
+            "sitting",
+            "lying",
+            "squatting",
+            "kneeling",
+            "ground_support",
+        )
+        relationships.update({code: ("posture_transition",) for code in supports})
+        relationships["posture_transition"] = supports + (
+            "walking",
+            "running",
+            "bending",
+        )
+        relationships["bending"] = ("standing", "walking", "posture_transition")
+    transitions = {
+        "posture_transition",
+        "sit_down",
+        "stand_up",
+        "get_up",
+        "lie_down",
+        "squatting_down",
+        "fall",
+    }
     for i, code in enumerate(labels):
         for following in relationships.get(code, ()):
             if following in labels:
@@ -44,6 +68,8 @@ def default_sequence_decoder(labels):
         "transition_weight": 0.35,
         "temperature": 1.0,
         "outside_threshold": 0.5,
+        "candidate_min_local_score": 0.45 if "posture_transition" in labels else 0.0,
+        "gap_fill_seconds": 0.0,
         "impact_threshold": 0.5,
         "calibration": {"status": "unvalidated", "high_thresholds": {}},
     }
@@ -129,7 +155,10 @@ def sequence_decode(scores, valid, metadata, *, outside_scores=None):
             choices = delta[:, None] + transition
             back[t] = choices.argmax(axis=0)
             delta = choices.max(axis=0) + emission[start + t]
-            alpha[t] = _logsumexp(alpha[t - 1, :, None] + transition, axis=0) + emission[start + t]
+            alpha[t] = (
+                _logsumexp(alpha[t - 1, :, None] + transition, axis=0)
+                + emission[start + t]
+            )
             alpha[t] -= _logsumexp(alpha[t], axis=0)
         state = int(delta.argmax())
         beta = np.zeros(k)
@@ -138,7 +167,9 @@ def sequence_decode(scores, valid, metadata, *, outside_scores=None):
             p = alpha[t] + beta
             posterior[start + t] = np.exp(p - _logsumexp(p, axis=0))
             state = int(back[t, state])
-            beta = _logsumexp(transition + emission[start + t][None, :] + beta[None, :], axis=1)
+            beta = _logsumexp(
+                transition + emission[start + t][None, :] + beta[None, :], axis=1
+            )
             beta -= _logsumexp(beta, axis=0)
     indices = np.maximum(path, 0)
     rows = np.arange(len(valid))
@@ -152,8 +183,38 @@ def sequence_decode(scores, valid, metadata, *, outside_scores=None):
     high[(reliability < cutoff[indices]) | ~valid] = -1
     if calibration.get("status") != "calibrated":
         high[:] = -1
+    proposal = path.copy()
+    minimum = cfg.get("candidate_min_local_score", 0.0)
+    if not isinstance(minimum, (int, float)) or not 0 <= minimum <= 1:
+        raise ValueError("Invalid proposal evidence threshold")
+    proposal[evidence < minimum] = -1
+    gap_s = cfg.get("gap_fill_seconds", 0.0)
+    if gap_s not in (0.0, 0.2, 0.5):
+        raise ValueError("Gap fill must be 0, 0.2 or 0.5 seconds")
+    # This modifies review candidates only; confidence still needs calibrated evidence.
+    if gap_s:
+        edges = np.r_[0, np.flatnonzero(np.diff(proposal)) + 1, len(proposal)]
+        protected = {"fall", "stumble_recovery", "posture_transition", "other_activity"}
+        for a, b in pairwise(edges):
+            if (
+                a == 0
+                or b == len(proposal)
+                or proposal[a] != -1
+                or b - a > int(gap_s * 25)
+            ):
+                continue
+            code = proposal[a - 1]
+            if (
+                code < 0
+                or proposal[b] != code
+                or labels[code] in protected
+                or not valid[a:b].all()
+            ):
+                continue
+            if (path[a:b] == code).all() and (local[a:b, code] >= minimum * 0.8).all():
+                proposal[a:b] = code
     return {
-        "class_indices": path,
+        "class_indices": proposal,
         "high_confidence_indices": high,
         "local_scores": local.astype(np.float32),
         "sequence_scores": posterior.astype(np.float32),
@@ -194,7 +255,9 @@ def predict_outputs(session, joints, valid, metadata):
     return {
         "scores": values[:, :k],
         **(
-            {"impact_scores": values[:, k], "outside_scores": values[:, k + 1]} if auxiliary else {}
+            {"impact_scores": values[:, k], "outside_scores": values[:, k + 1]}
+            if auxiliary
+            else {}
         ),
     }
 
@@ -237,7 +300,9 @@ def reject(scores, joints, valid, metadata):
     result[(confidence < metadata["threshold"]) | ~np.asarray(valid, bool)] = -1
     supported = np.asarray(metadata["supported_indices"], np.int64)
     result[~np.isin(result, supported)] = -1
-    allowed = np.broadcast_to(np.isin(np.arange(scores.shape[1]), supported), scores.shape).copy()
+    allowed = np.broadcast_to(
+        np.isin(np.arange(scores.shape[1]), supported), scores.shape
+    ).copy()
     allowed &= np.asarray(valid, bool)[:, None]
     if len(joints) > 1:
         velocity = np.gradient(joints, 0.04, axis=0)
@@ -319,4 +384,7 @@ def infer_bundle(directory, joints, valid):
             metadata["decoder"]["impact_threshold"],
         )
         return {**output, **decoded}
-    return {**output, "class_indices": reject(output["scores"], joints, valid, metadata)}
+    return {
+        **output,
+        "class_indices": reject(output["scores"], joints, valid, metadata),
+    }

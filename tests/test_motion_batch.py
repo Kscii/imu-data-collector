@@ -143,7 +143,8 @@ def test_expired_or_outside_sample_jobs_remain_resumable(tmp_path):
         assert tuple(row) == ("queued", 0)
 
 
-def test_decoder_rebuild_reuses_network_and_persists_teacher_masks(tmp_path, monkeypatch):
+@pytest.mark.parametrize("current", [False, True])
+def test_decoder_rebuild_reuses_network_and_persists_teacher_masks(tmp_path, monkeypatch, current):
     import hashlib
     import json
 
@@ -152,7 +153,7 @@ def test_decoder_rebuild_reuses_network_and_persists_teacher_masks(tmp_path, mon
 
     import imu_data_collector.motion_label_worker as module
     from imu_data_collector.motion_label_runtime import default_sequence_decoder
-    from imu_data_collector.synthetic_temporal_contract import PRODUCTION_PRIMARY
+    from imu_data_collector.synthetic_temporal_contract import CURRENT_PRIMARY, PRODUCTION_PRIMARY
 
     _, _, service, mid, _ = seed(tmp_path)
     feature = service.feature(mid)
@@ -174,13 +175,19 @@ def test_decoder_rebuild_reuses_network_and_persists_teacher_masks(tmp_path, mon
     feature.update(put(path, feature["object_key"]))
     onnx = tmp_path / "model.onnx"
     onnx.write_bytes(b"engineering-network-stub")
-    labels = list(PRODUCTION_PRIMARY)
+    labels = list(CURRENT_PRIMARY if current else PRODUCTION_PRIMARY)
+    predicted_index = labels.index("fall") if current else 0
     metadata = {
         "labels": labels,
-        "supported_indices": list(range(20)),
+        "supported_indices": list(range(len(labels))),
         "event_heads": True,
         "decoder": default_sequence_decoder(labels),
     }
+    if current:
+        metadata["decoder"]["calibration"] = {
+            "status": "calibrated",
+            "high_thresholds": {"fall": 0.9},
+        }
     metadata_path = tmp_path / "metadata.json"
     metadata_path.write_text(json.dumps(metadata))
     model = {
@@ -194,8 +201,8 @@ def test_decoder_rebuild_reuses_network_and_persists_teacher_masks(tmp_path, mon
         def run(self, _, inputs):
             calls.append(1)
             shape = inputs["valid"].shape
-            scores = np.zeros((*shape, 20), np.float32)
-            scores[..., 0] = 1
+            scores = np.zeros((*shape, len(labels)), np.float32)
+            scores[..., predicted_index] = 1
             return [scores, np.zeros((*shape, 1), np.float32), np.zeros((*shape, 1), np.float32)]
 
     monkeypatch.setattr(module, "cpu_session", lambda _: Session())
@@ -213,7 +220,34 @@ def test_decoder_rebuild_reuses_network_and_persists_teacher_masks(tmp_path, mon
     descriptor = service.store.read_json(third["quality"]["sequence_scores_key"])[0]
     saved = module.checked_download(service, descriptor, tmp_path / "teacher.npz")
     with np.load(saved, allow_pickle=False) as archive:
-        assert archive["sequence_scores"].shape == (100, 20)
+        assert archive["sequence_scores"].shape == (100, len(labels))
         assert archive["valid"].all()
-        assert (archive["high_confidence_indices"] == -1).all()
-    assert third["document"]["taxonomy"]["version"] == "2.0.0"
+        assert (archive["high_confidence_indices"] == (predicted_index if current else -1)).all()
+    assert third["document"]["taxonomy"]["version"] == ("3.0.0" if current else "2.0.0")
+    if current:
+        assert third["document"]["fall_events"][0]["impact_ns"] is None
+        assert third["quality"]["intervals"][0]["reason"] == "experimental_fall"
+        assert not third["quality"]["capabilities"]["fall"]["passed"]
+        assert all(
+            s["primary_code"] is None
+            for s in third["quality"]["high_confidence_document"]["segments"]
+        )
+
+
+def test_staged_gate_recomputes_capabilities_and_preserves_legacy_gate():
+    from imu_data_collector.production_gate import validated_capabilities
+
+    report = valid_report()
+    report["candidate"]["fall"]["reference_events"] = 2
+    with pytest.raises(ValueError):
+        production_gate(report)
+    report.update(schema="imu.motion_model_validation.v3", taxonomy_version="3.0.0")
+    assert production_gate(report)
+    assert validated_capabilities(report)["daily_activity"]["passed"]
+    assert not validated_capabilities(report)["fall"]["passed"]
+    report["capabilities"] = {"fall": {"passed": True}}
+    with pytest.raises(ValueError):
+        production_gate(report, capability="fall")
+    report["candidate"]["ordinary_precision"] = 0.94
+    with pytest.raises(ValueError):
+        production_gate(report)

@@ -136,7 +136,8 @@ def create_annotation_app(
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next):
-        if request.url.path.startswith("/api/v1/") and request.url.path != "/api/v1/health":
+        path = request.url.path.removeprefix(request.scope.get("root_path", ""))
+        if path.startswith("/api/v1/") and path != "/api/v1/health":
             try:
                 request.state.actor = authenticator.authenticate(
                     request.headers.get("x-goog-iap-jwt-assertion")
@@ -152,7 +153,7 @@ def create_annotation_app(
                     content={"detail": error_detail("authorization_failed", str(error))},
                 )
         response = await call_next(request)
-        if request.url.path.startswith("/assets/"):
+        if path.startswith("/assets/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 

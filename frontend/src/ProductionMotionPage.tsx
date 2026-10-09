@@ -8,7 +8,8 @@ import type {ActivityRules} from "./activityRules";
 import {postureNames, deriveTransitionEndpoints, reviewIssues, reviewShortcut, type Transition, type ReviewIssue, type ReviewCommand} from "./postureReview";
 import "./temporalReview.css";
 
-const root = "/api/v1/synthetic/motions";
+const cohortBase = typeof location !== "undefined" && location.pathname.startsWith("/calibration/") ? "/calibration" : "";
+const root = `${cohortBase}/api/v1/synthetic/motions`;
 type Segment = SemanticFields & {segment_id: string; start_ns: number; stop_ns: number; primary_code: string | null;
   auxiliary_code: null; auxiliary_status: string; resolution: string; reason: string | null; fall_event_id: string | null; transition?: Transition | null};
 type Fall = {event_id: string; code: string; start_ns: number; stop_ns: number; impact_ns: number | null; evidence: string};
@@ -22,7 +23,7 @@ type Row = {motion_sha256: string; status: string;
 type Detail = Row & {variants: Variant[]; editor_template: Annotation; suggestion: Annotation | null; needs_rule_review?: boolean;
   migration?: {review_required: {segment_id: string; reason: string}[]};
   prediction_quality?: {intervals: {start_ns: number; stop_ns: number; primary_code: string | null;
-    high_confidence_fraction: number; boundary_reliable: boolean}[]} | null;
+    high_confidence_fraction: number; boundary_reliable: boolean; reason?: string}[]} | null;
   preview?: {models: {baseline: string; candidate: string}; activity_rules_version: string;
     documents: Record<"human" | "baseline" | "candidate", Annotation>};
   legacy_quality: {decision:string;reason:string|null;reviewer:string} | null;
@@ -72,9 +73,9 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const editorRef = useRef(editor); editorRef.current = editor;
   const currentRef = useRef(current); currentRef.current = current;
   const id = current?.entry.candidate;
-  const base = id ? `/api/v1/synthetic/candidates/${id.candidate_id}/${id.version_id}` : "";
+  const base = id ? `${cohortBase}/api/v1/synthetic/candidates/${id.candidate_id}/${id.version_id}` : "";
   const casePath = current && id ? `${root}/${current.motion_sha256}/variants/${id.candidate_id}/${id.version_id}` : "";
-  const cacheKey = (d: Detail) => `motion-draft:${d.motion_sha256}:${d.entry.candidate.candidate_id}:${d.entry.candidate.version_id}`;
+  const cacheKey = (d: Detail) => `motion-draft:${cohortBase ? "calibration:" : ""}${d.motion_sha256}:${d.entry.candidate.candidate_id}:${d.entry.candidate.version_id}`;
   const rate = editor?.clock.source_rate_hz ?? 25, cursor = Math.round(frameIndex/rate*1e9);
   const duration = editor?.clock.duration_ns ?? 0, active = partAt(editor?.segments ?? [], Math.min(cursor, duration));
   const activeSegment = editor?.segments[active], segment = editor?.segments[part];
@@ -126,11 +127,11 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         await motionApi(`${root}/${session.current.mid}/release`, {token: session.current.token});
         session.current = null;
       }
-      const savedToken = session.current?.mid === mid ? session.current.token : sessionStorage.getItem(`motion-lease:${mid}`);
+      const savedToken = session.current?.mid === mid ? session.current.token : sessionStorage.getItem(`motion-lease:${cohortBase ? "calibration:" : ""}${mid}`);
       let claimed: Lease | null = null;
       try { if (!previewId) {
         claimed = await motionApi<Lease>(`${root}/${mid}/claim`, {token: savedToken ?? null});
-        session.current = {mid, token: claimed.token}; sessionStorage.setItem(`motion-lease:${mid}`, claimed.token);
+        session.current = {mid, token: claimed.token}; sessionStorage.setItem(`motion-lease:${cohortBase ? "calibration:" : ""}${mid}`, claimed.token);
       }
       } catch (e) {setError(`${String(e)}；当前以只读方式查看。`);}
       const suffix = variant ? `/variants/${variant.candidate_id}/${variant.version_id}` : "";
@@ -297,7 +298,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const isFall = editor?.taxonomy.primary.find(t => t.code === segment?.primary_code)?.is_fall;
   const fall = editor?.fall_events.find(e => e.event_id === segment?.fall_event_id || e.event_id === `fall-${segment?.segment_id}`);
   return <main className="primary-workbench posture-workbench" data-no-localize>
-    <header className="primary-toolbar panel"><button onClick={() => setQueue(true)}>审核队列 · {total} 条</button><strong>动捕标注</strong>
+    <header className="primary-toolbar panel"><button onClick={() => setQueue(true)}>审核队列 · {total} 条</button><strong>{cohortBase ? "独立校准标注" : "动捕标注"}</strong>
       <span className="primary-task" title={current?.entry.source_member}>{current?.entry.source_dataset} · {current?.entry.source_member}</span>
       <button disabled={busy || (selectedIndex < 0 && navigationAnchor.current ? navigationAnchor.current.position <= 0 : offset+selectedIndex <= 0)} onClick={() => void neighbor(-1)}>上一条 <kbd>P</kbd></button>
       <button disabled={busy || (selectedIndex < 0 && navigationAnchor.current ? navigationAnchor.current.position >= total : offset+selectedIndex+1 >= total)} onClick={() => void neighbor(1)}>下一条 <kbd>N</kbd></button>
@@ -306,13 +307,13 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         <tr><th><kbd>M</kbd></th><td>合并下一段</td></tr><tr><th><kbd>P</kbd> / <kbd>N</kbd></th><td>上一条／下一条录制</td></tr>
         <tr><th><kbd>Ctrl/⌘ Enter</kbd></th><td>校验并通过整条录制</td></tr>
       </tbody></table><small>输入文字时停用单键操作；通过后保持当前位置。</small></div></details>
-      {isAdmin && !previewId && <button onClick={() => {pause();setModels(true);}}>模型与快照</button>}</header>
+      {isAdmin && !previewId && !cohortBase && <button onClick={() => {pause();setModels(true);}}>模型与快照</button>}</header>
     {previewId && <div className="primary-notice motion-preview-banner" role="status">
       <strong>候选预览 · 只读</strong>
       <label>查看 <select aria-label="比较标注来源" value={comparison} disabled={!current?.preview || busy} onChange={e=>{
         const selected=e.target.value as typeof comparison; pause(); setComparison(selected);
         const doc=current?.preview?.documents[selected]; if(doc){setEditor(structuredClone(doc));setPart(Math.max(0,partAt(doc.segments,cursor)));}
-      }}><option value="human">人工结果</option><option value="baseline">现用模型</option><option value="candidate">候选 C</option></select></label>
+      }}><option value="human">人工结果</option><option value="baseline">现用模型</option><option value="candidate">候选模型</option></select></label>
       <span>{comparison === "human" ? "冻结的人工审核" : current?.preview?.models[comparison]} · 规则 {current?.preview?.activity_rules_version}</span>
       <a href={`?view=synthetic&lang=zh-CN${id ? `&candidate=${encodeURIComponent(id.candidate_id)}&version=${encodeURIComponent(id.version_id)}` : ""}`}>返回正式审核</a>
     </div>}
@@ -341,7 +342,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         {current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}
         <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null, transition:code==="posture_transition"?{from_posture:null,to_posture:null}:null});setIssues([]);}}>
           {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).filter(([code])=>editor.taxonomy.version === "3.0.0" ? code !== "uncovered" || segment.resolution === code : code !== "invalid_data").map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
-        {quality && <small role="status">{quality.high_confidence_fraction < 1 ? "低可信候选，请检查类别与切点" : quality.boundary_reliable ? "高可信候选" : "类别候选，边界待核"}；整条通过会确认当前标签。</small>}
+        {quality && <small role="status">{quality.reason === "experimental_fall" ? "跌倒实验建议，尚未完成独立验证" : quality.high_confidence_fraction < 1 ? "低可信候选，请检查类别与切点" : quality.boundary_reliable ? "高可信候选" : "类别候选，边界待核"}</small>}
         <div className="primary-edit-buttons"><button onClick={split} disabled={!viewerReady}>在播放位置切分 <kbd>S</kbd></button>
           <button disabled={part===editor.segments.length-1 || !viewerReady} onClick={merge}>合并下一段 <kbd>M</kbd></button></div>
         {isFall && <label>撞击时刻（秒，可留空）<input type="number" step="0.04" value={fall?.impact_ns != null ? fall.impact_ns/1e9 : ""} onChange={e=>{const event_id=segment.fall_event_id??`fall-${segment.segment_id}`;const events=editor.fall_events.filter(f=>f.event_id!==event_id);if(e.target.value!==""){const impact_ns=Math.round(Number(e.target.value)*25)*40000000;if(Number.isFinite(impact_ns))events.push({event_id,code:segment.primary_code!,start_ns:segment.start_ns,stop_ns:segment.stop_ns,impact_ns,evidence:"human replay inspection"});}setEditor({...editor,fall_events:events});}}/></label>}

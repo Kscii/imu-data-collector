@@ -7,6 +7,7 @@ copies except for the temporal-contract import. No storage or ML dependencies.
 from copy import deepcopy
 
 from .synthetic_temporal_contract import (
+    CURRENT_PRIMARY,
     CURRENT_SCHEMA,
     CURRENT_TAXONOMY_VERSION,
     FALLS,
@@ -59,7 +60,10 @@ def require(condition, message):
 
 
 def identity(motion_sha):
-    require(isinstance(motion_sha, str) and SHA256.fullmatch(motion_sha), "Invalid motion hash")
+    require(
+        isinstance(motion_sha, str) and SHA256.fullmatch(motion_sha),
+        "Invalid motion hash",
+    )
     return {
         "candidate_id": "motion-" + motion_sha[:32],
         "version_id": motion_sha,
@@ -71,7 +75,9 @@ def identity(motion_sha):
 def empty_motion(motion_sha, sample_count, source_rate_hz):
     doc = semantic_draft(
         empty_document(
-            **identity(motion_sha), sample_count=sample_count, source_rate_hz=source_rate_hz
+            **identity(motion_sha),
+            sample_count=sample_count,
+            source_rate_hz=source_rate_hz,
         )
     )
     doc.pop("candidate")
@@ -84,7 +90,8 @@ def empty_motion(motion_sha, sample_count, source_rate_hz):
 def validate_motion(document):
     require(document.get("schema") == SCHEMA, "Unsupported motion annotation")
     require(
-        document["clock"]["origin"] == "motion-start" and document["clock"]["source_start_ns"] == 0,
+        document["clock"]["origin"] == "motion-start"
+        and document["clock"]["source_start_ns"] == 0,
         "Motion clock must start at zero",
     )
     temporary = deepcopy(document)
@@ -212,7 +219,8 @@ def normalize_recording(document):
     used = {}
     for index, segment in enumerate(result["segments"]):
         require(
-            segment["auxiliary_code"] is None and segment["auxiliary_status"] == "unrecognized",
+            segment["auxiliary_code"] is None
+            and segment["auxiliary_status"] == "unrecognized",
             "Production annotation is primary-only",
         )
         if segment["resolution"] != "identified":
@@ -234,7 +242,9 @@ def normalize_recording(document):
                 }
                 segment["fall_event_id"] = event_id
             if not event:
-                result["segments"][index] = mask(segment, "Fall event needs onset and impact")
+                result["segments"][index] = mask(
+                    segment, "Fall event needs onset and impact"
+                )
                 continue
             used[event["event_id"]] = event
         segment.update(review_state="confirmed", pending_reasons=[])
@@ -277,7 +287,9 @@ def coalesce(segments):
                     )
             for note in item["notes"]:
                 add_note(notes, note)
-            prior.update(stop_ns=item["stop_ns"], semantic_text="", notes=list(notes.values()))
+            prior.update(
+                stop_ns=item["stop_ns"], semantic_text="", notes=list(notes.values())
+            )
         else:
             result.append(item)
     return result
@@ -300,17 +312,24 @@ def apply_projection(document, edit):
         edit["clock"]["source_start_ns"],
         (edit["clock"]["source_start_ns"] + edit["clock"]["duration_ns"]),
     )
-    require(0 <= start < stop <= document["clock"]["duration_ns"], "Edit outside motion")
+    require(
+        0 <= start < stop <= document["clock"]["duration_ns"], "Edit outside motion"
+    )
     result = deepcopy(document)
     prefix, before = _pieces(document, 0, start, clip_notes=False)
-    suffix, after = _pieces(document, stop, document["clock"]["duration_ns"], clip_notes=False)
+    suffix, after = _pieces(
+        document, stop, document["clock"]["duration_ns"], clip_notes=False
+    )
     middle, events = _pieces(edit, 0, edit["clock"]["duration_ns"], offset=-start)
     # Saving a projection must not shrink unchanged notes to the visible crop.
     # Changed/new text retains the explicit range visible in the editor.
-    originals = {(n["note_id"], n["text"]): n for s in document["segments"] for n in s["notes"]}
+    originals = {
+        (n["note_id"], n["text"]): n for s in document["segments"] for n in s["notes"]
+    }
     for segment in middle:
         segment["notes"] = [
-            deepcopy(originals.get((n["note_id"], n["text"]), n)) for n in segment["notes"]
+            deepcopy(originals.get((n["note_id"], n["text"]), n))
+            for n in segment["notes"]
         ]
     result["segments"] = coalesce(prefix + middle + suffix)
     # Splits across the projected range must not create duplicate identities.
@@ -325,7 +344,9 @@ def apply_projection(document, edit):
 def reviewed_ranges(ranges, start, stop):
     result = []
     for a, b in sorted([*ranges, [start, stop]]):
-        require(type(a) is int and type(b) is int and 0 <= a < b, "Invalid reviewed range")
+        require(
+            type(a) is int and type(b) is int and 0 <= a < b, "Invalid reviewed range"
+        )
         if result and a <= result[-1][1]:
             result[-1][1] = max(b, result[-1][1])
         else:
@@ -354,15 +375,28 @@ def usable_ns(document):
 def primary_prediction(template, labels, indices, model_id, *, impacts=None):
     """Same segmentation/masking for production inference and model evaluation."""
     values = [int(i) for i in indices]
-    require(len(values) == template["clock"]["sample_count"], "Prediction clock differs")
+    require(
+        len(values) == template["clock"]["sample_count"], "Prediction clock differs"
+    )
     result = deepcopy(template)
+    current = tuple(labels) == CURRENT_PRIMARY
     result["taxonomy"] = taxonomy(
-        PRODUCTION_TAXONOMY_VERSION if tuple(labels) == PRODUCTION_PRIMARY else "1.0.0"
+        CURRENT_TAXONOMY_VERSION
+        if current
+        else PRODUCTION_TAXONOMY_VERSION
+        if tuple(labels) == PRODUCTION_PRIMARY
+        else "1.0.0"
     )
     result.update(
-        producer={"kind": "cpu-motion-model", "model_id": model_id}, segments=[], fall_events=[]
+        producer={"kind": "cpu-motion-model", "model_id": model_id},
+        segments=[],
+        fall_events=[],
     )
-    edges = [0] + [i for i in range(1, len(values)) if values[i] != values[i - 1]] + [len(values)]
+    edges = (
+        [0]
+        + [i for i in range(1, len(values)) if values[i] != values[i - 1]]
+        + [len(values)]
+    )
     for i, (a, b) in enumerate(zip(edges, edges[1:], strict=False)):
         code = labels[values[a]] if values[a] >= 0 else None
         segment = deepcopy(template["segments"][0])
@@ -375,10 +409,17 @@ def primary_prediction(template, labels, indices, model_id, *, impacts=None):
             reason=None if code else "Model abstained",
             review_state="confirmed" if code else "pending",
             pending_reasons=[] if code else ["class"],
+            fall_event_id=None,
         )
+        if current:
+            segment["transition"] = None
+            if code == "posture_transition":
+                segment["transition"] = {"from_posture": None, "to_posture": None}
+            if code == "other_activity":
+                segment["semantic_text"] = "模型建议其他活动，具体语义待人工检查"
         if code in FALLS:
             impact = (impacts or {}).get(a)
-            if impact is not None and a < impact < b:
+            if current or (impact is not None and a < impact < b):
                 event_id = f"fall-{i:05d}"
                 segment["fall_event_id"] = event_id
                 result["fall_events"].append(
@@ -387,7 +428,9 @@ def primary_prediction(template, labels, indices, model_id, *, impacts=None):
                         "code": code,
                         "start_ns": a * PERIOD_NS,
                         "stop_ns": b * PERIOD_NS,
-                        "impact_ns": impact * PERIOD_NS,
+                        "impact_ns": impact * PERIOD_NS
+                        if impact is not None and a < impact < b
+                        else None,
                         "evidence": "Model impact proposal; requires human recording review",
                     }
                 )
@@ -402,12 +445,14 @@ def primary_prediction(template, labels, indices, model_id, *, impacts=None):
                 pending_reasons=["boundary"],
             )
         result["segments"].append(segment)
-    return validate_motion(result)
+    return validate_motion(derive_transition_endpoints(result) if current else result)
 
 
 def accepted_projection(review, candidate, clock):
     require(
-        review.get("schema") == REVIEW_SCHEMA and review.get("reviewer") and covered(review, clock),
+        review.get("schema") == REVIEW_SCHEMA
+        and review.get("reviewer")
+        and covered(review, clock),
         "No human-reviewed motion coverage",
     )
     result = project_motion(review["document"], candidate, clock)
@@ -430,7 +475,9 @@ def accepted_projection(review, candidate, clock):
 
 
 def validate_inheritance(document, reviewer):
-    evidence = [e for e in document["source_evidence"] if e.get("kind") == "motion-acceptance"]
+    evidence = [
+        e for e in document["source_evidence"] if e.get("kind") == "motion-acceptance"
+    ]
     if document["producer"].get("kind") != "inherited-motion-review":
         require(not evidence, "Unexpected motion inheritance evidence")
         return

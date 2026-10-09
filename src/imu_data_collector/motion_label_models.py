@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .motion_annotations import require
 from .motion_label_service import now
-from .production_gate import production_gate
+from .production_gate import production_gate, validated_capabilities
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import IDENTIFIER, SHA256, document_sha256
 
@@ -135,6 +135,7 @@ def _promote_model(service, model_id, actor, expected_active_sha256):
         "previous_sha256": document_sha256(prior) if prior else None,
         "scope": "all-motion-features",
         "human_results": "preserve",
+        "capabilities": validated_capabilities(model.get("validation") or {}),
     }
     service.reference("model-releases", release)
     service.store.write_json(
