@@ -1,18 +1,11 @@
+import { tr, uiLanguage, isEnglish } from "./i18n";
+import { externalLabel, externalUnit, countLabel, formatNumber, stateNames, stateName } from "./externalDeviceText";
 import { useEffect, useRef, useState } from "react";
 import uPlot from "uplot";
 import type { EventBucket } from "./ExternalDeviceInsights";
 import { aggregationLabel, beijingTime, durationLabel, type AggregatePoint, type AggregateSeries, type TimeRange } from "./externalDeviceData";
 
-const number = (value: number | null) => value == null ? "—" : value.toLocaleString("zh-CN", {maximumFractionDigits: 2});
-const stateNames: Record<string, Record<string, string>> = {
-  in_bed: {"0": "离床", "1": "在床"},
-  sleep_stage: {"0": "初始化", "1": "清醒", "2": "REM", "3": "浅睡", "4": "深睡"},
-  moving: {"0": "无体动", "1": "小体动", "2": "大体动"},
-  CO: {"0": "未充电", "1": "充电中", "2": "充电完成"},
-};
-function stateName(metric: string, value: string) {
-  return stateNames[metric]?.[String(Number(value))] ?? (stateNames[metric] ? `未知 (${value})` : value);
-}
+const number = (value: number | null) => value == null ? "—" : formatNumber(value);
 
 export function ExternalDeviceChart({series, range, connectPoints, onConnectPointsChange, onZoom, onInspect, events, onInspectEvent}: {
   series: AggregateSeries; range: TimeRange; onZoom: (range: TimeRange) => void;
@@ -45,9 +38,9 @@ export function ExternalDeviceChart({series, range, connectPoints, onConnectPoin
       axes: [{stroke: "#93a6bf", grid: {stroke: "#1b2b40"}, space: 110, size: 58,
         values: (_u, ticks) => ticks.map(t => {
           const date = new Date(t * 1000);
-          return date.toLocaleDateString("zh-CN", {timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit"})
-            + "\n" + date.toLocaleTimeString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false, hour: "2-digit", minute: "2-digit"});
-        })}, {stroke: "#93a6bf", grid: {stroke: "#1b2b40"}, size: stateNames[series.metric] ? 78 : 58,
+          return date.toLocaleDateString(uiLanguage, {timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit"})
+            + "\n" + date.toLocaleTimeString(uiLanguage, {timeZone: "Asia/Shanghai", hourCycle: "h23", hour: "2-digit", minute: "2-digit"});
+        })}, {stroke: "#93a6bf", grid: {stroke: "#1b2b40"}, size: stateNames[series.metric] ? (isEnglish ? 114 : 78) : 58,
         values: (_u, ticks) => ticks.map(value => stateNames[series.metric]
           ? (Number.isInteger(value) ? stateName(series.metric, String(value)) : "") : number(value))}],
       series: [{}, ...colors.flatMap(color => [
@@ -78,7 +71,7 @@ export function ExternalDeviceChart({series, range, connectPoints, onConnectPoin
       const button = document.createElement("button");
       button.className = `external-event-marker${bucket.synthetic ? " synthetic" : ""}`;
       button.textContent = bucket.count > 1 ? `△${bucket.count}` : "△";
-      button.title = `${beijingTime(bucket.start)} · ${bucket.synthetic ? "合成 · " : ""}${bucket.count} 条报警上报；点击查看`;
+      button.title = `${beijingTime(bucket.start)} · ${bucket.synthetic ? tr("合成 · ", "Synthetic · ") : ""}${countLabel(bucket.count, "条报警上报", "reported alarm")}; ${tr("点击查看", "Click for details")}`;
       button.setAttribute("aria-label", button.title);
       button.addEventListener("pointerdown", event => event.stopPropagation());
       button.addEventListener("mousedown", event => event.stopPropagation());
@@ -110,22 +103,22 @@ export function ExternalDeviceChart({series, range, connectPoints, onConnectPoin
     return () => {resize.disconnect(); plot.over.removeEventListener("pointerdown", press); plot.over.removeEventListener("click", click); plot.destroy();};
   }, [series, range.start, range.end, connectPoints, events]);
   return <div className="external-chart-wrap">
-    <div className="external-chart-note"><span>{series.metric === "events" ? "报警上报 · 点击标记查看详情" : <>{!connectPoints && series.method === "mean" ? "平均值" : aggregationLabel(series.method)} · 每 {durationLabel(series.interval_ms)} 聚合</>}</span>
+    <div className="external-chart-note"><span>{series.metric === "events" ? tr("报警上报 · 点击标记查看详情", "Reported alarms · Click a marker for details") : <>{!connectPoints && series.method === "mean" ? tr("平均值", "Mean") : aggregationLabel(series.method)} · {tr(`每 ${durationLabel(series.interval_ms)} 聚合`, `Aggregated every ${durationLabel(series.interval_ms)}`)}</>}</span>
       <div className="external-chart-controls">
-        <label className="external-connect-points" title="跨空白时段连接有效数据点，仅影响显示">
-          <input type="checkbox" checked={connectPoints} onChange={event => onConnectPointsChange(event.target.checked)} />连接数据点
+        <label className="external-connect-points" title={tr("跨空白时段连接有效数据点，仅影响显示", "Connect valid points across gaps; display only")}>
+          <input type="checkbox" checked={connectPoints} onChange={event => onConnectPointsChange(event.target.checked)} />{tr("连接数据点", "Connect points")}
         </label>
-        <span><i className="external-dot" />未标记合成 <i className="external-dot synthetic" />合成</span>
+        <span><i className="external-dot" />{tr("未标记合成", "Not marked synthetic")} <i className="external-dot synthetic" />{tr("合成", "Synthetic")}</span>
       </div></div>
-    <div ref={host} className="external-chart" aria-label={`${series.label} ${series.unit}`} />
+    <div ref={host} className="external-chart" aria-label={`${externalLabel(series, series.metric)} ${externalUnit(series)}`} />
     <div className="external-chart-readout" aria-live="off">{hover.length ? <>
       <span>{beijingTime(hover[0].start)} — {beijingTime(hover[0].end)}</span>
       {hover.map(p => <span key={String(p.synthetic)} className={p.synthetic ? "synthetic-text" : ""}>
-        {p.synthetic ? "合成 · " : ""}<strong>{series.method === "mode" ? stateName(series.metric, String(p.value)) : number(p.value)}</strong>
-        {series.method === "mode" ? " · " + Object.entries(p.states).map(([state, count]) => `${stateName(series.metric, state)} ${(count / p.count * 100).toFixed(0)}%`).join(" / ")
-          : ` · 均值 ${number(p.mean)} · 范围 ${number(p.min)}–${number(p.max)}`}
-        {` · ${p.count.toLocaleString()} 个样本`}{p.missing ? ` · ${p.missing} 个缺失值` : ""}
+        {p.synthetic ? tr("合成 · ", "Synthetic · ") : ""}<strong>{series.method === "mode" ? stateName(series.metric, String(p.value)) : number(p.value)}</strong>
+        {series.method === "mode" ? " · " + Object.entries(p.states).map(([state, count]) => `${stateName(series.metric, state)} ${formatNumber(count / p.count * 100, 0)}%`).join(" / ")
+          : tr(` · 均值 ${number(p.mean)} · 范围 ${number(p.min)}–${number(p.max)}`, ` · Mean ${number(p.mean)} · Range ${number(p.min)}–${number(p.max)}`)}
+        {` · ${countLabel(p.count, "个样本", "sample")}`}{p.missing ? ` · ${countLabel(p.missing, "个缺失值", "missing value")}` : ""}
       </span>)}
-    </> : <span>悬停查看统计 · 横向拖选放大 · 点击查看该时间段原始记录</span>}</div>
+    </> : <span>{tr("悬停查看统计 · 横向拖选放大 · 点击查看该时间段原始记录", "Hover for statistics · Drag horizontally to zoom · Click for original records")}</span>}</div>
   </div>;
 }

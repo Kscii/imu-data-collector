@@ -11,6 +11,7 @@ from collections import OrderedDict
 
 from imu_data_collector import external_device_aggregation as aggregation
 from imu_data_collector.external_device_domain import digest, json_bytes, metrics, numeric
+from imu_data_collector.external_device_labels import bilingual, summary_presentation
 
 VERSION = 1
 NEW_METRICS = {
@@ -192,7 +193,10 @@ def field_description(kind: str, message: str, path: str) -> dict:
         label, unit = known.get(key, (key, "未确认"))
     if kind == "mattress" and message == "SLEEP_REPORT":
         label = REPORT_LABELS.get(key, key)
-    return {"label": label, "unit": unit, "numeric": projected}
+    result = bilingual({"label": label, "unit": unit, "numeric": projected}, "label", "unit")
+    if label == key:
+        result["label_en"] = key
+    return result
 
 
 def field_signature(record: dict, kind: str, message: str) -> list:
@@ -453,7 +457,7 @@ def entries(
     more = len(rows) > limit
     rows = rows[:limit]
     for row in rows:
-        row["summary"] = json.loads(row["summary"])
+        row["summary"] = summary_presentation(json.loads(row["summary"]))
         if category == "reports":
             row["summary"].pop("fields", None)  # Large arrays belong to the detail response.
     return {

@@ -403,3 +403,89 @@ def test_mattress_warning_and_unknown_field_inventory(service):
     events = insights.entries(service.catalog, device["id"], "events", START, END, 10)
     assert events["total"] == 1
     assert events["items"][0]["summary"]["code"] == "99"
+
+
+def test_bilingual_catalog_covers_all_platform_labels_and_units():
+    import ast
+    import inspect
+    import re
+
+    from imu_data_collector import external_device_service
+    from imu_data_collector.external_device_labels import ENGLISH
+
+    # Adding a Chinese metric/report/field description requires an English counterpart.
+    definitions = [
+        str(external_device_service.METRIC_LABELS),
+        str(insights.NEW_METRICS),
+        str(insights.REPORT_LABELS),
+        inspect.getsource(insights.field_description),
+        inspect.getsource(insights.report_summary),
+        inspect.getsource(insights.index_record),
+    ]
+    for source in definitions:
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if re.search(r"[\u3400-\u9fff]", node.value):
+                    assert node.value in ENGLISH, node.value
+                    assert not re.search(r"[\u3400-\u9fff]", ENGLISH[node.value])
+
+
+def test_bilingual_responses_enrich_legacy_summaries_without_writes(service):
+    device = install_device(service)
+    archive(
+        service,
+        device,
+        [
+            record(
+                device,
+                1,
+                message="SLEEP_REPORT",
+                payload={
+                    "Onbed_valid": 1,
+                    "sleep_valid": 1,
+                    "sleep_time": "原始中文",
+                    "wake_time": "06:00",
+                    "sleep_duration": 123,
+                    "hrs": [60, None],
+                    "unknown_field": "未知原值",
+                    "心率": "原始键名",
+                },
+            ),
+            record(device, 2, message="SLEEP_REPORT", payload={"sleep_valid": 0}),
+            record(device, 3, message="WARNING", payload={"code": "DROP", "_synthetic": True}),
+            record(device, 4, received="2026-10-01T16:00:01.000Z"),
+        ],
+    )
+    tables = ("insight_reports", "insight_events", "insight_progress", "records", "coverage")
+    before = {table: service.catalog.rows(f"SELECT * FROM {table}") for table in tables}
+    assert all("label_en" not in row["summary"] for row in before["insight_reports"])
+    base = f"/api/v1/external-devices/devices/{device['id']}"
+    with client_for(service, admin=False) as client:
+        metadata = client.get(base + "/metrics").json()
+        heart = next(item for item in metadata["metrics"] if item["key"] == "HeartRate")
+        assert heart["label"] == "心率" and heart["label_en"] == "Heart rate"
+        assert heart["group_en"] == "Common metrics"
+        series = client.get(
+            base + "/series", params={"metric": "HeartRate", "start": START, "end": END}
+        ).json()
+        assert series["label_en"] == "Heart rate" and series["unit_en"] == "bpm"
+        page = client.get(base + "/reports").json()
+        incomplete = next(item for item in page["items"] if not item["valid"])
+        assert incomplete["summary"]["reason_en"] == "Validity flags are zero or missing"
+        rid = next(item["id"] for item in page["items"] if item["valid"])
+        detail = client.get(base + f"/reports/{rid}").json()
+        fields = {field["key"]: field for field in detail["summary"]["fields"]}
+        assert fields["sleep_time"]["value"] == "原始中文"
+        assert fields["sleep_time"]["label_en"] == "Sleep onset"
+        assert "unconfirmed" in fields["sleep_duration"]["unit_en"]
+        assert fields["unknown_field"]["label_en"] == "unknown_field"
+        assert fields["unknown_field"]["value"] == "未知原值"
+        assert fields["心率"]["label_en"] == "心率"
+        assert fields["hrs"]["value"] == [60, None]
+        events = client.get(base + "/events/records", params={"start": START, "end": END}).json()
+        assert events["items"][0]["summary"]["label_en"] == "Reported alarm"
+        assert "unconfirmed" in events["items"][0]["summary"]["note_en"]
+        assert events["items"][0]["synthetic"]
+        inventory = client.get(base + "/fields").json()["fields"]
+        assert all("label_en" in field and "unit_en" in field for field in inventory)
+    assert {table: service.catalog.rows(f"SELECT * FROM {table}") for table in tables} == before

@@ -34,6 +34,7 @@ from imu_data_collector.external_device_domain import (
     utc,
     validate_history,
 )
+from imu_data_collector.external_device_labels import bilingual
 from imu_data_collector.storage import ObjectStore
 
 
@@ -367,24 +368,31 @@ class ExternalDeviceService:
             "ready": self.catalog.get_meta("aggregation_version") == 1,
             "preparation": preparation,
             "metrics": [
-                {
-                    "key": row["metric"],
-                    "label": METRIC_LABELS.get(row["metric"], (row["metric"], "原值"))[0],
-                    "unit": METRIC_LABELS.get(row["metric"], (row["metric"], "原值"))[1],
-                    "method": aggregation.method(row["metric"]),
-                    "quick": row["metric"] in insights.QUICK_METRICS[kind],
-                    "group": insights.NEW_METRICS.get(
-                        row["metric"],
-                        (
-                            None,
-                            None,
-                            "常用" if row["metric"] in insights.QUICK_METRICS[kind] else "更多指标",
-                        ),
-                    )[2],
-                    "count": row["count"],
-                    "first_record": row["first_record"],
-                    "last_record": row["last_record"],
-                }
+                bilingual(
+                    {
+                        "key": row["metric"],
+                        "label": METRIC_LABELS.get(row["metric"], (row["metric"], "原值"))[0],
+                        "unit": METRIC_LABELS.get(row["metric"], (row["metric"], "原值"))[1],
+                        "method": aggregation.method(row["metric"]),
+                        "quick": row["metric"] in insights.QUICK_METRICS[kind],
+                        "group": insights.NEW_METRICS.get(
+                            row["metric"],
+                            (
+                                None,
+                                None,
+                                "常用"
+                                if row["metric"] in insights.QUICK_METRICS[kind]
+                                else "更多指标",
+                            ),
+                        )[2],
+                        "count": row["count"],
+                        "first_record": row["first_record"],
+                        "last_record": row["last_record"],
+                    },
+                    "label",
+                    "unit",
+                    "group",
+                )
                 for row in rows
                 if preparation["ready"] or row["metric"] not in insights.NEW_METRICS
             ],
@@ -395,7 +403,7 @@ class ExternalDeviceService:
     ) -> dict:
         result = aggregation.project(self.catalog, identifier, metric, start, end, budget)
         result["label"], result["unit"] = METRIC_LABELS.get(metric, (metric, "原值"))
-        return result
+        return bilingual(result, "label", "unit")
 
     def status(self) -> dict:
         states = self.catalog.rows(
