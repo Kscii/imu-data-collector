@@ -6,7 +6,7 @@ export const postureNames: Record<string, string> = {
 };
 export function supportPosture(code: string | null): string | null {
   if (code && code in postureNames) return code;
-  return code && ["walking", "running", "stair_up", "stair_down"].includes(code) ? "standing" : null;
+  return code && ["walking", "running", "stair_up", "stair_down", "bending"].includes(code) ? "standing" : null;
 }
 export type ReviewCommand = "toggle" | "split" | "merge" | "previous" | "next" | "approve";
 type KeyInput = {key: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean;

@@ -50,7 +50,7 @@ FALLS = frozenset((*PRIMARY[-5:], "fall"))
 PRODUCTION_RULES_VERSION = "2026-10-09.3"
 CURRENT_SCHEMA = "imu.temporal_annotation.v3"
 CURRENT_TAXONOMY_VERSION = "3.0.0"
-CURRENT_RULES_VERSION = "2026-10-09.5"
+CURRENT_RULES_VERSION = "2026-10-10.1"
 CURRENT_PRIMARY = (
     "standing",
     "sitting",
@@ -1183,7 +1183,7 @@ _CURRENT_DEFINITIONS = {
     ),
     "bending": (
         "弯腰",
-        "明显躯干前屈及回正，未转入坐、蹲、跪等另一主要支撑姿态。",
+        "站姿支撑下的明显躯干前屈、保持前屈及回正，包括站着俯身拾物；未形成坐、蹲、跪、卧或爬撑等其他主要支撑姿态。",
         "区分普通弯腰与下地、跌倒",
     ),
     "jumping": (
@@ -1222,7 +1222,7 @@ def current_activity_rules():
             "转换区间不直接相邻；有真实中间姿态就保留，无可辨认中间姿态则合并，不虚构短姿态。",
             "不同支撑姿态的30个有向组合均允许；相同端点需说明转移、往返或未完成尝试。",
             "转换允许直接衔接行走、被跌倒中断或被录制边界截断；未知端点不猜测。",
-            "转换端点自动取紧邻区间；行走、跑步、上下楼映射站姿，其余非支撑活动及片段边界保留未知。",
+            "转换端点自动取紧邻区间；行走、跑步、上下楼及弯腰映射站姿，其余非支撑活动及片段边界保留未知。",
             "跌倒优先于过程中的姿态，失衡恢复优先于补偿踏步。",
             "同类连续普通动作合并，独立跌倒不合并；保留区间语义及备注原时间锚点。",
             "行走间不超过2秒的明确站立暂停仅在活动汇总中合并，保留原细段及净步行时长。",
@@ -1255,7 +1255,7 @@ def current_activity_rules():
 def support_posture(code):
     if code in SUPPORT_POSTURES:
         return code
-    if code in ("walking", "running", "stair_up", "stair_down"):
+    if code in ("walking", "running", "stair_up", "stair_down", "bending"):
         return "standing"
     return None
 

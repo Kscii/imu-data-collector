@@ -178,9 +178,11 @@ def transition_body(service, mid, variant):
 
 
 @pytest.mark.parametrize("decision", [None, "pass"])
-def test_server_recomputes_client_endpoints_for_draft_and_approval(tmp_path, decision):
+@pytest.mark.parametrize("source", ["walking", "bending"])
+def test_server_recomputes_client_endpoints_for_draft_and_approval(tmp_path, decision, source):
     _, _, service, mid, variant = seed(tmp_path)
     body = transition_body(service, mid, variant)
+    body["document"]["segments"][0]["primary_code"] = source
     frozen = deepcopy(body)
     c = variant["candidate"]
     result = service.edit(
@@ -192,22 +194,25 @@ def test_server_recomputes_client_endpoints_for_draft_and_approval(tmp_path, dec
         "to_posture": "kneeling",
     }
     assert saved["segments"][1]["semantic_text"] == "跪下"
+    assert saved["segments"][0]["primary_code"] == source
     assert body == frozen
 
 
-def test_old_endpoint_review_is_immutable_and_requires_actual_reapproval(tmp_path):
+@pytest.mark.parametrize("source", ["walking", "bending"])
+def test_old_endpoint_review_is_immutable_and_requires_actual_reapproval(tmp_path, source):
     _, _, service, mid, variant = seed(tmp_path)
     body = transition_body(service, mid, variant)
+    body["document"]["segments"][0]["primary_code"] = source
     c = variant["candidate"]
     accepted = service.edit(
         mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"
     )
     historical = service.resolve(accepted["review"])
     historical["document"]["segments"][1]["transition"] = {
-        "from_posture": "lying",
-        "to_posture": "sitting",
+        "from_posture": None,
+        "to_posture": "kneeling",
     }
-    historical["activity_rules"]["version"] = "2026-10-09.4"
+    historical["activity_rules"]["version"] = "2026-10-09.5"
     pointer = service.reference("reviews", historical)
     state, generation = service.state(mid)
     state["accepted"] = pointer
@@ -229,7 +234,7 @@ def test_old_endpoint_review_is_immutable_and_requires_actual_reapproval(tmp_pat
     assert service.resolve(pointer) == frozen
 
 
-@pytest.mark.parametrize("version", [None, "2026-10-09.1", "2026-10-09.4"])
+@pytest.mark.parametrize("version", [None, "2026-10-09.1", "2026-10-09.4", "2026-10-09.5"])
 def test_outdated_rule_editor_cannot_create_review(tmp_path, version):
     _, _, service, mid, variant = seed(tmp_path)
     body = edit_body(service, mid, variant)
