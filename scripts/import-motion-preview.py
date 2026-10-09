@@ -1,6 +1,7 @@
 """Import a frozen development comparison without model activation or review writes."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -18,6 +19,8 @@ def main():
     parser.add_argument("--diagnostics", type=Path, required=True)
     parser.add_argument("--freeze", type=Path, required=True)
     parser.add_argument("--preview-id", required=True)
+    parser.add_argument("--candidate-bundle", type=Path, required=True)
+    parser.add_argument("--baseline-bundle", type=Path, required=True)
     destination = parser.add_mutually_exclusive_group(required=True)
     destination.add_argument("--local-store", type=Path)
     destination.add_argument("--bucket")
@@ -31,6 +34,20 @@ def main():
     diagnostics = json.loads(args.diagnostics.read_text())
     freeze = json.loads(args.freeze.read_text())
     predictions = {r["candidate_id"]: r["models"] for r in diagnostics["per_clip"]}
+
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    hashes = {
+        f"{role}_{kind}_sha256": digest(bundle / filename)
+        for role, bundle in (
+            ("candidate", args.candidate_bundle),
+            ("baseline", args.baseline_bundle),
+        )
+        for kind, filename in (("model", "model.onnx"), ("metadata", "metadata.json"))
+    }
+    if any(hashes[k] != freeze[k] for k in ("baseline_model_sha256", "baseline_metadata_sha256")):
+        raise ValueError("Preview baseline differs from comparison freeze")
     records = []
     for row in feedback["records"]:
         entry, review = row["entry"], row["review"]
@@ -57,15 +74,7 @@ def main():
         "preview_id": args.preview_id,
         "title": "14 条重标后的候选 C 对照",
         "models": {"baseline": "skeleton-tcn-v1", "candidate": "retrained-c-20261009"},
-        "model_hashes": {
-            k: freeze[k]
-            for k in (
-                "baseline_model_sha256",
-                "baseline_metadata_sha256",
-                "candidate_model_sha256",
-                "candidate_metadata_sha256",
-            )
-        },
+        "model_hashes": hashes,
         "activity_rules_version": feedback["activity_rules"]["version"],
         "created_at_utc": freeze["created_at_utc"],
         "records": records,
@@ -95,8 +104,39 @@ def main():
             )
             if variant is None:
                 raise ValueError("Preview requires published variants")
+            import tempfile
+
+            import numpy as np
+
+            from imu_data_collector.motion_annotations import primary_prediction
+            from imu_data_collector.motion_label_runtime import infer_bundle
+            from imu_data_collector.motion_label_worker import checked_download
             from imu_data_collector.synthetic_temporal_contract import validate_document
 
+            feature = service.feature(record["motion_sha256"])
+            with tempfile.TemporaryDirectory() as temporary:
+                path = checked_download(service, feature, Path(temporary) / "features.npz")
+                with np.load(path, allow_pickle=False) as saved:
+                    joints, valid = saved["joints"], saved["valid"]
+                for role, bundle in (
+                    ("candidate", args.candidate_bundle),
+                    ("baseline", args.baseline_bundle),
+                ):
+                    metadata = json.loads((bundle / "metadata.json").read_text())
+                    inferred = infer_bundle(bundle, joints, valid)
+                    expected = record["documents"][role]
+                    predicted = primary_prediction(
+                        feature["template"],
+                        metadata["labels"],
+                        inferred["class_indices"],
+                        expected["producer"]["model_id"],
+                        impacts=inferred.get("impacts"),
+                    )
+                    actual = project_motion(predicted, variant["candidate"], variant["clock"])
+                    if document_sha256(actual) != document_sha256(expected):
+                        raise ValueError(
+                            "Preview prediction does not match the supplied " + role + " bundle"
+                        )
             for document in record["documents"].values():
                 validate_document(document, expected_candidate=variant["candidate"])
                 if document["clock"] != variant["clock"]:

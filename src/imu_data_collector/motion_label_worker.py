@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import signal
 import time
 from pathlib import Path
 
@@ -13,12 +14,21 @@ import numpy as np
 
 from .motion_annotations import primary_prediction as proposal
 from .motion_annotations import require
+from .motion_label_batch import batch_policy
 from .motion_label_models import active_model, validate_model
-from .motion_label_runtime import cpu_session, predict_scores, reject
+from .motion_label_runtime import (
+    SCORE_RUNTIME_VERSION,
+    SEQUENCE_RUNTIME_VERSION,
+    cpu_session,
+    impact_candidates,
+    predict_outputs,
+    reject,
+    sequence_decode,
+)
 from .motion_label_service import MotionLabelService, now
 from .storage import ObjectConflictError, create_object_store
 from .synthetic_motion import SyntheticReviewService
-from .synthetic_temporal_contract import PRIMARY, document_sha256
+from .synthetic_temporal_contract import PRIMARY, PRODUCTION_PRIMARY, document_sha256
 
 
 def sha(path):
@@ -71,6 +81,7 @@ class MotionLabelWorker:
         if not release:
             return 0
         validate_model(self.service, release["model"])
+        held_out = self.service.holdout_groups()
         with self.service.db() as db:
             release_id = document_sha256(release)
             position = db.execute(
@@ -84,6 +95,8 @@ class MotionLabelWorker:
             count = 0
             for row in features:
                 feature = json.loads(row["feature"])
+                if feature.get("group_key") in held_out:
+                    continue
                 if feature["binding"]["feature_version"] != release["model"]["feature_version"]:
                     continue
                 key = document_sha256({"release": release, "feature": feature["feature_id"]})
@@ -112,7 +125,7 @@ class MotionLabelWorker:
             ).read_text()
         )
         require(
-            len(metadata["labels"]) == 24 and set(metadata["labels"]) == set(PRIMARY),
+            tuple(metadata["labels"]) in (PRIMARY, PRODUCTION_PRIMARY),
             "Model labels differ",
         )
         with np.load(data, allow_pickle=False) as saved:
@@ -126,6 +139,7 @@ class MotionLabelWorker:
                 "features": feature["sha256"],
                 "model": model["onnx"]["sha256"],
                 "labels": metadata["labels"],
+                "score_runtime": SCORE_RUNTIME_VERSION,
             }
         )
         score_key = self.service.root + f"/score-manifests/{score_id}.json"
@@ -134,16 +148,12 @@ class MotionLabelWorker:
         if cached:
             checked_download(self.service, cached, score_path)
             with np.load(score_path, allow_pickle=False) as saved:
-                scores = saved["scores"]
+                output = {k: saved[k] for k in saved.files}
         else:
             session = cpu_session(str(onnx))
-            scores = predict_scores(
-                lambda x, mask: session.run(None, {"joints_world_m": x, "valid": mask})[0],
-                joints,
-                valid,
-            )
+            output = predict_outputs(session, joints, valid, metadata)
             score_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(score_path, scores=scores)
+            np.savez_compressed(score_path, **output)
             score_object = self.service.root + f"/scores/{score_id}.npz"
             self.service.store.put_file(
                 score_path,
@@ -159,18 +169,113 @@ class MotionLabelWorker:
                     "byte_length": score_path.stat().st_size,
                 },
             )
+        scores = output["scores"]
         require(
-            scores.shape == (feature["sample_count"], 24) and np.isfinite(scores).all(),
+            scores.shape == (feature["sample_count"], len(metadata["labels"]))
+            and np.isfinite(scores).all(),
             "Invalid cached scores",
         )
-        indices = reject(scores, joints, valid, metadata)
-        doc = proposal(feature["template"], metadata["labels"], indices, model["model_id"])
+        quality = {}
+        if metadata.get("decoder", {}).get("kind") == SEQUENCE_RUNTIME_VERSION:
+            decoded_id = document_sha256(
+                {
+                    "scores": score_id,
+                    "metadata": model["metadata"]["sha256"],
+                    "runtime_sha256": sha(Path(__file__).with_name("motion_label_runtime.py")),
+                }
+            )
+            decoded_key = self.service.root + f"/sequence-manifests/{decoded_id}.json"
+            saved, _ = self.service.optional(decoded_key)
+            decoded_path = self.cache / "sequences" / (decoded_id + ".npz")
+            if saved:
+                checked_download(self.service, saved, decoded_path)
+                with np.load(decoded_path, allow_pickle=False) as archive:
+                    decoded = {key: archive[key] for key in archive.files}
+            else:
+                decoded = sequence_decode(
+                    scores,
+                    valid,
+                    metadata,
+                    outside_scores=output.get("outside_scores")
+                    if metadata.get("outside_supported")
+                    else None,
+                )
+                decoded_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(decoded_path, **decoded)
+                object_key = self.service.root + f"/sequences/{decoded_id}.npz"
+                self.service.store.put_file(
+                    decoded_path,
+                    object_key,
+                    content_type="application/octet-stream",
+                    metadata={"sha256": sha(decoded_path)},
+                )
+                self.service.immutable(
+                    decoded_key,
+                    {
+                        "object_key": object_key,
+                        "sha256": sha(decoded_path),
+                        "byte_length": decoded_path.stat().st_size,
+                        "raw_scores_key": score_key,
+                        "metadata_sha256": model["metadata"]["sha256"],
+                    },
+                )
+            indices = decoded["class_indices"]
+            impact_scores = (
+                output.get("impact_scores") if metadata.get("impact_supported") else None
+            )
+            impacts = impact_candidates(
+                indices, impact_scores, metadata["labels"], metadata["decoder"]["impact_threshold"]
+            )
+            high = decoded["high_confidence_indices"]
+            high_impacts = impact_candidates(
+                high, impact_scores, metadata["labels"], metadata["decoder"]["impact_threshold"]
+            )
+            high_doc = proposal(
+                feature["template"],
+                metadata["labels"],
+                high,
+                model["model_id"],
+                impacts=high_impacts,
+            )
+            doc = proposal(
+                feature["template"], metadata["labels"], indices, model["model_id"], impacts=impacts
+            )
+            intervals = []
+            for s in doc["segments"]:
+                a, b = s["start_ns"] // 40_000_000, s["stop_ns"] // 40_000_000
+                fraction = float((high[a:b] >= 0).mean())
+                intervals.append(
+                    {
+                        "start_ns": s["start_ns"],
+                        "stop_ns": s["stop_ns"],
+                        "primary_code": s["primary_code"],
+                        "score": float(decoded["reliability"][a:b].mean()),
+                        "high_confidence_fraction": fraction,
+                        "boundary_reliable": False,
+                        "reason": "boundary_not_validated"
+                        if fraction == 1
+                        else "low_confidence_candidate",
+                    }
+                )
+            quality = {
+                "schema": "imu.motion_prediction_quality.v2",
+                "intervals": intervals,
+                "calibration": metadata["decoder"].get("calibration"),
+                "high_confidence_document": high_doc,
+                "decoder_sha256": document_sha256(metadata["decoder"]),
+                "runtime_version": SEQUENCE_RUNTIME_VERSION,
+                "sequence_scores_key": decoded_key,
+            }
+        else:
+            indices = reject(scores, joints, valid, metadata)
+            doc = proposal(feature["template"], metadata["labels"], indices, model["model_id"])
         return {
             "schema": "imu.motion_prediction.v1",
             "document": doc,
             "model": model,
             "feature_id": feature["feature_id"],
             "scores_key": score_key,
+            **({"quality": quality} if quality else {}),
         }
 
     def publish(self, mid, prediction, release):
@@ -211,12 +316,20 @@ class MotionLabelWorker:
                 continue
         raise ObjectConflictError("Motion review changed during prediction publication")
 
-    def step(self):
+    def step(self, *, policy=None):
+        if policy and policy.get("deadline_unix", float("inf")) <= time.time():
+            return None
+        clause, args = "", []
+        if policy and policy.get("motion_sha256"):
+            allowed = policy["motion_sha256"]
+            clause = " AND motion IN (" + ",".join("?" for _ in allowed) + ")"
+            args.extend(allowed)
         with self.service.db() as db:
             row = db.execute(
                 "SELECT * FROM inference_jobs WHERE state='queued' AND not_before<=? "
-                "ORDER BY created DESC LIMIT 1",
-                (time.time(),),
+                + clause
+                + " ORDER BY created DESC LIMIT 1",
+                (time.time(), *args),
             ).fetchone()
             if row is None:
                 return None
@@ -230,6 +343,8 @@ class MotionLabelWorker:
             release, feature = json.loads(row["release_json"]), json.loads(row["feature_json"])
             if active_model(self.service) != release:
                 state = "superseded"
+            elif feature.get("group_key") in self.service.holdout_groups():
+                state = "protected"
             else:
                 prediction = self.infer(feature, release["model"])
                 state = self.publish(row["motion"], prediction, release)
@@ -278,11 +393,33 @@ def main():
         worker.recover()
         scanned = 0.0
         while True:
+            release = active_model(service)
+            try:
+                policy = batch_policy(service, release)
+            except ValueError as exc:
+                policy = None
+                print(
+                    json.dumps({"state": "paused", "reason": str(exc)}, ensure_ascii=False),
+                    flush=True,
+                )
+            # SIGALRM ends this worker even inside native inference or network I/O.
+            # Durable running jobs return to queued on the next authorized run.
+            deadline = policy.get("deadline_unix") if policy else None
+            signal.setitimer(
+                signal.ITIMER_REAL, max(0.001, deadline - time.time()) if deadline else 0
+            )
             if time.monotonic() - scanned >= 10:
+                # Data discovery remains available while inference is paused.
                 service.refresh(force=True)
-                worker.enqueue()
+                if policy:
+                    worker.enqueue()
                 scanned = time.monotonic()
-            result = worker.step()
+            if not policy:
+                if args.once:
+                    break
+                time.sleep(5)
+                continue
+            result = worker.step(policy=policy)
             if result:
                 print(json.dumps(result, ensure_ascii=False), flush=True)
             if args.once:

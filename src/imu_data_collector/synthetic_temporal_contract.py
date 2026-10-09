@@ -44,7 +44,18 @@ PRIMARY = (
     "right_lateral_fall",
     "fall_unspecified",
 )
-FALLS = frozenset(PRIMARY[-5:])
+PRODUCTION_TAXONOMY_VERSION = "2.0.0"
+PRODUCTION_PRIMARY = PRIMARY[:-5] + ("fall",)
+FALLS = frozenset((*PRIMARY[-5:], "fall"))
+PRODUCTION_RULES_VERSION = "2026-10-09.3"
+
+
+def primary_codes(version=TAXONOMY_VERSION):
+    if version == TAXONOMY_VERSION:
+        return PRIMARY
+    if version == PRODUCTION_TAXONOMY_VERSION:
+        return PRODUCTION_PRIMARY
+    raise ValueError(f"Unsupported taxonomy version: {version}")
 # Operational definitions are versioned separately from the unchanged 24-code
 # wire taxonomy. Existing accepted documents retain their original interpretation.
 ACTIVITY_RULES_VERSION = "2026-10-09.2"
@@ -222,23 +233,33 @@ for _fall_code, _fall_name in (
     )
 
 
+_ACTIVITY_RULES["fall"] = (
+    "跌倒",
+    *_ACTIVITY_RULES["fall_unspecified"][1:5],
+    "新标注不区分方向；来源方向保留在历史证据中，不推断医学原因。",
+)
+
+
 def imu_training_code(code):
     """The fixed 24 -> 20 projection; unknown is masked, never non-fall."""
     if code is None:
         return None
-    if code not in PRIMARY:
+    if code not in PRIMARY and code != "fall":
         raise ValueError(f"Unknown primary activity: {code}")
     return "fall" if code in FALLS else code
 
 
-def activity_rules():
+def activity_rules(version=TAXONOMY_VERSION):
     """One portable source for documentation, the catalog and training maps."""
+    codes = primary_codes(version)
     fields = ("name_zh", "definition", "includes", "excludes", "boundaries", "example")
     return {
         "id": "primary-activity-rules",
-        "version": ACTIVITY_RULES_VERSION,
+        "version": (
+            ACTIVITY_RULES_VERSION if version == TAXONOMY_VERSION else PRODUCTION_RULES_VERSION
+        ),
         "taxonomy_id": TAXONOMY_ID,
-        "taxonomy_version": TAXONOMY_VERSION,
+        "taxonomy_version": version,
         "hdf5_version": "3.3.0",
         "principles": [
             "每一时刻仅一个主活动；辅助标签不在本轮范围。",
@@ -259,13 +280,13 @@ def activity_rules():
                 "is_fall": code in FALLS,
                 **dict(zip(fields, _ACTIVITY_RULES[code], strict=True)),
             }
-            for code in PRIMARY
+            for code in codes
         ],
         "training_profile": {
             "id": IMU_TRAINING_PROFILE,
             "version": "1.0.0",
             "codes": [c for c in PRIMARY if c not in FALLS] + ["fall"],
-            "mapping": {c: imu_training_code(c) for c in PRIMARY},
+            "mapping": {c: imu_training_code(c) for c in codes},
             "real_source_mapping": {"syncope_fall": "fall"},
             "unknown_policy": "mask",
         },
@@ -285,22 +306,23 @@ def activity_rules():
     }
 
 
-def activity_rules_evidence():
-    rules = activity_rules()
+def activity_rules_evidence(version=TAXONOMY_VERSION):
+    rules = activity_rules(version)
     return {
         "kind": "activity-rules",
-        "version": ACTIVITY_RULES_VERSION,
+        "version": rules["version"],
         "sha256": document_sha256(rules),
         "rules": rules,
     }
 
 
 def render_activity_rules_markdown():
-    rules = activity_rules()
+    rules = activity_rules(PRODUCTION_TAXONOMY_VERSION)
     lines = [
         "# 主活动统一分类与切分规范",
         "",
-        f"规则版本：`{ACTIVITY_RULES_VERSION}`。24 类标注，默认 "
+        f"规则版本：`{PRODUCTION_RULES_VERSION}`。新标注为 motion-temporal 2.0.0 / 20 类，"
+        "兼容历史 24 类；默认 "
         f"`{IMU_TRAINING_PROFILE}` 为 20 类。HDF5 保持正式 3.3。",
         "",
         "本文件由 portable temporal contract 中的 activity_rules() 生成；"
@@ -326,13 +348,14 @@ def render_activity_rules_markdown():
     lines += [
         "## 训练映射与来源兼容",
         "",
-        "5 个跌倒方向代码统一映射为训练类别 `fall`；其余 19 类保持原代码。"
+        "历史 `forward_fall`、`backward_fall`、`left_lateral_fall`、`right_lateral_fall`、"
+        "`fall_unspecified` 派生投影为 `fall`；其余 19 类保持原代码。"
         "未知范围屏蔽，不映射成非跌倒。",
         "真实数据保留原代码、名称、活动状态、版本及历史标注；公共数据保留原标签，"
         "只有明确语义等价时才映射。来源粒度不足时不得补猜方向或姿态转换。",
         "真实来源已有的 `syncope_fall` 仅在明确声明真实来源时映射为训练 `fall`，"
         "不加入合成主活动词表，也不从动捕推断晕厥原因。",
-        "规则版本独立于既有 motion-temporal 1.0.0 代码表；"
+        "新生产使用 motion-temporal 2.0.0；历史 1.0.0 文档保留原代码与含义；"
         "新的修订在 source_evidence 中绑定完整规则及哈希，既有接受文档不回写。",
         "2026-10-09.2 起立包含坐、蹲、直跪／半跪到站立；起身限卧姿／爬撑到站立。"
         "旧版本起立／起身须重新核对，不能仅按代码直接改释；计算专项椅子起立指标仍须筛选椅坐起点。",
@@ -404,13 +427,13 @@ def _require(condition, message):
         raise ValueError(message)
 
 
-def taxonomy():
+def taxonomy(version=TAXONOMY_VERSION):
     return {
         "id": TAXONOMY_ID,
-        "version": TAXONOMY_VERSION,
+        "version": version,
         "primary": [
             {"code": code, "name": code.replace("_", " "), "is_fall": code in FALLS}
-            for code in PRIMARY
+            for code in primary_codes(version)
         ],
         "auxiliary": [
             {"code": code, "name": code.replace("_", " "), "priority": i}
@@ -663,7 +686,9 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
     )
     if expected_count is not None:
         _require(count == expected_count, "Temporal annotation sample count differs")
-    _require(document["taxonomy"] == taxonomy(), "Unfrozen or unknown temporal taxonomy")
+    expected_taxonomy = taxonomy(document["taxonomy"]["version"])
+    _require(document["taxonomy"] == expected_taxonomy, "Unfrozen or unknown temporal taxonomy")
+    codes = primary_codes(document["taxonomy"]["version"])
     _require(document["auxiliary_mode"] in ("temporal", "segment_summary"), "Auxiliary mode")
     _require(
         isinstance(document["producer"], dict)
@@ -755,7 +780,7 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
         resolution, code = segment["resolution"], segment["primary_code"]
         _require(resolution in RESOLUTIONS, "Unknown resolution")
         if resolution == "identified":
-            _require(code in PRIMARY and segment["reason"] is None, "Unresolved primary code")
+            _require(code in codes and segment["reason"] is None, "Unresolved primary code")
         else:
             _require(
                 code is None and isinstance(segment["reason"], str) and segment["reason"].strip(),
@@ -995,7 +1020,7 @@ def formal_labels(document):
         {
             **row,
             "taxonomy_id": TAXONOMY_ID,
-            "taxonomy_version": TAXONOMY_VERSION,
+            "taxonomy_version": document["taxonomy"]["version"],
             "origin": "temporal-review",
             "verification": "human",
         }

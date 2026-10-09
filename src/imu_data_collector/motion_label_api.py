@@ -2,11 +2,16 @@
 
 from fastapi import HTTPException, Request
 
+from .motion_label_batch import configure_batch
 from .motion_label_models import active_model, list_models, promote_model
 from .motion_label_previews import MotionLabelPreviews
 from .motion_label_service import MotionLabelService
 from .storage import ObjectConflictError
-from .synthetic_temporal_contract import document_sha256
+from .synthetic_temporal_contract import (
+    PRODUCTION_TAXONOMY_VERSION,
+    activity_rules,
+    document_sha256,
+)
 
 
 def register_motion_label_routes(app, source, current_actor):
@@ -31,6 +36,11 @@ def register_motion_label_routes(app, source, current_actor):
         return actor
 
     previews = MotionLabelPreviews(service)
+
+    @app.get(root + "/activity-rules")
+    def production_activity_rules(request: Request):
+        current_actor(request)
+        return activity_rules(PRODUCTION_TAXONOMY_VERSION)
 
     @app.get(root + "/previews")
     def preview_list(request: Request):
@@ -90,8 +100,11 @@ def register_motion_label_routes(app, source, current_actor):
                 if exists
                 else {"completed": 0, "seconds": 0, "mean_seconds": 0}
             )
+        control = service.optional(service.root + "/batch-control.json")[0]
         return {
             "models": invoke(list_models, service),
+            "batch_control": control,
+            "batch_control_sha256": document_sha256(control) if control else None,
             "active": active,
             "active_sha256": document_sha256(active) if active else None,
             "jobs": jobs,
@@ -141,6 +154,17 @@ def register_motion_label_routes(app, source, current_actor):
         actor = admin(request)
         return invoke(
             promote_model, service, model_id, actor.unikey, body.get("expected_active_sha256")
+        )
+
+    @app.post(root + "/batch")
+    def update_batch(body: dict, request: Request):
+        actor = admin(request)
+        return invoke(
+            configure_batch,
+            service,
+            body["control"],
+            body.get("expected_control_sha256"),
+            actor.unikey,
         )
 
     @app.get(root + "/configurations")

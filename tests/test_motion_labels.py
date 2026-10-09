@@ -20,10 +20,13 @@ from imu_data_collector.motion_label_worker import MotionLabelWorker
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 from imu_data_collector.synthetic_motion import SyntheticReviewService
 from imu_data_collector.synthetic_temporal_contract import (
-    ACTIVITY_RULES_VERSION,
     PERIOD_NS,
+    PRODUCTION_TAXONOMY_VERSION,
     activity_rules_evidence,
     document_sha256,
+)
+from imu_data_collector.synthetic_temporal_contract import (
+    PRODUCTION_RULES_VERSION as ACTIVITY_RULES_VERSION,
 )
 
 
@@ -128,9 +131,9 @@ def test_whole_approval_unknown_mask_and_snapshot_frozen_inheritance(tmp_path):
     revision = store.read_json(request["entries"][0]["review_key"])[0]
     doc = revision["temporal_annotation"]
     validate_inheritance(doc, "human-test")
-    assert activity_rules_evidence() in doc["source_evidence"]
+    assert activity_rules_evidence(PRODUCTION_TAXONOMY_VERSION) in doc["source_evidence"]
     review = service.resolve(result["review"])
-    assert review["activity_rules"] == activity_rules_evidence()
+    assert review["activity_rules"] == activity_rules_evidence(PRODUCTION_TAXONOMY_VERSION)
     assert review["activity_rules_range"] == {"start_ns": 0, "stop_ns": 4_000_000_000}
     assert doc["segments"][1]["primary_code"] is None
     assert doc["segments"][1]["semantic_text"] == "难以归类的动作"
@@ -563,10 +566,33 @@ def test_model_bootstrap_cannot_bypass_gate_and_baseline_can_rollback(tmp_path):
         release_kind="validated-candidate",
         validation={
             "runtime_sha256": hashlib.sha256(Path(runtime.__file__).read_bytes()).hexdigest(),
+            "schema": "imu.motion_model_validation.v2",
+            "group_disjoint": True,
             "reference_completed": 20,
             "frozen_before_validation": True,
-            "baseline": metric,
-            "candidate": {**metric, "known_reference_coverage": 0.6},
+            "baseline": {**metric, "out_of_vocabulary_identified": 0},
+            "candidate": {
+                **metric,
+                "known_reference_coverage": 0.6,
+                "ordinary_precision": 0.96,
+                "ordinary_assessed_seconds": 10,
+                "out_of_vocabulary_identified": 0,
+                "per_class": {"standing": {}},
+                "full_candidate": {"coverage": 1},
+                "fall": {
+                    "reference_events": 20,
+                    "source_groups": 5,
+                    "hard_negative_intervals": 40,
+                    "event_precision": 0.95,
+                    "event_recall": 0.95,
+                    "onset_p90_s": 0.2,
+                    "stop_p90_s": 0.3,
+                    "impact_p90_s": 0.1,
+                    "missing_impacts": 0,
+                    "false_events": 1,
+                    "negative_hours": 0.1,
+                },
+            },
             "out_of_vocabulary_regression": False,
             "baseline_model_sha256": baseline["onnx"]["sha256"],
             "baseline_metadata_sha256": baseline["metadata"]["sha256"],

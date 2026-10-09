@@ -9,6 +9,195 @@ from pathlib import Path
 
 import numpy as np
 
+SCORE_RUNTIME_VERSION = "body22-overlap-v1"
+SEQUENCE_RUNTIME_VERSION = "offline-hmm-v1"
+
+
+def default_sequence_decoder(labels):
+    """Finite soft priors, including direct transitions and a uniform initial state."""
+    k = len(labels)
+    matrix = np.ones((k, k), dtype=np.float64)
+    relationships = {
+        "sit_down": ("sitting", "stand_up"),
+        "stand_up": ("standing", "walking", "sit_down"),
+        "get_up": ("standing", "walking"),
+        "lie_down": ("lying", "get_up"),
+        "squatting_down": ("squatting", "stand_up"),
+        "sitting": ("stand_up", "lie_down"),
+        "lying": ("get_up",),
+        "squatting": ("stand_up",),
+        "kneeling": ("stand_up",),
+        "crawling": ("get_up",),
+    }
+    transitions = {"sit_down", "stand_up", "get_up", "lie_down", "squatting_down", "fall"}
+    for i, code in enumerate(labels):
+        for following in relationships.get(code, ()):
+            if following in labels:
+                matrix[i, labels.index(following)] = 3
+        persistence = 0.90 if code in transitions else 0.97
+        matrix[i, i] = 0
+        matrix[i] *= (1 - persistence) / matrix[i].sum()
+        matrix[i, i] = persistence
+    return {
+        "kind": SEQUENCE_RUNTIME_VERSION,
+        "transition": matrix.tolist(),
+        "transition_weight": 0.35,
+        "temperature": 1.0,
+        "outside_threshold": 0.5,
+        "impact_threshold": 0.5,
+        "calibration": {"status": "unvalidated", "high_thresholds": {}},
+    }
+
+
+def _logsumexp(values, axis):
+    maximum = values.max(axis=axis, keepdims=True)
+    return np.squeeze(
+        maximum + np.log(np.exp(values - maximum).sum(axis=axis, keepdims=True)), axis
+    )
+
+
+def sequence_decode(scores, valid, metadata, *, outside_scores=None):
+    """Viterbi + forward/backward per continuous valid run; no fabricated gap labels.
+
+    Posterior scores alone are not correctness probabilities. High-confidence
+    output requires a separately calibrated local AND contextual threshold.
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    valid = np.asarray(valid, bool).copy()
+    cfg, labels = metadata["decoder"], metadata["labels"]
+    k = len(labels)
+    matrix = np.asarray(cfg["transition"], dtype=np.float64)
+    temperature, weight = float(cfg["temperature"]), float(cfg["transition_weight"])
+    if (
+        cfg["kind"] != SEQUENCE_RUNTIME_VERSION
+        or scores.shape != (len(valid), k)
+        or matrix.shape != (k, k)
+        or not np.isfinite(matrix).all()
+        or (matrix <= 0).any()
+        or not np.allclose(matrix.sum(1), 1)
+        or not np.isfinite(scores).all()
+        or (scores < 0).any()
+        or not np.isfinite([temperature, weight]).all()
+        or temperature <= 0
+        or weight < 0
+    ):
+        raise ValueError("Invalid sequence decoder inputs")
+    allowed = np.isin(np.arange(k), metadata["supported_indices"])
+    if not allowed.any():
+        raise ValueError("No supported classes")
+    thresholds = cfg.get("calibration", {}).get("high_thresholds", {})
+    if not isinstance(thresholds, dict) or any(
+        code not in labels
+        or type(value) not in (int, float)
+        or not np.isfinite(value)
+        or not 0 < value <= 1
+        for code, value in thresholds.items()
+    ):
+        raise ValueError("Invalid calibrated thresholds")
+    if any(
+        type(cfg.get(name)) not in (int, float)
+        or not np.isfinite(cfg[name])
+        or not 0 < cfg[name] <= 1
+        for name in ("outside_threshold", "impact_threshold")
+    ):
+        raise ValueError("Invalid event thresholds")
+    valid &= scores.sum(1) > 0
+    if outside_scores is not None:
+        outside = np.asarray(outside_scores, dtype=np.float64)
+        if (
+            outside.shape != valid.shape
+            or not np.isfinite(outside).all()
+            or ((outside < 0) | (outside > 1)).any()
+        ):
+            raise ValueError("Invalid outside scores")
+        valid &= outside < cfg["outside_threshold"]
+    emission = np.log(np.maximum(scores, 1e-30)) / temperature
+    emission[:, ~allowed] = -1e12
+    emission -= _logsumexp(emission, axis=1)[:, None]
+    local = np.exp(emission)
+    transition = weight * np.log(matrix)
+    path = np.full(len(valid), -1, dtype=np.int64)
+    posterior = np.zeros_like(scores)
+    edges = np.flatnonzero(np.diff(np.r_[False, valid, False]))
+    for start, stop in zip(edges[::2], edges[1::2], strict=True):
+        n = stop - start
+        back = np.zeros((n, k), dtype=np.int32)
+        alpha = np.empty((n, k), dtype=np.float64)
+        delta = emission[start].copy()
+        alpha[0] = delta - _logsumexp(delta, axis=0)
+        for t in range(1, n):
+            choices = delta[:, None] + transition
+            back[t] = choices.argmax(axis=0)
+            delta = choices.max(axis=0) + emission[start + t]
+            alpha[t] = _logsumexp(alpha[t - 1, :, None] + transition, axis=0) + emission[start + t]
+            alpha[t] -= _logsumexp(alpha[t], axis=0)
+        state = int(delta.argmax())
+        beta = np.zeros(k)
+        for t in range(n - 1, -1, -1):
+            path[start + t] = state
+            p = alpha[t] + beta
+            posterior[start + t] = np.exp(p - _logsumexp(p, axis=0))
+            state = int(back[t, state])
+            beta = _logsumexp(transition + emission[start + t][None, :] + beta[None, :], axis=1)
+            beta -= _logsumexp(beta, axis=0)
+    indices = np.maximum(path, 0)
+    rows = np.arange(len(valid))
+    contextual = posterior[rows, indices]
+    evidence = local[rows, indices]
+    reliability = np.minimum(contextual, evidence)
+    calibration = cfg.get("calibration", {})
+    thresholds = calibration.get("high_thresholds", {})
+    cutoff = np.array([thresholds.get(code, 2.0) for code in labels])
+    high = path.copy()
+    high[(reliability < cutoff[indices]) | ~valid] = -1
+    if calibration.get("status") != "calibrated":
+        high[:] = -1
+    return {
+        "class_indices": path,
+        "high_confidence_indices": high,
+        "local_scores": local.astype(np.float32),
+        "sequence_scores": posterior.astype(np.float32),
+        "reliability": reliability.astype(np.float32),
+        "valid": valid,
+    }
+
+
+def impact_candidates(indices, scores, labels, threshold):
+    """Only a learned, finite interior peak can propose an impact."""
+    if scores is None:
+        return {}
+    scores = np.asarray(scores)
+    if scores.shape != np.asarray(indices).shape or not np.isfinite(scores).all():
+        raise ValueError("Invalid impact scores")
+    result = {}
+    edges = np.r_[0, np.flatnonzero(np.diff(indices)) + 1, len(indices)]
+    for a, b in pairwise(edges):
+        if indices[a] >= 0 and labels[indices[a]] == "fall" and b - a >= 3:
+            point = int(a + 1 + scores[a + 1 : b].argmax())
+            if scores[point] >= threshold:
+                result[int(a)] = point
+    return result
+
+
+def predict_outputs(session, joints, valid, metadata):
+    auxiliary = metadata.get("event_heads", False)
+
+    def forward(x, mask):
+        output = session.run(None, {"joints_world_m": x, "valid": mask})
+        return np.concatenate(output, axis=-1) if auxiliary else output[0]
+
+    values = predict_scores(forward, joints, valid)
+    k = len(metadata["labels"])
+    expected = k + 2 if auxiliary else k
+    if values.shape != (len(joints), expected) or not np.isfinite(values).all():
+        raise ValueError("Network output shape or values differ")
+    return {
+        "scores": values[:, :k],
+        **(
+            {"impact_scores": values[:, k], "outside_scores": values[:, k + 1]} if auxiliary else {}
+        ),
+    }
+
 
 def windows(joints, valid):
     x = np.asarray(joints, np.float32)
@@ -41,6 +230,8 @@ def predict_scores(forward, joints, valid):
 
 
 def reject(scores, joints, valid, metadata):
+    if metadata.get("decoder", {}).get("kind") == SEQUENCE_RUNTIME_VERSION:
+        return sequence_decode(scores, valid, metadata)["high_confidence_indices"]
     result = np.argmax(scores, axis=1).astype(np.int64)
     confidence = scores.max(1)
     result[(confidence < metadata["threshold"]) | ~np.asarray(valid, bool)] = -1
@@ -111,9 +302,21 @@ def infer_bundle(directory, joints, valid):
     directory = Path(directory)
     metadata = json.loads((directory / "metadata.json").read_text())
     session = cpu_session(str(directory.resolve() / "model.onnx"))
-    scores = predict_scores(
-        lambda x, mask: session.run(None, {"joints_world_m": x, "valid": mask})[0],
-        joints,
-        valid,
-    )
-    return {"scores": scores, "class_indices": reject(scores, joints, valid, metadata)}
+    output = predict_outputs(session, joints, valid, metadata)
+    if metadata.get("decoder", {}).get("kind") == SEQUENCE_RUNTIME_VERSION:
+        decoded = sequence_decode(
+            output["scores"],
+            valid,
+            metadata,
+            outside_scores=output.get("outside_scores")
+            if metadata.get("outside_supported")
+            else None,
+        )
+        decoded["impacts"] = impact_candidates(
+            decoded["class_indices"],
+            output.get("impact_scores") if metadata.get("impact_supported") else None,
+            metadata["labels"],
+            metadata["decoder"]["impact_threshold"],
+        )
+        return {**output, **decoded}
+    return {**output, "class_indices": reject(output["scores"], joints, valid, metadata)}

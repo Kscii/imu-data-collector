@@ -14,10 +14,12 @@ type Candidate = {candidate_id: string; version_id: string};
 type Variant = {candidate: Candidate; configuration_id: string;
   configuration: {layout_id: string; profile_id: string; variant: string}};
 type Annotation = {candidate: Candidate; clock: {duration_ns: number; source_rate_hz: number};
-  segments: Segment[]; fall_events: Fall[]; taxonomy: {primary: {code: string; name: string; is_fall: boolean}[]}};
+  segments: Segment[]; fall_events: Fall[]; taxonomy: {version: string; primary: {code: string; name: string; is_fall: boolean}[]}};
 type Row = {motion_sha256: string; status: string;
   entry: {candidate: Candidate; source_dataset: string; source_member: string}};
 type Detail = Row & {variants: Variant[]; editor_template: Annotation; suggestion: Annotation | null;
+  prediction_quality?: {intervals: {start_ns: number; stop_ns: number; primary_code: string | null;
+    high_confidence_fraction: number; boundary_reliable: boolean}[]} | null;
   preview?: {models: {baseline: string; candidate: string}; activity_rules_version: string;
     documents: Record<"human" | "baseline" | "candidate", Annotation>};
   legacy_quality: {decision:string;reason:string|null;reviewer:string} | null;
@@ -38,7 +40,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const previewId = new URLSearchParams(location.search).get("motion_preview");
   const [comparison, setComparison] = useState<"human" | "baseline" | "candidate">("candidate");
   const [rows, setRows] = useState<Row[]>([]), [total, setTotal] = useState(0), [offset, setOffset] = useState(0);
-  const [filter, setFilter] = useState("all"), [search, setSearch] = useState("");
+  const [filter, setFilter] = useState(new URLSearchParams(location.search).get("status") ?? "all"), [search, setSearch] = useState("");
   const [current, setCurrent] = useState<Detail | null>(null), [editor, setEditor] = useState<Annotation | null>(null);
   const [lease, setLease] = useState<Lease | null>(null), [part, setPart] = useState(0), [queue, setQueue] = useState(false);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
@@ -63,11 +65,12 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const progress = activeSegment ? partProgress(activeSegment, cursor) : null;
   const names = Object.fromEntries(editor?.taxonomy.primary.map(t => [t.code, rules?.primary.find(r=>r.code===t.code)?.name_zh ?? t.name]) ?? []);
   const definition = rules?.primary.find(r=>r.code===segment?.primary_code);
+  const quality = current?.prediction_quality?.intervals.find(q=>q.start_ns===segment?.start_ns && q.stop_ns===segment?.stop_ns && q.primary_code===segment?.primary_code);
   const label = (s: Segment) => s.primary_code ? names[s.primary_code] ?? s.primary_code : unknownNames[s.resolution] ?? "无法识别";
   const usable = editor?.segments.reduce((n, s) => {
     const fall = editor.taxonomy.primary.find(t=>t.code===s.primary_code)?.is_fall;
     const event = editor.fall_events.find(e=>e.event_id===s.fall_event_id||e.event_id===`fall-${s.segment_id}`);
-    const eligible = s.primary_code && (!fall || (event && event.impact_ns>=event.start_ns && event.impact_ns<event.stop_ns));
+    const eligible = s.primary_code && (!fall || (event && event.impact_ns>s.start_ns && event.impact_ns<s.stop_ns));
     return n+(eligible ? s.stop_ns-s.start_ns : 0);
   }, 0) ?? 0;
   const dirty = !previewId && !!editor && JSON.stringify(editor) !== JSON.stringify(current?.editor_template);
@@ -120,7 +123,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       const local = previewId ? null : localStorage.getItem(cacheKey(data));
       if (local) {
         const cached = JSON.parse(local);
-        if (cached.draft_sha256 === (data.draft?.revision_sha256 ?? null) && cached.review_sha256 === (data.review?.revision_sha256 ?? null)) {
+        if (cached.document?.taxonomy?.version === value.taxonomy.version && cached.draft_sha256 === (data.draft?.revision_sha256 ?? null) && cached.review_sha256 === (data.review?.revision_sha256 ?? null)) {
           value = cached.document; setNotice("已恢复本地未提交草稿。");
         } else setError("存在基于旧审核版本的本地草稿，未覆盖服务器结果；可下载本地草稿进行核对。");
       }
@@ -137,7 +140,9 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       await open(found.motion_sha256, {candidate_id,version_id});
     } else if (items[0]) await open(items[0].motion_sha256);
   }).catch(e => setError(String(e)));}, []);
-  useEffect(() => {void motionApi<{temporal?:ActivityRules}>("/api/v1/synthetic/labels").then(v=>setRules(v.temporal??null)).catch(e=>setError(String(e)));}, []);
+  useEffect(() => {void (previewId && editor?.taxonomy.version !== "2.0.0"
+    ? motionApi<{temporal?:ActivityRules}>("/api/v1/synthetic/labels").then(v=>v.temporal??null)
+    : motionApi<ActivityRules>(`${root}/activity-rules`)).then(setRules).catch(e=>setError(String(e)));}, [previewId, editor?.taxonomy.version]);
   useEffect(() => {
     const timer = setInterval(() => {
       const s = session.current;
@@ -261,16 +266,17 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       {segment && <fieldset className="primary-fields motion-fields" disabled={!lease || busy} onFocusCapture={e=>{if((e.target as HTMLElement).matches("input,textarea,select"))pause();}}>
         <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null});}}>
           {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
+        {quality && <small role="status">{quality.high_confidence_fraction < 1 ? "低可信候选，请检查类别与切点" : quality.boundary_reliable ? "高可信候选" : "类别候选，边界待核"}；整条通过会确认当前标签。</small>}
         {definition && ["stand_up", "get_up"].includes(definition.code) && <div className="primary-definition" aria-label="起立起身分类提示"><p>{definition.definition}</p><p>按转换起始姿态分类；手撑不是分界，中途短暂姿态不另拆。</p></div>}
         {definition && <details className="primary-definition"><summary>类别定义与切分说明</summary><p>{definition.definition}</p><p>包括：{definition.includes}</p><p>不包括：{definition.excludes}</p><p>切分：{definition.boundaries}</p><p>{definition.example}</p><small>规则 {rules?.version}</small></details>}
         <div className="primary-boundaries">{(["start_ns","stop_ns"] as const).map((side,i)=><label key={side}>{i ? "结束（秒）" : "开始（秒）"}<input type="number" aria-label={i ? "结束秒" : "开始秒"} step="0.04" value={segment[side]/1e9} disabled={i ? part===editor.segments.length-1 : part===0} onChange={e=>boundary(side,Number(e.target.value)*1e9)}/></label>)}</div>
         <div className="primary-edit-buttons"><button onClick={()=>{const point=Math.round(cursor/40000000)*40000000;if(point<=segment.start_ns||point>=segment.stop_ns){setError("请先将播放位置移到所选区间内部。");return;}setEditor({...editor,segments:editor.segments.flatMap((s,i)=>i===part?[{...s,notes:anchoredNotes(s),stop_ns:point},{...s,notes:anchoredNotes(s),segment_id:`segment-${crypto.randomUUID()}`,start_ns:point}]:[s])});}}>在播放位置切分</button>
           <button disabled={part===editor.segments.length-1} onClick={()=>{const next=editor.segments[part+1];if(segment.fall_event_id&&next.fall_event_id&&segment.fall_event_id!==next.fall_event_id){setError("不能合并两次独立跌倒。");return;}setEditor({...editor,segments:editor.segments.flatMap((s,i)=>i===part?[joined(s,next)]:i===part+1?[]:[s])});}}>合并下一段</button></div>
-        {isFall && <label>撞击时刻（秒；缺失时该区间屏蔽）<input type="number" step="0.04" value={fall ? fall.impact_ns/1e9 : ""} onChange={e=>{const event_id=segment.fall_event_id??`fall-${segment.segment_id}`;setEditor({...editor,fall_events:[...editor.fall_events.filter(f=>f.event_id!==event_id),{event_id,code:segment.primary_code!,start_ns:segment.start_ns,stop_ns:segment.stop_ns,impact_ns:Math.round(Number(e.target.value)*1e9),evidence:"human replay inspection"}]});}}/></label>}
+        {isFall && <label>撞击时刻（秒；缺失时该区间屏蔽）<input type="number" step="0.04" value={fall ? fall.impact_ns/1e9 : ""} onChange={e=>{const event_id=segment.fall_event_id??`fall-${segment.segment_id}`;const events=editor.fall_events.filter(f=>f.event_id!==event_id);if(e.target.value!==""){const impact_ns=Math.round(Number(e.target.value)*25)*40000000;if(Number.isFinite(impact_ns))events.push({event_id,code:segment.primary_code!,start_ns:segment.start_ns,stop_ns:segment.stop_ns,impact_ns,evidence:"human replay inspection"});}setEditor({...editor,fall_events:events});}}/></label>}
         <label>区间语义<textarea aria-label="区间语义" rows={2} value={segment.semantic_text ?? ""} onChange={e=>change({semantic_text:e.target.value})} placeholder="可自由描述动作，无需与列表文字一致"/></label>
         {segment.notes?.map((n,i)=><label key={n.note_id}>区间备注 · {sec(n.start_ns)}–{sec(n.stop_ns)} s<textarea aria-label={`区间备注 ${i+1}`} rows={2} value={n.text} onChange={e=>change({notes:segment.notes!.map((v,j)=>i===j?{...v,text:e.target.value}:v)})}/></label>)}
         <button onClick={()=>change({notes:[...(segment.notes??[]),{note_id:`note-${crypto.randomUUID()}`,start_ns:segment.start_ns,stop_ns:segment.stop_ns,text:""}]})}>添加区间备注</button>
-      </fieldset>}</div><footer className="primary-actions" hidden={!!previewId}><div className="primary-save-status" role="status">{notice || (dirty ? "有未保存修改" : "检查完毕后通过整条；提交后保持当前位置")}</div>
+      </fieldset>}</div><footer className="primary-actions" hidden={!!previewId}><div className="primary-save-status" role="status">{notice || (dirty ? "有未保存修改" : "检查完毕后通过整条；提交后保持当前位置")}{duration > usable && <small> · {sec(duration-usable)} 秒未知或事件不完整，保持屏蔽</small>}</div>
         <div><button disabled={busy||!lease} onClick={()=>void save()}>保存草稿</button><button className="primary-save" disabled={busy||!lease} onClick={()=>void save("pass")}>通过整条录制</button></div>
         <button disabled={busy||!lease} onClick={()=>{pause();setRejecting(true);}}>质量不合格</button>
         {!lease && <button disabled={busy} onClick={()=>void open(current.motion_sha256,id)}>重新领取编辑</button>}

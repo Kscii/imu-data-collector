@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .motion_annotations import require
 from .motion_label_service import now
+from .production_gate import production_gate
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import IDENTIFIER, SHA256, document_sha256
 
@@ -124,7 +125,7 @@ def _promote_model(service, model_id, actor, expected_active_sha256):
                 and report["baseline_metadata_sha256"] == prior["model"]["metadata"]["sha256"],
                 "验证基线与当前正式模型不同，请重新比较",
             )
-        gate(report)
+        production_gate(report)
     if prior and prior["model"] == model:
         return prior
     release = {

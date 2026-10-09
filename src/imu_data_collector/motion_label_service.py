@@ -20,6 +20,7 @@ from .motion_annotations import (
     apply_projection,
     covered,
     normalize_recording,
+    production_document,
     project_motion,
     require,
     reviewed_ranges,
@@ -28,6 +29,8 @@ from .motion_annotations import (
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
     ACTIVITY_RULES_VERSION,
+    PRODUCTION_RULES_VERSION,
+    PRODUCTION_TAXONOMY_VERSION,
     SHA256,
     activity_rules_evidence,
     document_sha256,
@@ -300,7 +303,13 @@ class MotionLabelService:
         return self.feature(mid)["template"]
 
     def edit(self, mid, cid, vid, body, actor, *, decision=None):
-        if body.get("activity_rules_version") != ACTIVITY_RULES_VERSION:
+        expected_rules = (
+            PRODUCTION_RULES_VERSION
+            if body.get("document", {}).get("taxonomy", {}).get("version")
+            == PRODUCTION_TAXONOMY_VERSION
+            else ACTIVITY_RULES_VERSION
+        )
+        if body.get("activity_rules_version") != expected_rules:
             raise ObjectConflictError("分类规则已更新；请保存本地草稿并刷新页面后按新规则检查。")
         variant = self.variant(mid, cid, vid)
         require(variant is not None, "Unknown IMU variant")
@@ -312,8 +321,10 @@ class MotionLabelService:
         # The server owns provenance and producer identity, not arbitrary editor input.
         edited = deepcopy(edited)
         base = self.base_document(mid, state)
+        if edited["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
+            base = production_document(base)
         edited["source_evidence"] = deepcopy(base["source_evidence"])
-        rules = activity_rules_evidence()
+        rules = activity_rules_evidence(edited["taxonomy"]["version"])
         if rules not in edited["source_evidence"]:
             edited["source_evidence"].append(rules)
         edited["producer"] = {"kind": "human-production-draft", "reviewer": actor}
@@ -439,7 +450,8 @@ class MotionLabelService:
             "draft": ({**state["draft"], "document": document} if state["draft"] else None),
             "proposal": {"document": document},
             "proposal_sha256": document_sha256(document),
-            "editor_template": document,
+            "editor_template": production_document(document),
+            "prediction_quality": None,
             "usable_ns": usable_ns(document),
             "total_ns": variant["clock"]["duration_ns"],
             "legacy_quality": self.source.latest(
@@ -458,6 +470,26 @@ class MotionLabelService:
                 k: legacy.get(k) for k in ("decision", "reason", "reviewer")
             }
         if prediction:
+            if prediction.get("quality") and not state["draft"] and not state["accepted"]:
+                start = variant["clock"]["source_start_ns"]
+                stop = start + variant["clock"]["duration_ns"]
+                quality = prediction["quality"]
+                result["prediction_quality"] = {
+                    **{
+                        k: v
+                        for k, v in quality.items()
+                        if k not in ("intervals", "high_confidence_document")
+                    },
+                    "intervals": [
+                        {
+                            **s,
+                            "start_ns": max(start, s["start_ns"]) - start,
+                            "stop_ns": min(stop, s["stop_ns"]) - start,
+                        }
+                        for s in quality["intervals"]
+                        if s["start_ns"] < stop and s["stop_ns"] > start
+                    ],
+                }
             suggested = project_motion(
                 prediction["document"], variant["candidate"], variant["clock"]
             )
@@ -471,7 +503,9 @@ class MotionLabelService:
             result["has_suggestion"] = bool(
                 (review or state["draft"]) and shape(suggested) != shape(document)
             )
-            result["suggestion"] = suggested if result["has_suggestion"] else None
+            result["suggestion"] = (
+                production_document(suggested) if result["has_suggestion"] else None
+            )
         return result
 
     def listing(self, *, offset=0, limit=30, status="all", search=""):

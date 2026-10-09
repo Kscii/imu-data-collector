@@ -9,17 +9,38 @@ from copy import deepcopy
 from .synthetic_temporal_contract import (
     FALLS,
     PERIOD_NS,
+    PRODUCTION_PRIMARY,
+    PRODUCTION_TAXONOMY_VERSION,
     SEMANTIC_SCHEMA,
     SHA256,
     document_sha256,
     empty_document,
     semantic_draft,
+    taxonomy,
     validate_document,
 )
 
 SCHEMA = "imu.motion_annotation.v1"
 REVIEW_SCHEMA = "imu.motion_review.v1"
 POLICY = "motion-quality-inheritance-20261009-v1"
+
+
+def production_document(document):
+    """An explicit derived projection; never mutate a historical revision."""
+    result = deepcopy(document)
+    if result["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
+        return result
+    result["source_evidence"].append({
+        "kind": "taxonomy-projection", "source_sha256": document_sha256(document),
+        "source_taxonomy": deepcopy(document["taxonomy"]), "mapping": "fall-directions-to-fall-v1",
+    })
+    result["taxonomy"] = taxonomy(PRODUCTION_TAXONOMY_VERSION)
+    for segment in result["segments"]:
+        if segment["primary_code"] in FALLS:
+            segment["primary_code"] = "fall"
+    for event in result["fall_events"]:
+        event["code"] = "fall"
+    return result
 
 
 def require(condition, message):
@@ -217,6 +238,9 @@ def apply_projection(document, edit):
     """Replace only the displayed interval, retaining unseen canonical motion."""
     validate_motion(document)
     validate_document(edit)
+    if edit["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
+        document = production_document(document)
+    require(document["taxonomy"] == edit["taxonomy"], "Edit taxonomy differs")
     require(
         edit["candidate"]["input_hashes"]["motion"] == document["motion_sha256"],
         "Edited projection motion differs",
@@ -276,11 +300,14 @@ def usable_ns(document):
     )
 
 
-def primary_prediction(template, labels, indices, model_id):
+def primary_prediction(template, labels, indices, model_id, *, impacts=None):
     """Same segmentation/masking for production inference and model evaluation."""
     values = [int(i) for i in indices]
     require(len(values) == template["clock"]["sample_count"], "Prediction clock differs")
     result = deepcopy(template)
+    result["taxonomy"] = taxonomy(
+        PRODUCTION_TAXONOMY_VERSION if tuple(labels) == PRODUCTION_PRIMARY else "1.0.0"
+    )
     result.update(
         producer={"kind": "cpu-motion-model", "model_id": model_id}, segments=[], fall_events=[]
     )
@@ -299,6 +326,17 @@ def primary_prediction(template, labels, indices, model_id):
             pending_reasons=[] if code else ["class"],
         )
         if code in FALLS:
+            impact = (impacts or {}).get(a)
+            if impact is not None and a < impact < b:
+                event_id = f"fall-{i:05d}"
+                segment["fall_event_id"] = event_id
+                result["fall_events"].append({
+                    "event_id": event_id, "code": code, "start_ns": a * PERIOD_NS,
+                    "stop_ns": b * PERIOD_NS, "impact_ns": impact * PERIOD_NS,
+                    "evidence": "Model impact proposal; requires human recording review",
+                })
+                result["segments"].append(segment)
+                continue
             segment.update(
                 primary_code=None,
                 resolution="unrecognized",
