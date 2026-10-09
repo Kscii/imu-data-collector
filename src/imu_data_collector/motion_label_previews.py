@@ -1,7 +1,7 @@
 """Immutable, administrator-only development comparisons; never production releases."""
 
 from .motion_annotations import require
-from .synthetic_temporal_contract import IDENTIFIER, validate_document
+from .synthetic_temporal_contract import IDENTIFIER, document_sha256, validate_document
 
 
 class MotionLabelPreviews:
@@ -69,6 +69,24 @@ class MotionLabelPreviews:
         for document in documents.values():
             validate_document(document, expected_candidate=variant["candidate"])
             require(document["clock"] == variant["clock"], "Preview clock differs")
+        qualities = record.get("qualities", {})
+        for role, quality in qualities.items():
+            require(
+                role in ("baseline", "candidate")
+                and quality.get("document_sha256") == document_sha256(documents[role]),
+                "Preview evidence document differs",
+            )
+            intervals = {
+                (s["start_ns"], s["stop_ns"], s["primary_code"])
+                for s in documents[role]["segments"]
+            }
+            require(
+                all(
+                    (s["start_ns"], s["stop_ns"], s["primary_code"]) in intervals
+                    for s in quality["intervals"]
+                ),
+                "Preview evidence interval differs",
+            )
         detail = self.service.case(mid, variant)
         return {
             **detail,
@@ -77,10 +95,14 @@ class MotionLabelPreviews:
             "suggestion": None,
             "has_suggestion": False,
             "draft": None,
+            "prediction_quality": None,
+            "suggestion_quality": None,
             "preview": {
                 **self.metadata(value),
                 "documents": documents,
                 "human_revision": record["human_revision"],
                 "read_only": True,
+                "qualities": qualities,
+                "diagnostics": record.get("diagnostics", []),
             },
         }

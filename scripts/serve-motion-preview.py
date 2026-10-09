@@ -52,6 +52,11 @@ def main():
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8772)
     parser.add_argument("--actor", default="xfan0282")
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Reject all editing requests in research comparisons.",
+    )
     parser.add_argument("--calibration-store", type=Path)
     parser.add_argument("--calibration-state", type=Path)
     parser.add_argument(
@@ -76,6 +81,14 @@ def main():
     settings.identity.allowed_unikeys = tuple(set(settings.identity.allowed_unikeys) | {args.actor})
     settings.identity.admins = tuple(set(settings.identity.admins) | {args.actor})
     app = create_annotation_app(settings)
+    if args.read_only:
+
+        @app.middleware("http")
+        async def read_only(request, call_next):
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                return JSONResponse({"detail": "本页仅用于只读实验对照"}, status_code=403)
+            return await call_next(request)
+
     if args.calibration_store:
         mount_calibration(app, settings, args.calibration_store, args.calibration_state)
     if args.trial_guide:

@@ -455,6 +455,7 @@ class MotionLabelService:
             "editor_template": editor_document(document),
             "walking_bouts": walking_bouts(document),
             "prediction_quality": None,
+            "suggestion_quality": None,
             "usable_ns": usable_ns(document),
             "total_ns": variant["clock"]["duration_ns"],
             "legacy_quality": self.source.latest(
@@ -473,11 +474,11 @@ class MotionLabelService:
                 k: legacy.get(k) for k in ("decision", "reason", "reviewer")
             }
         if prediction:
-            if prediction.get("quality") and not state["draft"] and not state["accepted"]:
+            if prediction.get("quality"):
                 start = variant["clock"]["source_start_ns"]
                 stop = start + variant["clock"]["duration_ns"]
                 quality = prediction["quality"]
-                result["prediction_quality"] = {
+                projected_quality = {
                     **{
                         k: v
                         for k, v in quality.items()
@@ -493,6 +494,9 @@ class MotionLabelService:
                         if s["start_ns"] < stop and s["stop_ns"] > start
                     ],
                 }
+                result["suggestion_quality"] = projected_quality
+                if not state["draft"] and not state["accepted"]:
+                    result["prediction_quality"] = projected_quality
             suggested = project_motion(
                 prediction["document"], variant["candidate"], variant["clock"]
             )

@@ -18,15 +18,16 @@ from .motion_label_batch import batch_policy
 from .motion_label_models import active_model, validate_model
 from .motion_label_runtime import (
     SCORE_RUNTIME_VERSION,
-    SEQUENCE_RUNTIME_VERSION,
     cpu_session,
     impact_candidates,
+    is_sequence_model,
     predict_outputs,
     reject,
     sequence_decode,
 )
 from .motion_label_service import MotionLabelService, now
 from .production_gate import validated_capabilities
+from .semantic_runtime import interval_evidence
 from .storage import ObjectConflictError, create_object_store
 from .synthetic_motion import SyntheticReviewService
 from .synthetic_temporal_contract import (
@@ -147,6 +148,15 @@ class MotionLabelWorker:
                 "model": model["onnx"]["sha256"],
                 "labels": metadata["labels"],
                 "score_runtime": SCORE_RUNTIME_VERSION,
+                "semantic_runtime_sha256": sha(Path(__file__).with_name("semantic_runtime.py"))
+                if metadata.get("semantic_features")
+                else None,
+                "semantic_recipe": metadata.get("semantic_recipe")
+                if metadata.get("semantic_features")
+                else None,
+                "semantic_feature_names": metadata.get("semantic_feature_names")
+                if metadata.get("semantic_features")
+                else None,
             }
         )
         score_key = self.service.root + f"/score-manifests/{score_id}.json"
@@ -183,12 +193,13 @@ class MotionLabelWorker:
             "Invalid cached scores",
         )
         quality = {}
-        if metadata.get("decoder", {}).get("kind") == SEQUENCE_RUNTIME_VERSION:
+        if is_sequence_model(metadata):
             decoded_id = document_sha256(
                 {
                     "scores": score_id,
                     "metadata": model["metadata"]["sha256"],
                     "runtime_sha256": sha(Path(__file__).with_name("motion_label_runtime.py")),
+                    "semantic_runtime_sha256": sha(Path(__file__).with_name("semantic_runtime.py")),
                 }
             )
             decoded_key = self.service.root + f"/sequence-manifests/{decoded_id}.json"
@@ -203,6 +214,8 @@ class MotionLabelWorker:
                     scores,
                     valid,
                     metadata,
+                    joints=joints,
+                    boundary_scores=output.get("boundary_scores"),
                     outside_scores=output.get("outside_scores")
                     if metadata.get("outside_supported")
                     else None,
@@ -265,6 +278,7 @@ class MotionLabelWorker:
                         "score": float(decoded["reliability"][a:b].mean()),
                         "high_confidence_fraction": fraction,
                         "boundary_reliable": False,
+                        "evidence": interval_evidence(decoded, a, b, s["primary_code"]),
                         "reason": "experimental_fall"
                         if s["primary_code"] == "fall" and not fall_validated
                         else "boundary_not_validated"
@@ -279,7 +293,8 @@ class MotionLabelWorker:
                 "calibration": metadata["decoder"].get("calibration"),
                 "high_confidence_document": high_doc,
                 "decoder_sha256": document_sha256(metadata["decoder"]),
-                "runtime_version": SEQUENCE_RUNTIME_VERSION,
+                "runtime_version": metadata["decoder"]["kind"],
+                "semantic_runtime_sha256": sha(Path(__file__).with_name("semantic_runtime.py")),
                 "sequence_scores_key": decoded_key,
             }
         else:

@@ -11,6 +11,22 @@ import numpy as np
 
 SCORE_RUNTIME_VERSION = "body22-overlap-v1"
 SEQUENCE_RUNTIME_VERSION = "offline-hmm-v1"
+SEMANTIC_RUNTIME_VERSION = "semantic-duration-v1"
+
+
+def is_sequence_model(metadata):
+    return metadata.get("decoder", {}).get("kind") in (
+        SEQUENCE_RUNTIME_VERSION,
+        SEMANTIC_RUNTIME_VERSION,
+    )
+
+
+def semantic_module():
+    if __package__:
+        from . import semantic_runtime
+    else:
+        import semantic_runtime
+    return semantic_runtime
 
 
 def default_sequence_decoder(labels):
@@ -82,12 +98,25 @@ def _logsumexp(values, axis):
     )
 
 
-def sequence_decode(scores, valid, metadata, *, outside_scores=None):
+def sequence_decode(
+    scores, valid, metadata, *, outside_scores=None, joints=None, boundary_scores=None
+):
     """Viterbi + forward/backward per continuous valid run; no fabricated gap labels.
 
     Posterior scores alone are not correctness probabilities. High-confidence
     output requires a separately calibrated local AND contextual threshold.
     """
+    if metadata.get("decoder", {}).get("kind") == SEMANTIC_RUNTIME_VERSION:
+        semantic = semantic_module()
+        return semantic.semantic_decode(
+            scores,
+            valid,
+            metadata,
+            features=semantic.semantic_features(joints, valid) if joints is not None else None,
+            boundary_scores=boundary_scores,
+            outside_scores=outside_scores,
+            base_decoder=sequence_decode,
+        )
     scores = np.asarray(scores, dtype=np.float64)
     valid = np.asarray(valid, bool).copy()
     cfg, labels = metadata["decoder"], metadata["labels"]
@@ -155,10 +184,7 @@ def sequence_decode(scores, valid, metadata, *, outside_scores=None):
             choices = delta[:, None] + transition
             back[t] = choices.argmax(axis=0)
             delta = choices.max(axis=0) + emission[start + t]
-            alpha[t] = (
-                _logsumexp(alpha[t - 1, :, None] + transition, axis=0)
-                + emission[start + t]
-            )
+            alpha[t] = _logsumexp(alpha[t - 1, :, None] + transition, axis=0) + emission[start + t]
             alpha[t] -= _logsumexp(alpha[t], axis=0)
         state = int(delta.argmax())
         beta = np.zeros(k)
@@ -167,9 +193,7 @@ def sequence_decode(scores, valid, metadata, *, outside_scores=None):
             p = alpha[t] + beta
             posterior[start + t] = np.exp(p - _logsumexp(p, axis=0))
             state = int(back[t, state])
-            beta = _logsumexp(
-                transition + emission[start + t][None, :] + beta[None, :], axis=1
-            )
+            beta = _logsumexp(transition + emission[start + t][None, :] + beta[None, :], axis=1)
             beta -= _logsumexp(beta, axis=0)
     indices = np.maximum(path, 0)
     rows = np.arange(len(valid))
@@ -196,20 +220,10 @@ def sequence_decode(scores, valid, metadata, *, outside_scores=None):
         edges = np.r_[0, np.flatnonzero(np.diff(proposal)) + 1, len(proposal)]
         protected = {"fall", "stumble_recovery", "posture_transition", "other_activity"}
         for a, b in pairwise(edges):
-            if (
-                a == 0
-                or b == len(proposal)
-                or proposal[a] != -1
-                or b - a > int(gap_s * 25)
-            ):
+            if a == 0 or b == len(proposal) or proposal[a] != -1 or b - a > int(gap_s * 25):
                 continue
             code = proposal[a - 1]
-            if (
-                code < 0
-                or proposal[b] != code
-                or labels[code] in protected
-                or not valid[a:b].all()
-            ):
+            if code < 0 or proposal[b] != code or labels[code] in protected or not valid[a:b].all():
                 continue
             if (path[a:b] == code).all() and (local[a:b, code] >= minimum * 0.8).all():
                 proposal[a:b] = code
@@ -241,24 +255,34 @@ def impact_candidates(indices, scores, labels, threshold):
 
 
 def predict_outputs(session, joints, valid, metadata):
+    if metadata.get("semantic_features"):
+        semantic = semantic_module()
+        if metadata.get("semantic_recipe") != semantic.FEATURE_RECIPE or metadata.get(
+            "semantic_feature_names"
+        ) != list(semantic.FEATURE_NAMES):
+            raise ValueError("Semantic network feature recipe differs")
     auxiliary = metadata.get("event_heads", False)
 
     def forward(x, mask):
-        output = session.run(None, {"joints_world_m": x, "valid": mask})
+        inputs = {"joints_world_m": x, "valid": mask}
+        if metadata.get("semantic_features"):
+            inputs["semantic_features"] = np.stack(
+                [semantic_module().semantic_features(a, b) for a, b in zip(x, mask, strict=True)]
+            )
+        output = session.run(None, inputs)
         return np.concatenate(output, axis=-1) if auxiliary else output[0]
 
     values = predict_scores(forward, joints, valid)
     k = len(metadata["labels"])
-    expected = k + 2 if auxiliary else k
+    expected = k + (2 if auxiliary else 0) + (1 if metadata.get("boundary_head") else 0)
     if values.shape != (len(joints), expected) or not np.isfinite(values).all():
         raise ValueError("Network output shape or values differ")
     return {
         "scores": values[:, :k],
         **(
-            {"impact_scores": values[:, k], "outside_scores": values[:, k + 1]}
-            if auxiliary
-            else {}
+            {"impact_scores": values[:, k], "outside_scores": values[:, k + 1]} if auxiliary else {}
         ),
+        **({"boundary_scores": values[:, k + 2]} if metadata.get("boundary_head") else {}),
     }
 
 
@@ -293,16 +317,14 @@ def predict_scores(forward, joints, valid):
 
 
 def reject(scores, joints, valid, metadata):
-    if metadata.get("decoder", {}).get("kind") == SEQUENCE_RUNTIME_VERSION:
-        return sequence_decode(scores, valid, metadata)["high_confidence_indices"]
+    if is_sequence_model(metadata):
+        return sequence_decode(scores, valid, metadata, joints=joints)["high_confidence_indices"]
     result = np.argmax(scores, axis=1).astype(np.int64)
     confidence = scores.max(1)
     result[(confidence < metadata["threshold"]) | ~np.asarray(valid, bool)] = -1
     supported = np.asarray(metadata["supported_indices"], np.int64)
     result[~np.isin(result, supported)] = -1
-    allowed = np.broadcast_to(
-        np.isin(np.arange(scores.shape[1]), supported), scores.shape
-    ).copy()
+    allowed = np.broadcast_to(np.isin(np.arange(scores.shape[1]), supported), scores.shape).copy()
     allowed &= np.asarray(valid, bool)[:, None]
     if len(joints) > 1:
         velocity = np.gradient(joints, 0.04, axis=0)
@@ -368,11 +390,13 @@ def infer_bundle(directory, joints, valid):
     metadata = json.loads((directory / "metadata.json").read_text())
     session = cpu_session(str(directory.resolve() / "model.onnx"))
     output = predict_outputs(session, joints, valid, metadata)
-    if metadata.get("decoder", {}).get("kind") == SEQUENCE_RUNTIME_VERSION:
+    if is_sequence_model(metadata):
         decoded = sequence_decode(
             output["scores"],
             valid,
             metadata,
+            joints=joints,
+            boundary_scores=output.get("boundary_scores"),
             outside_scores=output.get("outside_scores")
             if metadata.get("outside_supported")
             else None,

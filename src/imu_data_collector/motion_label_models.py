@@ -114,6 +114,18 @@ def _promote_model(service, model_id, actor, expected_active_sha256):
             Path(__file__).with_name("motion_label_runtime.py").read_bytes()
         ).hexdigest()
         require(report.get("runtime_sha256") == runtime_sha, "验证报告与当前推理代码不同")
+        metadata = service.store.read_json(model["metadata"]["object_key"])[0]
+        if (
+            metadata.get("semantic_features")
+            or metadata.get("decoder", {}).get("kind") == "semantic-duration-v1"
+        ):
+            semantic_sha = hashlib.sha256(
+                Path(__file__).with_name("semantic_runtime.py").read_bytes()
+            ).hexdigest()
+            require(
+                report.get("semantic_runtime_sha256") == semantic_sha,
+                "验证报告与语义特征／解码实现不同",
+            )
         require(
             report["candidate_model_sha256"] == model["onnx"]["sha256"]
             and report["candidate_metadata_sha256"] == model["metadata"]["sha256"],

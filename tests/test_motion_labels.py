@@ -14,7 +14,7 @@ from imu_data_collector.motion_annotations import (
     validate_inheritance,
     validate_motion,
 )
-from imu_data_collector.motion_label_models import gate, promote_model
+from imu_data_collector.motion_label_models import active_model, gate, promote_model
 from imu_data_collector.motion_label_service import MotionLabelService
 from imu_data_collector.motion_label_worker import MotionLabelWorker
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
@@ -601,6 +601,90 @@ def test_worker_persistent_retries_and_crash_recovery(tmp_path, monkeypatch):
     assert service.state(mid)[0]["prediction"] is None
 
 
+def test_worker_reuses_scores_for_decoder_changes_but_invalidates_semantic_recipe(
+    tmp_path, monkeypatch
+):
+    import numpy as np
+
+    from imu_data_collector import motion_label_worker as module
+    from imu_data_collector.motion_label_runtime import default_sequence_decoder
+    from imu_data_collector.synthetic_temporal_contract import CURRENT_PRIMARY
+
+    store, _, service, mid, _ = seed(tmp_path)
+    feature = service.feature(mid)
+    counter = 0
+
+    def upload(path):
+        nonlocal counter
+        counter += 1
+        digest = module.sha(path)
+        key = service.root + f"/test-artifacts/{counter}/{path.name}"
+        store.put_file(
+            path, key, content_type="application/octet-stream", metadata={"sha256": digest}
+        )
+        return {"object_key": key, "sha256": digest, "byte_length": path.stat().st_size}
+
+    data = tmp_path / "feature.npz"
+    np.savez_compressed(
+        data,
+        binding=json.dumps(feature["binding"]),
+        joints=np.zeros((100, 22, 3), np.float32),
+        valid=np.ones(100, bool),
+    )
+    feature.update(upload(data))
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fake network for cache test")
+    model = {"model_id": "cache-test", "onnx": upload(path)}
+    labels = list(CURRENT_PRIMARY)
+    metadata = {
+        "labels": labels,
+        "supported_indices": list(range(len(labels))),
+        "semantic_features": True,
+        "decoder": default_sequence_decoder(labels),
+    }
+    counts = {"scores": 0, "decoded": 0}
+    original_decode = module.sequence_decode
+
+    def predict(*args):
+        counts["scores"] += 1
+        scores = np.full((100, len(labels)), 1e-6, np.float32)
+        scores[:, 0] = 0.999
+        return {"scores": scores}
+
+    def decode(*args, **kwargs):
+        counts["decoded"] += 1
+        return original_decode(*args, **kwargs)
+
+    monkeypatch.setattr(module, "cpu_session", lambda *args: None)
+    monkeypatch.setattr(module, "predict_outputs", predict)
+    monkeypatch.setattr(module, "sequence_decode", decode)
+    worker = MotionLabelWorker(service, tmp_path / "cache")
+
+    def infer(version):
+        path = tmp_path / f"metadata-{version}.json"
+        path.write_text(json.dumps(metadata))
+        model["metadata"] = upload(path)
+        return worker.infer(feature, model)
+
+    first = infer(1)
+    worker.infer(feature, model)
+    assert counts == {"scores": 1, "decoded": 1}
+    metadata["decoder"]["candidate_min_local_score"] = 0.6
+    second = infer(2)
+    assert counts == {"scores": 1, "decoded": 2}
+    assert first["scores_key"] == second["scores_key"]
+    assert first["quality"]["sequence_scores_key"] != second["quality"]["sequence_scores_key"]
+    original_sha = module.sha
+    monkeypatch.setattr(
+        module,
+        "sha",
+        lambda path: "f" * 64 if path.name == "semantic_runtime.py" else original_sha(path),
+    )
+    third = worker.infer(feature, model)
+    assert counts == {"scores": 2, "decoded": 3}
+    assert third["scores_key"] != second["scores_key"]
+
+
 def test_model_bootstrap_cannot_bypass_gate_and_baseline_can_rollback(tmp_path):
     store, _, service, _, _ = seed(tmp_path)
     import hashlib
@@ -614,12 +698,29 @@ def test_model_bootstrap_cannot_bypass_gate_and_baseline_can_rollback(tmp_path):
             path, key, content_type="application/octet-stream", metadata={"sha256": digest}
         )
         artifact = {"object_key": key, "sha256": digest, "byte_length": len(payload)}
+        metadata_bytes = json.dumps(
+            {"model_id": mid, "decoder": {"kind": "offline-hmm-v1"}}
+        ).encode()
+        path = tmp_path / (mid + ".metadata.json")
+        path.write_bytes(metadata_bytes)
+        metadata_digest = hashlib.sha256(metadata_bytes).hexdigest()
+        metadata_key = service.root + "/model-artifacts/" + metadata_digest + "/metadata.json"
+        store.put_file(
+            path,
+            metadata_key,
+            content_type="application/json",
+            metadata={"sha256": metadata_digest},
+        )
         return {
             "schema": "imu.production_model.v1",
             "model_id": mid,
             "feature_version": "motion-body22-world-25hz-v1",
             "onnx": artifact,
-            "metadata": artifact,
+            "metadata": {
+                "object_key": metadata_key,
+                "sha256": metadata_digest,
+                "byte_length": len(metadata_bytes),
+            },
             "release_kind": "existing-baseline",
             "validation": None,
         }
@@ -685,6 +786,30 @@ def test_model_bootstrap_cannot_bypass_gate_and_baseline_can_rollback(tmp_path):
     )
     store.write_json(service.root + "/models/validated.json", candidate, if_generation_match=0)
     active = promote_model(service, "validated", "admin", document_sha256(active))
+    semantic = deepcopy(candidate)
+    semantic.update(model_id="semantic-unbound")
+    metadata_bytes = json.dumps({"semantic_features": True}).encode()
+    metadata_sha = hashlib.sha256(metadata_bytes).hexdigest()
+    metadata_path = tmp_path / "semantic.metadata.json"
+    metadata_path.write_bytes(metadata_bytes)
+    metadata_key = service.root + "/model-artifacts/" + metadata_sha + "/metadata.json"
+    store.put_file(
+        metadata_path,
+        metadata_key,
+        content_type="application/json",
+        metadata={"sha256": metadata_sha},
+    )
+    semantic["metadata"] = {
+        "object_key": metadata_key,
+        "sha256": metadata_sha,
+        "byte_length": len(metadata_bytes),
+    }
+    store.write_json(
+        service.root + "/models/semantic-unbound.json", semantic, if_generation_match=0
+    )
+    with pytest.raises(ValueError, match="语义"):
+        promote_model(service, "semantic-unbound", "admin", document_sha256(active))
+    assert active_model(service) == active
     rollback = promote_model(service, "baseline", "admin", document_sha256(active))
     assert rollback["model"] == baseline
 
@@ -775,6 +900,31 @@ def test_candidate_preview_is_read_only_and_protects_holdout(tmp_path):
     assert case["editor_template"]["segments"][0]["primary_code"] == "walking"
     assert case["preview"]["documents"]["human"] == human
     assert service.state(mid) == state_before
+    evidence_manifest = deepcopy(manifest)
+    evidence_manifest["preview_id"] = "evidence"
+    evidence_manifest["records"][0]["qualities"] = {
+        "candidate": {
+            "document_sha256": document_sha256(candidate),
+            "intervals": [
+                {
+                    "start_ns": candidate["segments"][0]["start_ns"],
+                    "stop_ns": candidate["segments"][0]["stop_ns"],
+                    "primary_code": "walking",
+                    "evidence": [{"kind": "observation", "code": "leg_speed", "text": "下肢运动"}],
+                }
+            ],
+        }
+    }
+    service.immutable(service.root + "/previews/evidence.json", evidence_manifest)
+    assert previews.case("evidence", mid)["preview"]["qualities"]["candidate"]["intervals"][0][
+        "evidence"
+    ]
+    stale = deepcopy(evidence_manifest)
+    stale["preview_id"] = "stale"
+    stale["records"][0]["documents"]["candidate"]["segments"][0]["primary_code"] = "standing"
+    service.immutable(service.root + "/previews/stale.json", stale)
+    with pytest.raises(ValueError, match="evidence document"):
+        previews.case("stale", mid)
     feature = service.feature(mid)
     feature["group_key"] = "protected"
     with service.db() as db:

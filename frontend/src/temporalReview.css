@@ -109,6 +109,15 @@
 .motion-preview-banner { flex-wrap: wrap; gap: .6rem; flex: 0 0 auto; }
 .motion-preview-banner label { display: flex; align-items: center; gap: .4rem; }
 .motion-preview-banner a { color: #8cc8ff; }
+.motion-evidence { flex: 0 0 auto; color: #adc4dc; font-size: 12px; line-height: 1.5; padding: 4px 2px; }
+.motion-evidence summary { cursor: pointer; color: #c7dcf1; }
+.motion-evidence p { margin: 5px 0; overflow-wrap: anywhere; }
+.motion-evidence small { display: block; color: #8da4bb; }
+.motion-errors { width: 100%; order: 2; font-size: 12px; }
+.motion-errors summary { cursor: pointer; }
+.motion-errors > div { display: grid; gap: 4px; max-height: 100px; overflow-y: auto; margin-top: 5px; }
+.motion-errors button { padding: 4px; font-size: inherit; text-align: left; }
+.motion-comparison .interval-semantics > button { display: none; }
 .primary-actions[hidden] { display: none; }
 
 /* Keep the complete editor in flow. Only the interval list scrolls; many
