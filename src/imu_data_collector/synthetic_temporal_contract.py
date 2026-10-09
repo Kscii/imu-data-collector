@@ -50,7 +50,7 @@ FALLS = frozenset((*PRIMARY[-5:], "fall"))
 PRODUCTION_RULES_VERSION = "2026-10-09.3"
 CURRENT_SCHEMA = "imu.temporal_annotation.v3"
 CURRENT_TAXONOMY_VERSION = "3.0.0"
-CURRENT_RULES_VERSION = "2026-10-09.4"
+CURRENT_RULES_VERSION = "2026-10-09.5"
 CURRENT_PRIMARY = (
     "standing",
     "sitting",
@@ -1222,6 +1222,7 @@ def current_activity_rules():
             "转换区间不直接相邻；有真实中间姿态就保留，无可辨认中间姿态则合并，不虚构短姿态。",
             "不同支撑姿态的30个有向组合均允许；相同端点需说明转移、往返或未完成尝试。",
             "转换允许直接衔接行走、被跌倒中断或被录制边界截断；未知端点不猜测。",
+            "转换端点自动取紧邻区间；行走、跑步、上下楼映射站姿，其余非支撑活动及片段边界保留未知。",
             "跌倒优先于过程中的姿态，失衡恢复优先于补偿踏步。",
             "同类连续普通动作合并，独立跌倒不合并；保留区间语义及备注原时间锚点。",
             "行走间不超过2秒的明确站立暂停仅在活动汇总中合并，保留原细段及净步行时长。",
@@ -1259,6 +1260,31 @@ def support_posture(code):
     return None
 
 
+def derive_transition_endpoints(document):
+    """Recompute editable v3 endpoints without changing the source revision."""
+    result = deepcopy(document)
+    if result["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION:
+        return result
+    parts = result["segments"]
+    for i, part in enumerate(parts):
+        part["transition"] = (
+            {
+                "from_posture": support_posture(parts[i - 1]["primary_code"]) if i else None,
+                "to_posture": support_posture(parts[i + 1]["primary_code"])
+                if i + 1 < len(parts)
+                else None,
+            }
+            if part["primary_code"] == "posture_transition"
+            else None
+        )
+    return result
+
+
+def editor_document(document):
+    """Latest editable view; historical projections and exports stay frozen."""
+    return derive_transition_endpoints(current_document(document))
+
+
 def current_document(document):
     """Derive a v3 review view, never replace acceptance or invent new human acts."""
     if document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
@@ -1275,19 +1301,13 @@ def current_document(document):
         "lie_down": "lying",
         "squatting_down": "squatting",
     }
-    for i, part in enumerate(result["segments"]):
+    for part in result["segments"]:
         old = part["primary_code"]
         part["transition"] = None
         reason = None
         if old in targets:
-            before = support_posture(result["segments"][i - 1]["primary_code"]) if i else None
-            after = (
-                support_posture(document["segments"][i + 1]["primary_code"])
-                if i + 1 < len(result["segments"])
-                else None
-            )
             part["primary_code"] = "posture_transition"
-            part["transition"] = {"from_posture": before, "to_posture": after or targets[old]}
+            part["transition"] = {"from_posture": None, "to_posture": None}
             reason = "核对转换起止姿态；原标签：" + _ACTIVITY_RULES[old][0]
         elif old == "turning":
             part.update(
@@ -1335,7 +1355,7 @@ def current_document(document):
             "review_required": changes,
         }
     )
-    return result
+    return derive_transition_endpoints(result)
 
 
 class AnnotationIssues(ValueError):

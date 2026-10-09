@@ -17,6 +17,7 @@ from .synthetic_temporal_contract import (
     SHA256,
     AnnotationIssues,
     current_document,
+    derive_transition_endpoints,
     document_sha256,
     empty_document,
     semantic_draft,
@@ -203,6 +204,7 @@ def normalize_recording(document):
         "Production editor requires semantic annotation",
     )
     if result["schema"] == CURRENT_SCHEMA:
+        result = derive_transition_endpoints(result)
         issues = submission_issues(result)
         if issues:
             raise AnnotationIssues(issues)

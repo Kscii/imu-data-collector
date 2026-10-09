@@ -153,7 +153,83 @@ def test_whole_approval_unknown_mask_and_snapshot_frozen_inheritance(tmp_path):
     assert service.create_snapshot("admin")["snapshot_id"] == snapshot["snapshot_id"]
 
 
-@pytest.mark.parametrize("version", [None, "2026-10-09.1"])
+def transition_body(service, mid, variant):
+    body = edit_body(service, mid, variant)
+    base = body["document"]["segments"][0]
+    body["document"]["segments"] = [
+        dict(base, segment_id="a", stop_ns=1_000_000_000, primary_code="walking"),
+        dict(
+            base,
+            segment_id="b",
+            start_ns=1_000_000_000,
+            primary_code="posture_transition",
+            semantic_text="跪下",
+            transition={"from_posture": "lying", "to_posture": "sitting"},
+        ),
+        dict(
+            base,
+            segment_id="c",
+            start_ns=2_000_000_000,
+            stop_ns=4_000_000_000,
+            primary_code="kneeling",
+        ),
+    ]
+    return body
+
+
+@pytest.mark.parametrize("decision", [None, "pass"])
+def test_server_recomputes_client_endpoints_for_draft_and_approval(tmp_path, decision):
+    _, _, service, mid, variant = seed(tmp_path)
+    body = transition_body(service, mid, variant)
+    frozen = deepcopy(body)
+    c = variant["candidate"]
+    result = service.edit(
+        mid, c["candidate_id"], c["version_id"], body, "human-test", decision=decision
+    )
+    saved = service.resolve(result["review" if decision else "draft"])["document"]
+    assert saved["segments"][1]["transition"] == {
+        "from_posture": "standing",
+        "to_posture": "kneeling",
+    }
+    assert saved["segments"][1]["semantic_text"] == "跪下"
+    assert body == frozen
+
+
+def test_old_endpoint_review_is_immutable_and_requires_actual_reapproval(tmp_path):
+    _, _, service, mid, variant = seed(tmp_path)
+    body = transition_body(service, mid, variant)
+    c = variant["candidate"]
+    accepted = service.edit(
+        mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"
+    )
+    historical = service.resolve(accepted["review"])
+    historical["document"]["segments"][1]["transition"] = {
+        "from_posture": "lying",
+        "to_posture": "sitting",
+    }
+    historical["activity_rules"]["version"] = "2026-10-09.4"
+    pointer = service.reference("reviews", historical)
+    state, generation = service.state(mid)
+    state["accepted"] = pointer
+    service.write_state(mid, state, generation)
+    frozen = deepcopy(service.resolve(pointer))
+    case = service.case(mid, variant)
+    assert case["needs_rule_review"] is True
+    assert case["review"] == pointer
+    assert case["editor_template"]["segments"][1]["transition"] == {
+        "from_posture": "standing",
+        "to_posture": "kneeling",
+    }
+    assert service.resolve(pointer) == frozen
+    body.update(document=case["editor_template"], expected_review_sha256=pointer["revision_sha256"])
+    result = service.edit(
+        mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"
+    )
+    assert result["review"] != pointer and not result["needs_rule_review"]
+    assert service.resolve(pointer) == frozen
+
+
+@pytest.mark.parametrize("version", [None, "2026-10-09.1", "2026-10-09.4"])
 def test_outdated_rule_editor_cannot_create_review(tmp_path, version):
     _, _, service, mid, variant = seed(tmp_path)
     body = edit_body(service, mid, variant)

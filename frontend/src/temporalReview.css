@@ -111,12 +111,19 @@
 .motion-preview-banner a { color: #8cc8ff; }
 .primary-actions[hidden] { display: none; }
 
-/* The production review allocates spare height to the interval list. */
-.posture-workbench .primary-editor-scroll { display: grid; grid-template-rows: minmax(120px, 1fr) minmax(0, auto); gap: 10px; overflow: hidden; }
-.posture-workbench .primary-segments { display: flex; flex-direction: column; min-height: 0; max-height: none; margin: 0; overflow-y: auto; }
+/* Keep the complete editor in flow. Only the interval list scrolls; many
+   inline notes can extend the page instead of clipping the form. */
+.synthetic-workbench-shell:has(.posture-workbench) { overflow: visible; }
+.posture-workbench .primary-editor { grid-template-rows: auto minmax(min-content, 1fr) auto; min-height: min-content; }
+.posture-workbench .primary-editor-scroll { display: grid; grid-template-rows: minmax(64px, 1fr) max-content; min-height: min-content; gap: 10px; overflow: visible; }
+.posture-workbench .primary-segments { display: flex; flex-direction: column; contain: size; min-height: 0; max-height: none; margin: 0; overflow-y: auto; }
 .posture-workbench .primary-segments button { flex-shrink: 0; }
-.posture-workbench .primary-fields { min-height: 0; max-height: min(34dvh, 240px); overflow-y: auto; padding: 2px; }
-.primary-transition-endpoints { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.posture-workbench .primary-fields { min-height: auto; max-height: none; overflow: visible; padding: 2px; }
+.posture-workbench .primary-editor header > small { order: 1; }
+.posture-workbench .primary-editor header > button { padding: 4px 6px; }
+.posture-workbench .primary-actions { grid-template-columns: minmax(0, 1fr) auto; }
+.posture-workbench .primary-save-status { grid-column: 1 / -1; min-height: 16px; }
+.posture-workbench .primary-actions > button:last-child:not(:nth-child(3)) { grid-column: 1 / -1; }
 .primary-validation { max-height: 120px; overflow-y: auto; color: #ffc7a0; font-size: 12px; }
 .primary-validation button { display: block; text-align: left; color: inherit; width: 100%; margin-top: 4px; padding: 5px; }
 .posture-workbench kbd { font: inherit; font-size: 10px; opacity: .72; white-space: nowrap; }

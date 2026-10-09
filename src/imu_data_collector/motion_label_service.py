@@ -32,7 +32,9 @@ from .synthetic_temporal_contract import (
     SHA256,
     activity_rules_evidence,
     current_document,
+    derive_transition_endpoints,
     document_sha256,
+    editor_document,
     formal_labels,
     partial_fall_events,
     validate_document,
@@ -320,7 +322,7 @@ class MotionLabelService:
         validate_document(edited, expected_candidate=variant["candidate"])
         require(edited["clock"] == variant["clock"], "Edited clock differs")
         # The server owns provenance and producer identity, not arbitrary editor input.
-        edited = deepcopy(edited)
+        edited = derive_transition_endpoints(edited)
         base = self.base_document(mid, state)
         base = current_document(base)
         edited["source_evidence"] = deepcopy(base["source_evidence"])
@@ -450,7 +452,7 @@ class MotionLabelService:
             "draft": ({**state["draft"], "document": document} if state["draft"] else None),
             "proposal": {"document": document},
             "proposal_sha256": document_sha256(document),
-            "editor_template": current_document(document),
+            "editor_template": editor_document(document),
             "walking_bouts": walking_bouts(document),
             "prediction_quality": None,
             "usable_ns": usable_ns(document),
@@ -504,7 +506,7 @@ class MotionLabelService:
             result["has_suggestion"] = bool(
                 (review or state["draft"]) and shape(suggested) != shape(document)
             )
-            result["suggestion"] = current_document(suggested) if result["has_suggestion"] else None
+            result["suggestion"] = editor_document(suggested) if result["has_suggestion"] else None
         migrations = [
             e
             for e in result["editor_template"]["source_evidence"]
@@ -517,6 +519,14 @@ class MotionLabelService:
             and migrations
             and migrations[-1]["review_required"]
         )
+        if accepted and review["document"]["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
+            frozen = project_motion(review["document"], variant["candidate"], variant["clock"])
+            result["needs_rule_review"] = any(
+                old.get("transition") != new.get("transition")
+                for old, new in zip(
+                    frozen["segments"], derive_transition_endpoints(frozen)["segments"], strict=True
+                )
+            )
         return result
 
     def listing(self, *, offset=0, limit=30, status="all", search=""):

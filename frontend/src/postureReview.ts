@@ -20,6 +20,12 @@ export function reviewShortcut(event: KeyInput, editing = false, onButton = fals
 }
 type Part = {segment_id: string; start_ns: number; stop_ns: number; primary_code: string | null;
   transition?: Transition | null; semantic_text?: string; notes?: {text: string}[]};
+export function deriveTransitionEndpoints<T extends Part>(parts: T[]): (T & {transition: Transition | null})[] {
+  return parts.map((part, i) => ({...part, transition: part.primary_code === "posture_transition" ? {
+    from_posture: supportPosture(parts[i - 1]?.primary_code ?? null),
+    to_posture: supportPosture(parts[i + 1]?.primary_code ?? null),
+  } : null}));
+}
 export function reviewIssues(parts: Part[]): ReviewIssue[] {
   const issues: ReviewIssue[] = [];
   const add = (code: string, message: string, ...segments: Part[]) => issues.push({code, message, segment_ids: segments.map(s => s.segment_id)});
