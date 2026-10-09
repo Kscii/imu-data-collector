@@ -3,6 +3,7 @@ import {SyntheticIMUChart} from "./SyntheticIMUChart";
 import {intervalDecorations, partAt, partProgress, sourceFrame} from "./annotationPlayback";
 import {anchoredNotes, joined, type SemanticFields} from "./semanticEditing";
 import {MotionModelPanel} from "./MotionModelPanel";
+import {IntervalSemantics} from "./IntervalSemantics";
 import type {ActivityRules} from "./activityRules";
 import {postureNames, deriveTransitionEndpoints, reviewIssues, reviewShortcut, type Transition, type ReviewIssue, type ReviewCommand} from "./postureReview";
 import "./temporalReview.css";
@@ -344,9 +345,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         <div className="primary-edit-buttons"><button onClick={split} disabled={!viewerReady}>在播放位置切分 <kbd>S</kbd></button>
           <button disabled={part===editor.segments.length-1 || !viewerReady} onClick={merge}>合并下一段 <kbd>M</kbd></button></div>
         {isFall && <label>撞击时刻（秒，可留空）<input type="number" step="0.04" value={fall?.impact_ns != null ? fall.impact_ns/1e9 : ""} onChange={e=>{const event_id=segment.fall_event_id??`fall-${segment.segment_id}`;const events=editor.fall_events.filter(f=>f.event_id!==event_id);if(e.target.value!==""){const impact_ns=Math.round(Number(e.target.value)*25)*40000000;if(Number.isFinite(impact_ns))events.push({event_id,code:segment.primary_code!,start_ns:segment.start_ns,stop_ns:segment.stop_ns,impact_ns,evidence:"human replay inspection"});}setEditor({...editor,fall_events:events});}}/></label>}
-        <label>区间语义<textarea aria-label="区间语义" rows={2} value={segment.semantic_text ?? ""} onChange={e=>change({semantic_text:e.target.value})} placeholder="可自由描述动作，无需与列表文字一致"/></label>
-        {segment.notes?.map((n,i)=><label key={n.note_id}>区间备注 · {sec(n.start_ns)}–{sec(n.stop_ns)} s<textarea aria-label={`区间备注 ${i+1}`} rows={2} value={n.text} onChange={e=>change({notes:segment.notes!.map((v,j)=>i===j?{...v,text:e.target.value}:v)})}/></label>)}
-        <button onClick={()=>change({notes:[...(segment.notes??[]),{note_id:`note-${crypto.randomUUID()}`,start_ns:segment.start_ns,stop_ns:segment.stop_ns,text:""}]})}>添加区间备注</button>
+        <IntervalSemantics key={`${casePath}:${segment.segment_id}`} segment={segment} onChange={change}/>
       </fieldset>}</div><footer className="primary-actions" hidden={!!previewId}><div className="primary-save-status" role="status">{notice || (dirty ? "修改已在本机暂存，尚未通过" : "检查完毕后通过整条；提交后保持当前位置")}{duration > usable && <small> · {sec(duration-usable)} 秒待判，保持屏蔽</small>}</div>
         <div><button className="primary-save" disabled={busy||!lease} onClick={()=>void save("pass")}>通过整条录制 <kbd>Ctrl/⌘ Enter</kbd></button></div>
         <button disabled={busy||!lease} onClick={()=>{pause();setRejecting(true);}}>质量不合格</button>

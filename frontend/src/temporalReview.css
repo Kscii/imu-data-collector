@@ -119,6 +119,16 @@
 .posture-workbench .primary-segments { display: flex; flex-direction: column; contain: size; min-height: 0; max-height: none; margin: 0; overflow-y: auto; }
 .posture-workbench .primary-segments button { flex-shrink: 0; }
 .posture-workbench .primary-fields { min-height: auto; max-height: none; overflow: visible; padding: 2px; }
+.interval-semantics { display: grid; gap: 8px; min-width: 0; }
+.interval-semantics label { position: relative; }
+.interval-semantics label > small { position: absolute; right: 0; top: 0; color: #91a4bd; font-size: 10px; }
+.interval-semantics-history { font-size: 11px; color: #adc4dc; }
+.interval-semantics-history > summary { cursor: pointer; }
+.interval-semantics-history > div { display: grid; gap: 8px; padding-top: 8px; }
+@media (max-height: 720px) {
+  .posture-workbench .primary-fields, .posture-workbench .interval-semantics { gap: 4px; }
+  .posture-workbench .primary-editor, .posture-workbench .primary-editor-scroll { gap: 6px; }
+}
 .posture-workbench .primary-editor header > small { order: 1; }
 .posture-workbench .primary-editor header > button { padding: 4px 6px; }
 .posture-workbench .primary-actions { grid-template-columns: minmax(0, 1fr) auto; }
