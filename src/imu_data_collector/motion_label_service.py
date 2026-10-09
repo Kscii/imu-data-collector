@@ -20,7 +20,6 @@ from .motion_annotations import (
     apply_projection,
     covered,
     normalize_recording,
-    production_document,
     project_motion,
     require,
     reviewed_ranges,
@@ -28,14 +27,16 @@ from .motion_annotations import (
 )
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
-    ACTIVITY_RULES_VERSION,
-    PRODUCTION_RULES_VERSION,
-    PRODUCTION_TAXONOMY_VERSION,
+    CURRENT_RULES_VERSION,
+    CURRENT_TAXONOMY_VERSION,
     SHA256,
     activity_rules_evidence,
+    current_document,
     document_sha256,
     formal_labels,
+    partial_fall_events,
     validate_document,
+    walking_bouts,
 )
 
 
@@ -303,14 +304,14 @@ class MotionLabelService:
         return self.feature(mid)["template"]
 
     def edit(self, mid, cid, vid, body, actor, *, decision=None):
-        expected_rules = (
-            PRODUCTION_RULES_VERSION
-            if body.get("document", {}).get("taxonomy", {}).get("version")
-            == PRODUCTION_TAXONOMY_VERSION
-            else ACTIVITY_RULES_VERSION
-        )
-        if body.get("activity_rules_version") != expected_rules:
-            raise ObjectConflictError("分类规则已更新；请保存本地草稿并刷新页面后按新规则检查。")
+        if (
+            body.get("activity_rules_version") != CURRENT_RULES_VERSION
+            or body.get("document", {}).get("taxonomy", {}).get("version")
+            != CURRENT_TAXONOMY_VERSION
+        ):
+            raise ObjectConflictError(
+                "分类规则已更新；本机修改保持暂存，请刷新页面后按新规则检查。"
+            )
         variant = self.variant(mid, cid, vid)
         require(variant is not None, "Unknown IMU variant")
         state, generation = self.state(mid)
@@ -321,8 +322,7 @@ class MotionLabelService:
         # The server owns provenance and producer identity, not arbitrary editor input.
         edited = deepcopy(edited)
         base = self.base_document(mid, state)
-        if edited["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
-            base = production_document(base)
+        base = current_document(base)
         edited["source_evidence"] = deepcopy(base["source_evidence"])
         rules = activity_rules_evidence(edited["taxonomy"]["version"])
         if rules not in edited["source_evidence"]:
@@ -450,7 +450,8 @@ class MotionLabelService:
             "draft": ({**state["draft"], "document": document} if state["draft"] else None),
             "proposal": {"document": document},
             "proposal_sha256": document_sha256(document),
-            "editor_template": production_document(document),
+            "editor_template": current_document(document),
+            "walking_bouts": walking_bouts(document),
             "prediction_quality": None,
             "usable_ns": usable_ns(document),
             "total_ns": variant["clock"]["duration_ns"],
@@ -503,9 +504,19 @@ class MotionLabelService:
             result["has_suggestion"] = bool(
                 (review or state["draft"]) and shape(suggested) != shape(document)
             )
-            result["suggestion"] = (
-                production_document(suggested) if result["has_suggestion"] else None
-            )
+            result["suggestion"] = current_document(suggested) if result["has_suggestion"] else None
+        migrations = [
+            e
+            for e in result["editor_template"]["source_evidence"]
+            if e.get("kind") == "posture-taxonomy-migration"
+        ]
+        result["migration"] = migrations[-1] if migrations else None
+        result["needs_rule_review"] = bool(
+            review
+            and review["document"]["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION
+            and migrations
+            and migrations[-1]["review_required"]
+        )
         return result
 
     def listing(self, *, offset=0, limit=30, status="all", search=""):
@@ -575,7 +586,7 @@ class MotionLabelService:
             require(len(defaults) == 1, "请明确选择一个 IMU 配置")
             configuration_id = defaults[0]
         require(configuration_id in configurations, "Unknown snapshot configuration")
-        entries, seen_versions = [], set()
+        entries, seen_versions, exclusions = [], set(), []
         holdouts = self.holdout_groups()
         for variant in sorted(
             variants,
@@ -603,6 +614,26 @@ class MotionLabelService:
             ):
                 continue
             doc = accepted_projection(review, c, variant["clock"])
+            migrated = current_document(doc)
+            pending = [
+                e
+                for e in migrated["source_evidence"]
+                if e.get("kind") == "posture-taxonomy-migration"
+            ]
+            if partial_fall_events(doc) or (
+                doc["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION
+                and pending
+                and pending[-1]["review_required"]
+            ):
+                exclusions.append(
+                    {
+                        "motion_sha256": variant["motion_sha256"],
+                        "reason": "partial_fall"
+                        if partial_fall_events(doc)
+                        else "taxonomy_review_required",
+                    }
+                )
+                continue
             if not usable_ns(doc):
                 continue
             commit = self.source._commit(c["candidate_id"], c["version_id"])
@@ -652,6 +683,7 @@ class MotionLabelService:
             "created_at_utc": now(),
             "configuration_id": configuration_id,
             "motion_annotation_policy": POLICY,
+            "supervision_exclusions": exclusions,
         }
         old, _ = self.optional(key)
         self.immutable(key, old or intent)

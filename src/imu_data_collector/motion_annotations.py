@@ -7,15 +7,20 @@ copies except for the temporal-contract import. No storage or ML dependencies.
 from copy import deepcopy
 
 from .synthetic_temporal_contract import (
+    CURRENT_SCHEMA,
+    CURRENT_TAXONOMY_VERSION,
     FALLS,
     PERIOD_NS,
     PRODUCTION_PRIMARY,
     PRODUCTION_TAXONOMY_VERSION,
     SEMANTIC_SCHEMA,
     SHA256,
+    AnnotationIssues,
+    current_document,
     document_sha256,
     empty_document,
     semantic_draft,
+    submission_issues,
     taxonomy,
     validate_document,
 )
@@ -30,10 +35,14 @@ def production_document(document):
     result = deepcopy(document)
     if result["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
         return result
-    result["source_evidence"].append({
-        "kind": "taxonomy-projection", "source_sha256": document_sha256(document),
-        "source_taxonomy": deepcopy(document["taxonomy"]), "mapping": "fall-directions-to-fall-v1",
-    })
+    result["source_evidence"].append(
+        {
+            "kind": "taxonomy-projection",
+            "source_sha256": document_sha256(document),
+            "source_taxonomy": deepcopy(document["taxonomy"]),
+            "mapping": "fall-directions-to-fall-v1",
+        }
+    )
     result["taxonomy"] = taxonomy(PRODUCTION_TAXONOMY_VERSION)
     for segment in result["segments"]:
         if segment["primary_code"] in FALLS:
@@ -79,7 +88,11 @@ def validate_motion(document):
     )
     temporary = deepcopy(document)
     temporary["candidate"] = identity(temporary.pop("motion_sha256"))
-    temporary["schema"] = SEMANTIC_SCHEMA
+    temporary["schema"] = (
+        CURRENT_SCHEMA
+        if temporary["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION
+        else SEMANTIC_SCHEMA
+    )
     temporary["clock"]["origin"] = "selection_first_imu_sample"
     validate_document(temporary)
     require(
@@ -93,7 +106,7 @@ def validate_motion(document):
 
 
 def mask(segment, reason):
-    return dict(
+    result = dict(
         segment,
         primary_code=None,
         resolution=segment["resolution"]
@@ -104,6 +117,9 @@ def mask(segment, reason):
         pending_reasons=[],
         fall_event_id=None,
     )
+    if "transition" in result:
+        result["transition"] = None
+    return result
 
 
 def _pieces(document, start, stop, *, offset=0, clip_notes=True):
@@ -136,8 +152,16 @@ def _pieces(document, start, stop, *, offset=0, clip_notes=True):
         elif event:
             selected_events[event["event_id"]] = {
                 **event,
-                **{k: event[k] - offset for k in ("start_ns", "impact_ns", "stop_ns")},
+                **{
+                    k: event[k] - offset if event[k] is not None else None
+                    for k in ("start_ns", "impact_ns", "stop_ns")
+                },
             }
+        if segment.get("transition"):
+            if a > source["start_ns"]:
+                segment["transition"]["from_posture"] = None
+            if b < source["stop_ns"]:
+                segment["transition"]["to_posture"] = None
         segments.append(segment)
     return segments, list(selected_events.values())
 
@@ -156,7 +180,11 @@ def project_motion(document, candidate, clock):
     segments, events = _pieces(document, start, start + duration, offset=start)
     result = {k: deepcopy(v) for k, v in document.items() if k != "motion_sha256"}
     result.update(
-        schema=SEMANTIC_SCHEMA,
+        schema=(
+            CURRENT_SCHEMA
+            if document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION
+            else SEMANTIC_SCHEMA
+        ),
         candidate=deepcopy(candidate),
         clock=deepcopy(clock),
         segments=segments,
@@ -170,7 +198,14 @@ def project_motion(document, candidate, clock):
 def normalize_recording(document):
     """One recording acceptance confirms known tags, never an unknown or absent impact."""
     result = deepcopy(document)
-    require(result.get("schema") == SEMANTIC_SCHEMA, "Production editor requires annotation v2")
+    require(
+        result.get("schema") in (SEMANTIC_SCHEMA, CURRENT_SCHEMA),
+        "Production editor requires semantic annotation",
+    )
+    if result["schema"] == CURRENT_SCHEMA:
+        issues = submission_issues(result)
+        if issues:
+            raise AnnotationIssues(issues)
     events = {e["event_id"]: e for e in result["fall_events"]}
     used = {}
     for index, segment in enumerate(result["segments"]):
@@ -185,6 +220,17 @@ def normalize_recording(document):
             continue
         if segment["primary_code"] in FALLS:
             event = events.get(segment["fall_event_id"])
+            if not event and result["schema"] == CURRENT_SCHEMA:
+                event_id = "fall-" + segment["segment_id"]
+                event = {
+                    "event_id": event_id,
+                    "code": "fall",
+                    "start_ns": segment["start_ns"],
+                    "stop_ns": segment["stop_ns"],
+                    "impact_ns": None,
+                    "evidence": "Human recording review; impact unlocalized",
+                }
+                segment["fall_event_id"] = event_id
             if not event:
                 result["segments"][index] = mask(segment, "Fall event needs onset and impact")
                 continue
@@ -209,6 +255,7 @@ def coalesce(segments):
             prior
             and prior["stop_ns"] == item["start_ns"]
             and prior["primary_code"] is not None
+            and prior["primary_code"] != "posture_transition"
             and all(
                 prior[k] == item[k]
                 for k in ("primary_code", "review_state", "resolution", "fall_event_id")
@@ -240,6 +287,8 @@ def apply_projection(document, edit):
     validate_document(edit)
     if edit["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
         document = production_document(document)
+    elif edit["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
+        document = current_document(document)
     require(document["taxonomy"] == edit["taxonomy"], "Edit taxonomy differs")
     require(
         edit["candidate"]["input_hashes"]["motion"] == document["motion_sha256"],
@@ -330,11 +379,16 @@ def primary_prediction(template, labels, indices, model_id, *, impacts=None):
             if impact is not None and a < impact < b:
                 event_id = f"fall-{i:05d}"
                 segment["fall_event_id"] = event_id
-                result["fall_events"].append({
-                    "event_id": event_id, "code": code, "start_ns": a * PERIOD_NS,
-                    "stop_ns": b * PERIOD_NS, "impact_ns": impact * PERIOD_NS,
-                    "evidence": "Model impact proposal; requires human recording review",
-                })
+                result["fall_events"].append(
+                    {
+                        "event_id": event_id,
+                        "code": code,
+                        "start_ns": a * PERIOD_NS,
+                        "stop_ns": b * PERIOD_NS,
+                        "impact_ns": impact * PERIOD_NS,
+                        "evidence": "Model impact proposal; requires human recording review",
+                    }
+                )
                 result["segments"].append(segment)
                 continue
             segment.update(

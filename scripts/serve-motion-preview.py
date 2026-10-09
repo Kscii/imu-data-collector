@@ -20,6 +20,9 @@ def main():
     parser.add_argument(
         "--trial-guide", type=Path, help="Optional local HTML guide served at /trial."
     )
+    parser.add_argument(
+        "--trial-rules", type=Path, help="Temporary rules document at /trial/rules."
+    )
     args = parser.parse_args()
     settings = load_settings()
     settings.storage.backend = "local"
@@ -41,6 +44,13 @@ def main():
             return FileResponse(guide, media_type="text/html")
 
         app.router.routes.insert(0, Route("/trial", trial_guide, methods=["GET"]))
+    if args.trial_rules:
+        rules = args.trial_rules.resolve(strict=True)
+
+        async def trial_rules(request):
+            return FileResponse(rules, media_type="text/plain; charset=utf-8")
+
+        app.router.routes.insert(0, Route("/trial/rules", trial_rules, methods=["GET"]))
     uvicorn.run(app, host="127.0.0.1", port=args.port)
 
 

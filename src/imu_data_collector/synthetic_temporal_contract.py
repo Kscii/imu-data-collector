@@ -48,6 +48,35 @@ PRODUCTION_TAXONOMY_VERSION = "2.0.0"
 PRODUCTION_PRIMARY = PRIMARY[:-5] + ("fall",)
 FALLS = frozenset((*PRIMARY[-5:], "fall"))
 PRODUCTION_RULES_VERSION = "2026-10-09.3"
+CURRENT_SCHEMA = "imu.temporal_annotation.v3"
+CURRENT_TAXONOMY_VERSION = "3.0.0"
+CURRENT_RULES_VERSION = "2026-10-09.4"
+CURRENT_PRIMARY = (
+    "standing",
+    "sitting",
+    "lying",
+    "squatting",
+    "kneeling",
+    "ground_support",
+    "walking",
+    "running",
+    "stair_up",
+    "stair_down",
+    "posture_transition",
+    "bending",
+    "jumping",
+    "stumble_recovery",
+    "fall",
+    "other_activity",
+)
+SUPPORT_POSTURES = (
+    "standing",
+    "sitting",
+    "lying",
+    "squatting",
+    "kneeling",
+    "ground_support",
+)
 
 
 def primary_codes(version=TAXONOMY_VERSION):
@@ -55,7 +84,11 @@ def primary_codes(version=TAXONOMY_VERSION):
         return PRIMARY
     if version == PRODUCTION_TAXONOMY_VERSION:
         return PRODUCTION_PRIMARY
+    if version == CURRENT_TAXONOMY_VERSION:
+        return CURRENT_PRIMARY
     raise ValueError(f"Unsupported taxonomy version: {version}")
+
+
 # Operational definitions are versioned separately from the unchanged 24-code
 # wire taxonomy. Existing accepted documents retain their original interpretation.
 ACTIVITY_RULES_VERSION = "2026-10-09.2"
@@ -251,6 +284,8 @@ def imu_training_code(code):
 
 def activity_rules(version=TAXONOMY_VERSION):
     """One portable source for documentation, the catalog and training maps."""
+    if version == CURRENT_TAXONOMY_VERSION:
+        return current_activity_rules()
     codes = primary_codes(version)
     fields = ("name_zh", "definition", "includes", "excludes", "boundaries", "example")
     return {
@@ -609,10 +644,16 @@ def empty_document(
 
 def validate_document(document, *, expected_candidate=None, expected_count=None):
     _require(
-        isinstance(document, dict) and document.get("schema") in (SCHEMA, SEMANTIC_SCHEMA),
+        isinstance(document, dict)
+        and document.get("schema") in (SCHEMA, SEMANTIC_SCHEMA, CURRENT_SCHEMA),
         "Unsupported temporal annotation schema",
     )
-    semantic = document["schema"] == SEMANTIC_SCHEMA
+    semantic = document["schema"] in (SEMANTIC_SCHEMA, CURRENT_SCHEMA)
+    current = document["schema"] == CURRENT_SCHEMA
+    _require(
+        current == (document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION),
+        "Annotation schema and taxonomy version differ",
+    )
     _require(
         set(document)
         == {
@@ -717,9 +758,8 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
                 "reason",
                 "fall_event_id",
             }
-            | (
-                {"semantic_text", "review_state", "pending_reasons", "notes"} if semantic else set()
-            ),
+            | ({"semantic_text", "review_state", "pending_reasons", "notes"} if semantic else set())
+            | ({"transition"} if current else set()),
             "Segment fields",
         )
         sid = segment["segment_id"]
@@ -737,6 +777,18 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
             "Segment coverage gap/overlap",
         )
         cursor = stop
+        if current:
+            _require(start % PERIOD_NS == stop % PERIOD_NS == 0, "切点必须位于 25 Hz 时间网格")
+            transition = segment["transition"]
+            if segment["primary_code"] == "posture_transition":
+                _require(
+                    isinstance(transition, dict)
+                    and set(transition) == {"from_posture", "to_posture"}
+                    and all(v is None or v in SUPPORT_POSTURES for v in transition.values()),
+                    "姿态转换需要有效的起止姿态，未知端点可留空",
+                )
+            else:
+                _require(transition is None, "非转换区间不能携带转换端点")
         if semantic:
             _require(isinstance(segment["semantic_text"], str), "Interval semantic text")
             state, pending = segment["review_state"], segment["pending_reasons"]
@@ -778,7 +830,10 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
                     "Note original range/text",
                 )
         resolution, code = segment["resolution"], segment["primary_code"]
-        _require(resolution in RESOLUTIONS, "Unknown resolution")
+        _require(
+            resolution in (RESOLUTIONS | {"invalid_data"} if current else RESOLUTIONS),
+            "Unknown resolution",
+        )
         if resolution == "identified":
             _require(code in codes and segment["reason"] is None, "Unresolved primary code")
         else:
@@ -831,8 +886,13 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
             "Fall event must cover contiguous segments",
         )
         _require(
-            type(event["impact_ns"]) is int
-            and event["start_ns"] < event["impact_ns"] < event["stop_ns"]
+            (
+                (current and event["impact_ns"] is None)
+                or (
+                    type(event["impact_ns"]) is int
+                    and event["start_ns"] < event["impact_ns"] < event["stop_ns"]
+                )
+            )
             and isinstance(event["evidence"], str)
             and event["evidence"].strip(),
             "Fall needs an evidenced impact strictly inside the event",
@@ -846,7 +906,7 @@ def semantic_draft(document):
     """Convert legacy evidence into an unconfirmed draft; never import acceptance."""
     validate_document(document)
     result = deepcopy(document)
-    if result["schema"] == SEMANTIC_SCHEMA:
+    if result["schema"] in (SEMANTIC_SCHEMA, CURRENT_SCHEMA):
         return result
     result["schema"] = SEMANTIC_SCHEMA
     if result["fall_events"]:
@@ -927,6 +987,8 @@ def normalize_semantic(document):
 
 def confirmed_spans(document):
     """Single conservative projection shared by training, metrics and HDF5 export."""
+    if document["schema"] == CURRENT_SCHEMA:
+        return classification_spans(document)
     return [
         (start, stop, code)
         for _, kind, start, stop, code in project_annotations(document)
@@ -946,6 +1008,10 @@ def project_annotations(document, *, sequence_index=0):
     Empty quantized segments disappear, but an unrepresentable fall is rejected.
     """
     validate_document(document)
+    _require(
+        not partial_fall_events(document),
+        "已确认跌倒缺少撞击点：保留分类监督，暂不导出完整 HDF5 3.3 时序录制",
+    )
     count = document["clock"]["sample_count"]
     events = {e["event_id"]: e for e in document["fall_events"]}
     ranges = []
@@ -1083,4 +1149,315 @@ def validate_embedded(refs, annotations, *, sequence_index, sample_count):
             )
         )
     _require(actual == expected, "Embedded temporal annotation differs from HDF5 core")
+
+
+# Version 3 is opt-in. Historical taxonomies, rules and experimental APIs above
+# retain their exact meaning; motion review uses this new derived vocabulary.
+_CURRENT_DEFINITIONS = {
+    "standing": ("站立", "足部支撑、没有持续步行；允许小动作和单次挪步。", "日常站立统计"),
+    "sitting": ("坐姿", "臀部在椅子、地面等表面承重，包括盘腿坐。", "坐姿时长与坐站转换"),
+    "lying": (
+        "卧姿",
+        "躯干由表面支撑，包括仰卧、侧卧、俯卧，不等同于睡眠。",
+        "卧姿时长与跌倒后姿态",
+    ),
+    "squatting": ("蹲姿", "屈髋屈膝降低身体，主要由足部承重。", "保留真实低位姿态"),
+    "kneeling": (
+        "跪姿",
+        "单膝或双膝形成主要支撑，包括跪坐；临时扶地不自动变成爬撑。",
+        "区分蹲、跪及转换端点",
+    ),
+    "ground_support": (
+        "爬撑／爬行",
+        "四肢形成低位支撑、躯干离地，包括静止支撑和爬动。",
+        "覆盖静止爬撑，区分卧姿",
+    ),
+    "walking": ("行走", "连续步行，包括倒走、侧走、原地踏步和换步转身。", "日常活动统计"),
+    "running": ("跑步", "连续跑动步态；不能单凭移动速度判定。", "活动强度与跌倒难负例"),
+    "stair_up": ("上楼梯", "连续向上登阶，不包括上坡或单纯身体升高。", "登阶活动与能力趋势"),
+    "stair_down": ("下楼梯", "连续向下登阶，不包括下坡或单纯身体降低。", "登阶活动与跌倒区分"),
+    "posture_transition": (
+        "姿态转换",
+        "连续改变主要支撑姿态或支撑位置；记录起止姿态，允许复合转换及未完成尝试。",
+        "以一个类别覆盖姿态转换",
+    ),
+    "bending": (
+        "弯腰",
+        "明显躯干前屈及回正，未转入坐、蹲、跪等另一主要支撑姿态。",
+        "区分普通弯腰与下地、跌倒",
+    ),
+    "jumping": (
+        "跳跃",
+        "以蹬伸、腾空、落地为核心，包括直接相关的蓄力和落地恢复。",
+        "高运动强度活动及跌倒对照",
+    ),
+    "stumble_recovery": (
+        "失衡恢复",
+        "出现失衡和补偿动作后恢复控制，未完成跌倒。",
+        "与普通踏步及跌倒区分",
+    ),
+    "fall": (
+        "跌倒",
+        "失去有效支撑，非计划地落至地面或更低支撑面；不要求高冲击或长时间卧倒。",
+        "核心跌倒事件",
+    ),
+    "other_activity": (
+        "其他活动",
+        "明确发生但不属于上述类别的活动，填写区间语义；不能替代判断不确定或数据无效。",
+        "覆盖侧手翻等长尾活动",
+    ),
+}
+
+
+def current_activity_rules():
+    return {
+        "id": "primary-activity-rules",
+        "version": CURRENT_RULES_VERSION,
+        "taxonomy_id": TAXONOMY_ID,
+        "taxonomy_version": CURRENT_TAXONOMY_VERSION,
+        "hdf5_version": "3.3.0",
+        "support_postures": list(SUPPORT_POSTURES),
+        "principles": [
+            "每个时刻仅一个主活动；不确定与数据无效独立保留，不充当其他活动真值。",
+            "转换区间不直接相邻；有真实中间姿态就保留，无可辨认中间姿态则合并，不虚构短姿态。",
+            "不同支撑姿态的30个有向组合均允许；相同端点需说明转移、往返或未完成尝试。",
+            "转换允许直接衔接行走、被跌倒中断或被录制边界截断；未知端点不猜测。",
+            "跌倒优先于过程中的姿态，失衡恢复优先于补偿踏步。",
+            "同类连续普通动作合并，独立跌倒不合并；保留区间语义及备注原时间锚点。",
+            "行走间不超过2秒的明确站立暂停仅在活动汇总中合并，保留原细段及净步行时长。",
+            "跌倒分类监督与撞击定位分开；撞击未知不阻止人工检查通过，但不导出完整3.3事件。",
+        ],
+        "primary": [
+            dict(
+                code=c,
+                is_fall=c == "fall",
+                name_zh=_CURRENT_DEFINITIONS[c][0],
+                definition=_CURRENT_DEFINITIONS[c][1],
+                includes="",
+                excludes="",
+                boundaries="以可观察的活动或支撑变化切分，不强制最短停留时长。",
+                example="",
+                rationale=_CURRENT_DEFINITIONS[c][2],
+            )
+            for c in CURRENT_PRIMARY
+        ],
+        "training_profile": {
+            "id": "imu-primary-16-v1",
+            "version": "1.0.0",
+            "codes": list(CURRENT_PRIMARY),
+            "mapping": {c: c for c in CURRENT_PRIMARY},
+            "real_source_mapping": {"syncope_fall": "fall"},
+        },
+    }
+
+
+def support_posture(code):
+    if code in SUPPORT_POSTURES:
+        return code
+    if code in ("walking", "running", "stair_up", "stair_down"):
+        return "standing"
+    return None
+
+
+def current_document(document):
+    """Derive a v3 review view, never replace acceptance or invent new human acts."""
+    if document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
+        return deepcopy(document)
+    result = semantic_draft(document) if document["schema"] == SCHEMA else deepcopy(document)
+    if result["schema"] == SEMANTIC_SCHEMA:
+        result["schema"] = CURRENT_SCHEMA
+    result["taxonomy"] = taxonomy(CURRENT_TAXONOMY_VERSION)
+    changes = []
+    targets = {
+        "sit_down": "sitting",
+        "stand_up": "standing",
+        "get_up": "standing",
+        "lie_down": "lying",
+        "squatting_down": "squatting",
+    }
+    for i, part in enumerate(result["segments"]):
+        old = part["primary_code"]
+        part["transition"] = None
+        reason = None
+        if old in targets:
+            before = support_posture(result["segments"][i - 1]["primary_code"]) if i else None
+            after = (
+                support_posture(document["segments"][i + 1]["primary_code"])
+                if i + 1 < len(result["segments"])
+                else None
+            )
+            part["primary_code"] = "posture_transition"
+            part["transition"] = {"from_posture": before, "to_posture": after or targets[old]}
+            reason = "核对转换起止姿态；原标签：" + _ACTIVITY_RULES[old][0]
+        elif old == "turning":
+            part.update(
+                primary_code=None,
+                resolution="unrecognized",
+                reason="原转向区间需按踏步情况选择行走或站立",
+            )
+            reason = part["reason"]
+        elif old == "crawling":
+            part["primary_code"] = "ground_support"
+        elif old == "bend_or_pick_up":
+            part["primary_code"] = "bending"
+        elif old in FALLS:
+            part["primary_code"] = "fall"
+        text = " ".join(
+            [part.get("semantic_text", ""), *(n["text"] for n in part.get("notes", []))]
+        )
+        if old == "squatting" and "跪" in text:
+            reason = "原蹲姿标签与跪姿语义需要复核"
+        if old == "jumping" and any(w in text for w in ("非典型", "旋转", "侧手翻")):
+            reason = "核对是否为其他活动，不能仅因腾空归为普通跳跃"
+        if old == "lie_down":
+            reason = "核对主动转换、静止卧姿或跌倒；撞击点未知仍可确认跌倒"
+        if reason:
+            part.update(review_state="pending", pending_reasons=["class"])
+            changes.append(
+                {
+                    "segment_id": part["segment_id"],
+                    "start_ns": part["start_ns"],
+                    "stop_ns": part["stop_ns"],
+                    "old_code": old,
+                    "new_code": part["primary_code"],
+                    "reason": reason,
+                }
+            )
+    for event in result["fall_events"]:
+        event["code"] = "fall"
+    result["source_evidence"].append(
+        {
+            "kind": "posture-taxonomy-migration",
+            "source_sha256": document_sha256(document),
+            "source_taxonomy_version": document["taxonomy"]["version"],
+            "target_taxonomy_version": CURRENT_TAXONOMY_VERSION,
+            "rules_version": CURRENT_RULES_VERSION,
+            "review_required": changes,
+        }
+    )
+    return result
+
+
+class AnnotationIssues(ValueError):
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__("标注存在需要修改的问题：" + "；".join(i["message"] for i in issues))
+
+
+def submission_issues(document):
+    """Semantic checks on a displayed v3 recording before acceptance/normalization."""
+    validate_document(document)
+    if document["schema"] != CURRENT_SCHEMA:
+        return []
+    parts, issues = document["segments"], []
+
+    def add(code, message, *segments):
+        issues.append(
+            {"code": code, "message": message, "segment_ids": [s["segment_id"] for s in segments]}
+        )
+
+    for i, part in enumerate(parts):
+        code = part["primary_code"]
+        note = " ".join([part["semantic_text"], *(n["text"] for n in part["notes"])])
+        if code == "other_activity" and not note.strip():
+            add("other_semantics", f"第 {i + 1} 段其他活动需要填写区间语义。", part)
+        if code == "posture_transition":
+            t = part["transition"]
+            if (
+                t["from_posture"] is not None
+                and t["from_posture"] == t["to_posture"]
+                and not note.strip()
+            ):
+                add(
+                    "return_transition",
+                    f"第 {i + 1} 段起止姿态相同，请说明转移、往返或未完成情况。",
+                    part,
+                )
+            for side, neighbor in (("from_posture", i - 1), ("to_posture", i + 1)):
+                if not 0 <= neighbor < len(parts):
+                    continue
+                pose = support_posture(parts[neighbor]["primary_code"])
+                if pose and t[side] and pose != t[side]:
+                    add(
+                        "transition_endpoint",
+                        f"第 {i + 1} 段转换端点与相邻姿态矛盾，请纠正或保留未知端点。",
+                        part,
+                        parts[neighbor],
+                    )
+        if i:
+            prior = parts[i - 1]
+            previous = prior["primary_code"]
+            if previous == code == "posture_transition":
+                add(
+                    "adjacent_transitions",
+                    f"第 {i}、{i + 1} 段转换直接相邻：请合并，或根据真实中间姿态切分。",
+                    prior,
+                    part,
+                )
+            elif previous in SUPPORT_POSTURES and code in SUPPORT_POSTURES and previous != code:
+                add(
+                    "missing_transition",
+                    f"第 {i}、{i + 1} 段支撑姿态直接变化，请补充真实转换或明确待判范围。",
+                    prior,
+                    part,
+                )
+    return issues
+
+
+def partial_fall_events(document):
+    return [e for e in document["fall_events"] if e["impact_ns"] is None]
+
+
+def classification_spans(document):
+    """Classification-only targets; no HDF5 impact requirement, no unknown negatives."""
+    validate_document(document)
+    return [
+        (_ceil_sample(s["start_ns"]), _ceil_sample(s["stop_ns"]), s["primary_code"])
+        for s in document["segments"]
+        if confirmed(s, document)
+    ]
+
+
+def walking_bouts(document, maximum_pause_ns=2_000_000_000):
+    """A derived summary only; never rewrite fine annotations or count paused time as walking."""
+    parts, bouts = document["segments"], []
+    i = 0
+    while i < len(parts):
+        first = parts[i]
+        if first["primary_code"] != "walking" or first.get("review_state") != "confirmed":
+            i += 1
+            continue
+        start, stop = first["start_ns"], first["stop_ns"]
+        active, ids = stop - start, [first["segment_id"]]
+        j = i + 1
+        while j < len(parts):
+            current = parts[j]
+            if current["primary_code"] == "walking" and current.get("review_state") == "confirmed":
+                active += current["stop_ns"] - current["start_ns"]
+                stop = current["stop_ns"]
+                ids.append(current["segment_id"])
+                j += 1
+            elif (
+                j + 1 < len(parts)
+                and current["primary_code"] == "standing"
+                and current.get("review_state") == "confirmed"
+                and current["stop_ns"] - current["start_ns"] <= maximum_pause_ns
+                and parts[j + 1]["primary_code"] == "walking"
+                and parts[j + 1].get("review_state") == "confirmed"
+            ):
+                ids.append(current["segment_id"])
+                j += 1
+            else:
+                break
+        bouts.append(
+            {
+                "start_ns": start,
+                "stop_ns": stop,
+                "walking_ns": active,
+                "pause_ns": stop - start - active,
+                "segment_ids": ids,
+            }
+        )
+        i = j
+    return bouts
     return document

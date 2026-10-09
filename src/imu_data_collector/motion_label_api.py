@@ -8,7 +8,8 @@ from .motion_label_previews import MotionLabelPreviews
 from .motion_label_service import MotionLabelService
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
-    PRODUCTION_TAXONOMY_VERSION,
+    CURRENT_TAXONOMY_VERSION,
+    AnnotationIssues,
     activity_rules,
     document_sha256,
 )
@@ -26,6 +27,11 @@ def register_motion_label_routes(app, source, current_actor):
             raise HTTPException(409, str(error)) from error
         except FileNotFoundError as error:
             raise HTTPException(404, "找不到动捕或标注记录") from error
+        except AnnotationIssues as error:
+            raise HTTPException(
+                422,
+                {"code": "annotation_issues", "message": str(error), "issues": error.issues},
+            ) from error
         except (ValueError, KeyError, TypeError) as error:
             raise HTTPException(422, str(error)) from error
 
@@ -38,9 +44,9 @@ def register_motion_label_routes(app, source, current_actor):
     previews = MotionLabelPreviews(service)
 
     @app.get(root + "/activity-rules")
-    def production_activity_rules(request: Request):
+    def production_activity_rules(request: Request, version: str = CURRENT_TAXONOMY_VERSION):
         current_actor(request)
-        return activity_rules(PRODUCTION_TAXONOMY_VERSION)
+        return invoke(activity_rules, version)
 
     @app.get(root + "/previews")
     def preview_list(request: Request):

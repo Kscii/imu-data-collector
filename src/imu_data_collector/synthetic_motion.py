@@ -97,16 +97,18 @@ VIEWER_BRIDGE = b"""<script>
   };
   report();
   addEventListener('load', report);
-  const keys = new Set([' ', 'r', 'R', 'n', 'N', 'p', 'P', 'x', 'X', 's', 'S']);
+  const keys = new Set([' ', 'r', 'R', 'n', 'N', 'p', 'P', 'x', 'X', 's', 'S', 'm', 'M']);
   document.addEventListener('wheel', event => {
     if (event.target.closest('#view')) event.preventDefault();
   }, {capture: true, passive: false});
   document.addEventListener('keydown', event => {
-    if (parent === window || event.altKey || event.ctrlKey || event.metaKey
+    if (parent === window || event.altKey || event.isComposing || event.repeat
         || event.target.closest('input,textarea,select,[contenteditable="true"]')) return;
-    if (keys.has(event.key)) {
+    const approve = event.key === 'Enter' && (event.ctrlKey || event.metaKey);
+    if (approve || (!(event.ctrlKey || event.metaKey) && keys.has(event.key))) {
       event.preventDefault();
-      parent.postMessage({type: 'imu-synthetic-review-key', key: event.key}, location.origin);
+      parent.postMessage({type: 'imu-synthetic-review-key', key: event.key,
+        ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey}, location.origin);
     }
   }, true);
   addEventListener('message', event => {

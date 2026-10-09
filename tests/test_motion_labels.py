@@ -20,13 +20,15 @@ from imu_data_collector.motion_label_worker import MotionLabelWorker
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 from imu_data_collector.synthetic_motion import SyntheticReviewService
 from imu_data_collector.synthetic_temporal_contract import (
-    PERIOD_NS,
-    PRODUCTION_TAXONOMY_VERSION,
-    activity_rules_evidence,
-    document_sha256,
+    CURRENT_RULES_VERSION as ACTIVITY_RULES_VERSION,
 )
 from imu_data_collector.synthetic_temporal_contract import (
-    PRODUCTION_RULES_VERSION as ACTIVITY_RULES_VERSION,
+    CURRENT_TAXONOMY_VERSION as PRODUCTION_TAXONOMY_VERSION,
+)
+from imu_data_collector.synthetic_temporal_contract import (
+    PERIOD_NS,
+    activity_rules_evidence,
+    document_sha256,
 )
 
 
@@ -756,3 +758,116 @@ def test_discovery_is_incremental_and_bad_receipt_does_not_block_good(tmp_path, 
     service.refresh(force=True)
     assert any("/variants/" in p for p, _, _ in visited)
     assert service.feature(mid) == feature
+
+
+def test_illegal_transition_approval_preserves_all_pointers(tmp_path):
+    from imu_data_collector.synthetic_temporal_contract import AnnotationIssues
+
+    _, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    for part in body["document"]["segments"]:
+        part.update(
+            primary_code="posture_transition",
+            resolution="identified",
+            reason=None,
+            transition={"from_posture": None, "to_posture": None},
+        )
+    before = service.state(mid)
+    c = variant["candidate"]
+    with pytest.raises(AnnotationIssues) as error:
+        service.edit(mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass")
+    assert error.value.issues[0]["code"] == "adjacent_transitions"
+    assert service.state(mid) == before
+
+
+def test_unknown_impact_retains_positive_class_but_holds_formal_recording(tmp_path):
+    from imu_data_collector.synthetic_temporal_contract import (
+        classification_spans,
+        project_annotations,
+    )
+
+    _, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    body["document"]["segments"][0]["primary_code"] = "fall"
+    c = variant["candidate"]
+    result = service.edit(
+        mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"
+    )
+    doc = result["editor_template"]
+    assert result["status"] == "accepted" and doc["fall_events"][0]["impact_ns"] is None
+    assert classification_spans(doc) == [(0, 50, "fall")]
+    with pytest.raises(ValueError, match="3.3"):
+        project_annotations(doc)
+    with pytest.raises(ValueError, match="可用"):
+        service.create_snapshot("admin")
+    body.update(document=doc, expected_review_sha256=result["review"]["revision_sha256"])
+    body["document"]["fall_events"][0]["impact_ns"] = 800_000_000
+    result = service.edit(
+        mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"
+    )
+    assert service.create_snapshot("admin")["candidate_count"] == 1
+    assert any(r[1] == "impact" for r in project_annotations(result["editor_template"]))
+
+
+def test_invalid_data_is_distinct_from_unknown_or_other(tmp_path):
+    _, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    body["document"]["segments"][1].update(resolution="invalid_data", reason="关节轨迹损坏")
+    c = variant["candidate"]
+    result = service.edit(
+        mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"
+    )
+    part = result["editor_template"]["segments"][1]
+    assert (part["primary_code"], part["resolution"], part["review_state"]) == (
+        None,
+        "invalid_data",
+        "excluded",
+    )
+    assert result["usable_ns"] == 2_000_000_000
+
+
+def test_interval_issues_survive_api_error_envelope(tmp_path):
+    store, _, _, mid, variant = seed(tmp_path)
+    settings = load_settings()
+    settings.storage.backend = "local"
+    settings.storage.root = tmp_path / "objects"
+    settings.storage.cache_root = tmp_path / "cache"
+    settings.annotation.catalog_path = tmp_path / "catalog.sqlite3"
+    settings.annotation.synthetic_target = "prod"
+    settings.annotation.synthetic_run_id = None
+    app = create_annotation_app(settings, store=store)
+    service = app.state.motion_label_service
+    service.refresh(force=True)
+    with TestClient(app) as client:
+        root = "/api/v1/synthetic/motions/" + mid
+        lease = client.post(root + "/claim", json={}).json()
+        doc = client.get(root).json()["editor_template"]
+        base = doc["segments"][0]
+        doc["segments"] = [
+            dict(
+                base,
+                segment_id=f"t-{i}",
+                start_ns=i * 2_000_000_000,
+                stop_ns=(i + 1) * 2_000_000_000,
+                primary_code="posture_transition",
+                resolution="identified",
+                reason=None,
+                transition={"from_posture": None, "to_posture": None},
+            )
+            for i in range(2)
+        ]
+        c = variant["candidate"]
+        response = client.post(
+            root + f"/variants/{c['candidate_id']}/{c['version_id']}/review",
+            json={
+                "document": doc,
+                "decision": "pass",
+                "activity_rules_version": ACTIVITY_RULES_VERSION,
+                "lease_token": lease["token"],
+            },
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["code"] == "annotation_issues"
+        assert detail["issues"][0]["segment_ids"] == ["t-0", "t-1"]
+        assert service.state(mid)[0]["accepted"] is None

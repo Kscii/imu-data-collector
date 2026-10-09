@@ -4,12 +4,13 @@ import {intervalDecorations, partAt, partProgress, sourceFrame} from "./annotati
 import {anchoredNotes, joined, type SemanticFields} from "./semanticEditing";
 import {MotionModelPanel} from "./MotionModelPanel";
 import type {ActivityRules} from "./activityRules";
+import {postureNames, supportPosture, reviewIssues, reviewShortcut, type Transition, type ReviewIssue, type ReviewCommand} from "./postureReview";
 import "./temporalReview.css";
 
 const root = "/api/v1/synthetic/motions";
 type Segment = SemanticFields & {segment_id: string; start_ns: number; stop_ns: number; primary_code: string | null;
-  auxiliary_code: null; auxiliary_status: string; resolution: string; reason: string | null; fall_event_id: string | null};
-type Fall = {event_id: string; code: string; start_ns: number; stop_ns: number; impact_ns: number; evidence: string};
+  auxiliary_code: null; auxiliary_status: string; resolution: string; reason: string | null; fall_event_id: string | null; transition?: Transition | null};
+type Fall = {event_id: string; code: string; start_ns: number; stop_ns: number; impact_ns: number | null; evidence: string};
 type Candidate = {candidate_id: string; version_id: string};
 type Variant = {candidate: Candidate; configuration_id: string;
   configuration: {layout_id: string; profile_id: string; variant: string}};
@@ -17,7 +18,8 @@ type Annotation = {candidate: Candidate; clock: {duration_ns: number; source_rat
   segments: Segment[]; fall_events: Fall[]; taxonomy: {version: string; primary: {code: string; name: string; is_fall: boolean}[]}};
 type Row = {motion_sha256: string; status: string;
   entry: {candidate: Candidate; source_dataset: string; source_member: string}};
-type Detail = Row & {variants: Variant[]; editor_template: Annotation; suggestion: Annotation | null;
+type Detail = Row & {variants: Variant[]; editor_template: Annotation; suggestion: Annotation | null; needs_rule_review?: boolean;
+  migration?: {review_required: {segment_id: string; reason: string}[]};
   prediction_quality?: {intervals: {start_ns: number; stop_ns: number; primary_code: string | null;
     high_confidence_fraction: number; boundary_reliable: boolean}[]} | null;
   preview?: {models: {baseline: string; candidate: string}; activity_rules_version: string;
@@ -26,13 +28,17 @@ type Detail = Row & {variants: Variant[]; editor_template: Annotation; suggestio
   has_suggestion: boolean; review: {revision_sha256: string} | null; draft: {revision_sha256: string} | null};
 type Lease = {token: string; expires_at: number};
 const statusNames: Record<string,string> = {inference_pending: "等待自动标注", pending_review: "待检查", accepted: "已通过", rejected: "已拒绝"};
-const unknownNames: Record<string,string> = {unrecognized: "无法识别", uncovered: "词表未覆盖", uncertain_boundary: "边界不确定"};
+const unknownNames: Record<string,string> = {unrecognized: "无法识别", uncovered: "词表未覆盖（待复核）", uncertain_boundary: "边界不确定", invalid_data: "数据无效"};
 const sec = (ns: number) => (ns/1e9).toFixed(2);
+class ReviewRequestError extends Error {
+  issues: ReviewIssue[];
+  constructor(message: string, issues: ReviewIssue[] = []) {super(message); this.issues = issues;}
+}
 
 export async function motionApi<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
   const value = await response.json();
-  if (!response.ok) throw new Error(typeof value.detail === "string" ? value.detail : value.detail?.message ?? `HTTP ${response.status}`);
+  if (!response.ok) throw new ReviewRequestError(typeof value.detail === "string" ? value.detail : value.detail?.message ?? `HTTP ${response.status}`, value.detail?.issues ?? []);
   return value;
 }
 
@@ -46,11 +52,15 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [models, setModels] = useState(false), [difference, setDifference] = useState(false), [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState(""), [rejectScope, setRejectScope] = useState("motion");
+  const [issues, setIssues] = useState<ReviewIssue[]>([]);
   const [frameIndex, setFrameIndex] = useState(0), [playing, setPlaying] = useState(false);
   const [viewerReady, setViewerReady] = useState(false);
   const [plotBounds, setPlotBounds] = useState({left: 50, right: 50});
   const [rules, setRules] = useState<ActivityRules | null>(null);
   const iframe = useRef<HTMLIFrameElement>(null), list = useRef<HTMLDivElement>(null);
+  const actions = useRef<(command: ReviewCommand) => void>(() => {});
+  const submissionInFlight = useRef(false);
+  const navigationAnchor = useRef<{previous?: string; next?: string; position: number} | null>(null);
   const follow = useRef(true), chartReady = useRef(false), loading = useRef(0);
   const session = useRef<{mid: string; token: string} | null>(null);
   const editorRef = useRef(editor); editorRef.current = editor;
@@ -64,13 +74,14 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const activeSegment = editor?.segments[active], segment = editor?.segments[part];
   const progress = activeSegment ? partProgress(activeSegment, cursor) : null;
   const names = Object.fromEntries(editor?.taxonomy.primary.map(t => [t.code, rules?.primary.find(r=>r.code===t.code)?.name_zh ?? t.name]) ?? []);
-  const definition = rules?.primary.find(r=>r.code===segment?.primary_code);
   const quality = current?.prediction_quality?.intervals.find(q=>q.start_ns===segment?.start_ns && q.stop_ns===segment?.stop_ns && q.primary_code===segment?.primary_code);
-  const label = (s: Segment) => s.primary_code ? names[s.primary_code] ?? s.primary_code : unknownNames[s.resolution] ?? "无法识别";
+  const label = (s: Segment) => s.primary_code === "posture_transition" && s.transition
+    ? `转换：${postureNames[s.transition.from_posture ?? ""] ?? "?"}→${postureNames[s.transition.to_posture ?? ""] ?? "?"}`
+    : s.primary_code ? names[s.primary_code] ?? s.primary_code : unknownNames[s.resolution] ?? "无法识别";
   const usable = editor?.segments.reduce((n, s) => {
     const fall = editor.taxonomy.primary.find(t=>t.code===s.primary_code)?.is_fall;
     const event = editor.fall_events.find(e=>e.event_id===s.fall_event_id||e.event_id===`fall-${s.segment_id}`);
-    const eligible = s.primary_code && (!fall || (event && event.impact_ns>s.start_ns && event.impact_ns<s.stop_ns));
+    const eligible = s.primary_code && (editor.taxonomy.version === "3.0.0" || !fall || (event && event.impact_ns !== null && event.impact_ns>s.start_ns && event.impact_ns<s.stop_ns));
     return n+(eligible ? s.stop_ns-s.start_ns : 0);
   }, 0) ?? 0;
   const dirty = !previewId && !!editor && JSON.stringify(editor) !== JSON.stringify(current?.editor_template);
@@ -101,7 +112,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   };
   const open = async (mid: string, variant?: Candidate) => {
     const sequence = ++loading.current;
-    setBusy(true); setError(""); setNotice(""); setLease(null); setViewerReady(false);
+    setBusy(true); setError(""); setIssues([]); setNotice(""); setLease(null); setViewerReady(false);
     pause();
     try {
       persist();
@@ -127,6 +138,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
           value = cached.document; setNotice("已恢复本地未提交草稿。");
         } else setError("存在基于旧审核版本的本地草稿，未覆盖服务器结果；可下载本地草稿进行核对。");
       }
+      navigationAnchor.current = null;
       setCurrent(data); setEditor(value); setLease(claimed); setPart(0); setFrameIndex(0); setPlaying(false); setViewerReady(false);
       if (data.entry.candidate.candidate_id === currentRef.current?.entry.candidate.candidate_id &&
           data.entry.candidate.version_id === currentRef.current?.entry.candidate.version_id) control("seek", {frame: 0});
@@ -140,9 +152,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       await open(found.motion_sha256, {candidate_id,version_id});
     } else if (items[0]) await open(items[0].motion_sha256);
   }).catch(e => setError(String(e)));}, []);
-  useEffect(() => {void (previewId && editor?.taxonomy.version !== "2.0.0"
-    ? motionApi<{temporal?:ActivityRules}>("/api/v1/synthetic/labels").then(v=>v.temporal??null)
-    : motionApi<ActivityRules>(`${root}/activity-rules`)).then(setRules).catch(e=>setError(String(e)));}, [previewId, editor?.taxonomy.version]);
+  useEffect(() => {void motionApi<ActivityRules>(`${root}/activity-rules?version=${encodeURIComponent(editor?.taxonomy.version ?? "3.0.0")}`).then(setRules).catch(e=>setError(String(e)));}, [editor?.taxonomy.version]);
   useEffect(() => {
     const timer = setInterval(() => {
       const s = session.current;
@@ -150,7 +160,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     }, 60000);
     return () => {clearInterval(timer); const s = session.current; if (s) void motionApi(`${root}/${s.mid}/release`, {token: s.token});};
   }, []);
-  useEffect(() => {try {persist();} catch {setError("本地草稿存储失败，请保持页面并保存草稿。");}}, [editor]);
+  useEffect(() => {try {persist();} catch {setError("本地暂存失败，请保持页面并下载草稿备份。");}}, [editor]);
   useEffect(() => {
     const listener = (event: MessageEvent) => {
       if (event.origin !== location.origin || event.source !== iframe.current?.contentWindow) return;
@@ -160,10 +170,15 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         setViewerReady(event.data.ready === true);
         control("chart-ready", {ready: chartReady.current});
       }
-      if (event.data?.type === "imu-synthetic-review-key" && event.data.key === " ") toggle();
+      if (event.data?.type === "imu-synthetic-review-key") {
+        const command = reviewShortcut(event.data);
+        if (command) actions.current(command);
+      }
     };
     const keyboard = (event: KeyboardEvent) => {
-      if (event.code === "Space" && !(event.target as HTMLElement)?.closest("input,textarea,select,button,[contenteditable=true]") && !queue && !models && !difference && !rejecting) {event.preventDefault(); toggle();}
+      const target = event.target as HTMLElement;
+      const command = reviewShortcut(event, !!target?.closest("input,textarea,select,[contenteditable=true]"), !!target?.closest("button,summary"));
+      if (command) {event.preventDefault(); actions.current(command);}
     };
     addEventListener("message", listener); addEventListener("keydown", keyboard);
     return () => {removeEventListener("message", listener); removeEventListener("keydown", keyboard);};
@@ -178,11 +193,27 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     }
   }, [active, playing]);
   const change = (fields: Partial<Segment>) => setEditor(old => old && ({...old, segments: old.segments.map((s,i) => i === part ? {...s,...fields} : s)}));
-  const boundary = (side: "start_ns" | "stop_ns", ns: number) => {
-    if (!editor || !Number.isFinite(ns)) return;
-    const point = Math.round(ns/40000000)*40000000, i = side === "start_ns" ? part-1 : part;
-    if (i < 0 || i >= editor.segments.length-1 || point <= editor.segments[i].start_ns || point >= editor.segments[i+1].stop_ns) return;
-    setEditor({...editor, segments: editor.segments.map((s,n) => n === i ? {...s,stop_ns:point} : n === i+1 ? {...s,start_ns:point} : s)});
+  const split = () => {
+    if (!editor || !segment || !lease || busy || previewId || !viewerReady) return;
+    pause(); setIssues([]);
+    const point = Math.round(cursor / 40000000) * 40000000;
+    if (point <= segment.start_ns || point >= segment.stop_ns) {setError("请先将播放位置移到所选区间内部。"); return;}
+    setEditor({...editor, segments: editor.segments.flatMap((s, i) => i === part ? [
+      {...s, notes: anchoredNotes(s), stop_ns: point},
+      {...s, notes: anchoredNotes(s), segment_id: `segment-${crypto.randomUUID()}`, start_ns: point},
+    ] : [s])});
+  };
+  const merge = () => {
+    if (!editor || !segment || !lease || busy || previewId || !viewerReady) return;
+    const next = editor.segments[part + 1]; if (!next) return;
+    pause(); setIssues([]);
+    if (segment.primary_code === "fall" && next.primary_code === "fall" &&
+        (!segment.fall_event_id || !next.fall_event_id || segment.fall_event_id !== next.fall_event_id)) {
+      setError("不能合并两次独立跌倒。"); return;
+    }
+    const value = joined(segment, next);
+    if (segment.transition && next.transition) value.transition = {...segment.transition, to_posture: next.transition.to_posture};
+    setEditor({...editor, segments: editor.segments.flatMap((s,i) => i === part ? [value] : i === part+1 ? [] : [s])});
   };
   const finalized = () => {
     if (!editor) throw new Error("没有可保存的区间");
@@ -190,7 +221,8 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     const doc = structuredClone(editor), events = new Map<string,Fall>();
     for (const s of doc.segments) {
       const fall = doc.taxonomy.primary.find(t => t.code === s.primary_code)?.is_fall;
-      const event = doc.fall_events.find(e => e.event_id === s.fall_event_id || e.event_id === `fall-${s.segment_id}`);
+      const event = doc.fall_events.find(e => e.event_id === s.fall_event_id || e.event_id === `fall-${s.segment_id}`)
+        ?? (fall && doc.taxonomy.version === "3.0.0" ? {event_id: `fall-${s.segment_id}`, code: s.primary_code!, start_ns: s.start_ns, stop_ns: s.stop_ns, impact_ns: null, evidence: "Human recording review; impact unlocalized"} : undefined);
       s.review_state = s.primary_code && (!fall || event) ? "confirmed" : "pending";
       s.pending_reasons = s.review_state === "confirmed" ? [] : [fall ? "boundary" : "class"];
       s.fall_event_id = fall && event ? event.event_id : null;
@@ -203,7 +235,16 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     return {...doc,fall_events:[...events.values()]};
   };
   const save = async (decision?: "pass" | "reject") => {
-    if (previewId || !current || !lease) return;
+    if (previewId || !current || !lease || submissionInFlight.current) return;
+    const found = decision === "pass" && editor ? reviewIssues(editor.segments) : [];
+    if (decision === "pass" && editor) for (const event of editor.fall_events) {
+      const parts = editor.segments.filter(s => s.primary_code === "fall" && (s.fall_event_id === event.event_id || `fall-${s.segment_id}` === event.event_id));
+      if (parts.length && event.impact_ns !== null && !(event.impact_ns > parts[0].start_ns && event.impact_ns < parts.at(-1)!.stop_ns))
+        found.push({code:"impact_range",message:"撞击时刻必须在跌倒区间内部；无法确定时请留空。",segment_ids:parts.map(s=>s.segment_id)});
+    }
+    setIssues(found);
+    if (found.length) {pause(); const at = editor!.segments.findIndex(s => s.segment_id === found[0].segment_ids[0]); if (at >= 0) selectPart(at); return;}
+    submissionInFlight.current = true;
     setBusy(true); setError(""); pause();
     try {
       const priorStart = segment?.start_ns ?? 0;
@@ -212,12 +253,26 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         expected_review_sha256: current.review?.revision_sha256 ?? null, decision, scope: rejectScope, reason});
       localStorage.removeItem(cacheKey(current)); setCurrent(result); setEditor(structuredClone(result.editor_template));
       setPart(Math.max(0,partAt(result.editor_template.segments,priorStart))); setRejecting(false);
-      setNotice(decision === "pass" ? "整条录制已通过；未知区间继续屏蔽。" : decision === "reject" ? "质量决定已保存。" : "草稿已保存，正式审核版本未改变。");
+      const index = rows.findIndex(r => r.motion_sha256 === current.motion_sha256);
+      if (index >= 0) navigationAnchor.current = {previous: rows[index-1]?.motion_sha256, next: rows[index+1]?.motion_sha256, position: offset+index};
+      setNotice(decision === "pass" ? "整条录制已通过；待判区间保持屏蔽，跌倒分类与撞击定位分别使用。" : decision === "reject" ? "质量决定已保存。" : "草稿已保存，正式审核版本未改变。");
       await fetchRows();
-    } catch (e) {setError(String(e));} finally {setBusy(false);}
+    } catch (e) {
+      if (e instanceof ReviewRequestError && e.issues.length) {
+        setIssues(e.issues);
+        const at = editor!.segments.findIndex(s=>s.segment_id===e.issues[0].segment_ids[0]); if(at>=0)selectPart(at);
+      } else setError(String(e));
+    } finally {submissionInFlight.current = false; setBusy(false);}
   };
   const neighbor = async (delta: number) => {
     const index = rows.findIndex(r => r.motion_sha256 === current?.motion_sha256), next = index+delta;
+    if (index < 0 && navigationAnchor.current) {
+      const anchor = navigationAnchor.current, targetId = delta < 0 ? anchor.previous : anchor.next;
+      if (targetId) {await open(targetId); return;}
+      const position = anchor.position + (delta < 0 ? -1 : 0);
+      if (position >= 0 && position < total) {const page=await fetchRows(position); if(page[0])await open(page[0].motion_sha256);}
+      return;
+    }
     if (rows[next]) {await open(rows[next].motion_sha256); return;}
     const target = offset+delta*30;
     if (target < 0 || target >= total) return;
@@ -226,13 +281,26 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     if (item) await open(item.motion_sha256);
   };
   const selectedIndex = rows.findIndex(r => r.motion_sha256 === current?.motion_sha256);
+  actions.current = command => {
+    if (busy || queue || models || difference || rejecting || submissionInFlight.current) return;
+    if (command === "toggle") toggle();
+    else if (command === "split") split();
+    else if (command === "merge") merge();
+    else if (command === "approve") void save("pass");
+    else void neighbor(command === "previous" ? -1 : 1).catch(e=>setError(String(e)));
+  };
   const isFall = editor?.taxonomy.primary.find(t => t.code === segment?.primary_code)?.is_fall;
   const fall = editor?.fall_events.find(e => e.event_id === segment?.fall_event_id || e.event_id === `fall-${segment?.segment_id}`);
-  return <main className="primary-workbench" data-no-localize>
+  return <main className="primary-workbench posture-workbench" data-no-localize>
     <header className="primary-toolbar panel"><button onClick={() => setQueue(true)}>审核队列 · {total} 条</button><strong>动捕标注</strong>
       <span className="primary-task" title={current?.entry.source_member}>{current?.entry.source_dataset} · {current?.entry.source_member}</span>
-      <button disabled={busy || offset+selectedIndex <= 0} onClick={() => void neighbor(-1)}>上一条</button>
-      <button disabled={busy || offset+selectedIndex+1 >= total} onClick={() => void neighbor(1)}>下一条</button>
+      <button disabled={busy || (selectedIndex < 0 && navigationAnchor.current ? navigationAnchor.current.position <= 0 : offset+selectedIndex <= 0)} onClick={() => void neighbor(-1)}>上一条 <kbd>P</kbd></button>
+      <button disabled={busy || (selectedIndex < 0 && navigationAnchor.current ? navigationAnchor.current.position >= total : offset+selectedIndex+1 >= total)} onClick={() => void neighbor(1)}>下一条 <kbd>N</kbd></button>
+      <details className="primary-shortcuts"><summary>快捷键</summary><div><table><tbody>
+        <tr><th><kbd>空格</kbd></th><td>播放／暂停</td></tr><tr><th><kbd>S</kbd></th><td>在播放位置切分</td></tr>
+        <tr><th><kbd>M</kbd></th><td>合并下一段</td></tr><tr><th><kbd>P</kbd> / <kbd>N</kbd></th><td>上一条／下一条录制</td></tr>
+        <tr><th><kbd>Ctrl/⌘ Enter</kbd></th><td>校验并通过整条录制</td></tr>
+      </tbody></table><small>输入文字时停用单键操作；通过后保持当前位置。</small></div></details>
       {isAdmin && !previewId && <button onClick={() => {pause();setModels(true);}}>模型与快照</button>}</header>
     {previewId && <div className="primary-notice motion-preview-banner" role="status">
       <strong>候选预览 · 只读</strong>
@@ -257,27 +325,29 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         style={{width:`${100*(s.stop_ns-s.start_ns)/duration}%`}} className={`${i%2 ? "alternate" : ""} ${!s.primary_code ? "unknown" : ""} ${i===active ? "playing" : ""}`}
         disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} aria-label={`第 ${i+1} 段 ${label(s)}`} title={`${i+1}. ${label(s)} · ${sec(s.start_ns)}–${sec(s.stop_ns)} 秒`} onClick={() => selectPart(i)}>{i+1}</button>)}</div>
       <div className="primary-playback"><button disabled={!viewerReady || busy} onClick={toggle}>{!viewerReady ? "加载回放…" : playing ? "暂停" : "播放"}</button><input type="range" disabled={!viewerReady || busy} aria-label="播放位置" min={0} max={duration/1e9} step={1/rate} value={Math.min(cursor,duration)/1e9} onChange={e => {follow.current=true;seek(Number(e.target.value)*1e9);}}/><span>{sec(cursor)} / {sec(duration)} 秒</span></div>
-    </section><aside className="primary-editor panel"><header><strong>{previewId ? "区间对照" : "检查与纠正"}</strong><span>{previewId ? "未启用候选模型" : statusNames[current.status]}</span>
-      <small>可用标签 {sec(usable)} / {sec(duration)} 秒 · 未知区间不用于监督训练</small>
+    </section><aside className="primary-editor panel"><header><strong>{previewId ? "区间对照" : "检查与纠正"}</strong><span>{previewId ? "未启用候选模型" : (current.needs_rule_review ? "规则已更新，待复核" : statusNames[current.status])}</span>
+      <small>类别覆盖 {sec(usable)} / {sec(duration)} 秒 · 待判区间保持监督屏蔽</small>
       {!previewId && current.variants.length > 1 && <select aria-label="IMU版本" disabled={busy} value={`${id?.candidate_id}/${id?.version_id}`} onChange={e => {const v=current.variants.find(v=>`${v.candidate.candidate_id}/${v.candidate.version_id}`===e.target.value);if(v)void open(current.motion_sha256,v.candidate);}}>
         {current.variants.map(v=><option key={v.candidate.version_id} value={`${v.candidate.candidate_id}/${v.candidate.version_id}`}>{v.configuration.layout_id} · {v.configuration.profile_id} · {v.configuration.variant}</option>)}</select>}
       {current.has_suggestion && <button onClick={() => {pause();setDifference(true);}}>查看自动标注建议</button>}</header>
-      <div className="primary-editor-scroll">{current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}<div ref={list} className="primary-segments" aria-label="活动区间">{editor.segments.map((s,i)=><button key={s.segment_id} disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} className={`${i===part ? "selected" : ""} ${i===active ? "playing" : ""}`} onClick={()=>selectPart(i)}><span>{i+1}. {label(s)}</span><small>{sec(s.start_ns)}–{sec(s.stop_ns)} s</small></button>)}</div>
+      <div className="primary-editor-scroll"><div ref={list} className="primary-segments" aria-label="活动区间">{editor.segments.map((s,i)=><button key={s.segment_id} disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} className={`${i===part ? "selected" : ""} ${i===active ? "playing" : ""}`} onClick={()=>selectPart(i)}><span>{i+1}. {label(s)}</span><small>{sec(s.start_ns)}–{sec(s.stop_ns)} s</small></button>)}</div>
       {segment && <fieldset className="primary-fields motion-fields" disabled={!lease || busy} onFocusCapture={e=>{if((e.target as HTMLElement).matches("input,textarea,select"))pause();}}>
-        <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null});}}>
-          {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
+        {issues.length > 0 && <div className="primary-validation" role="alert"><strong>请修改以下标注后再通过</strong>{issues.map((issue,i)=><button key={i} type="button" onClick={()=>{const at=editor.segments.findIndex(s=>s.segment_id===issue.segment_ids[0]);if(at>=0)selectPart(at);}}>{issue.message}</button>)}</div>}
+        {current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}
+        <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null, transition:code==="posture_transition"?{from_posture:supportPosture(editor.segments[part-1]?.primary_code??null),to_posture:supportPosture(editor.segments[part+1]?.primary_code??null)}:null});setIssues([]);}}>
+          {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).filter(([code])=>editor.taxonomy.version === "3.0.0" ? code !== "uncovered" || segment.resolution === code : code !== "invalid_data").map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
+        {segment.primary_code === "posture_transition" && segment.transition && <div className="primary-transition-endpoints">
+          {(["from_posture", "to_posture"] as const).map((side,i)=><label key={side}>{i ? "转换到" : "转换自"}<select aria-label={i ? "转换终点姿态" : "转换起点姿态"} value={segment.transition![side] ?? ""} onChange={e=>{change({transition:{...segment.transition!,[side]:e.target.value||null}});setIssues([]);}}><option value="">未知／片段外</option>{Object.entries(postureNames).map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>)}
+        </div>}
         {quality && <small role="status">{quality.high_confidence_fraction < 1 ? "低可信候选，请检查类别与切点" : quality.boundary_reliable ? "高可信候选" : "类别候选，边界待核"}；整条通过会确认当前标签。</small>}
-        {definition && ["stand_up", "get_up"].includes(definition.code) && <div className="primary-definition" aria-label="起立起身分类提示"><p>{definition.definition}</p><p>按转换起始姿态分类；手撑不是分界，中途短暂姿态不另拆。</p></div>}
-        {definition && <details className="primary-definition"><summary>类别定义与切分说明</summary><p>{definition.definition}</p><p>包括：{definition.includes}</p><p>不包括：{definition.excludes}</p><p>切分：{definition.boundaries}</p><p>{definition.example}</p><small>规则 {rules?.version}</small></details>}
-        <div className="primary-boundaries">{(["start_ns","stop_ns"] as const).map((side,i)=><label key={side}>{i ? "结束（秒）" : "开始（秒）"}<input type="number" aria-label={i ? "结束秒" : "开始秒"} step="0.04" value={segment[side]/1e9} disabled={i ? part===editor.segments.length-1 : part===0} onChange={e=>boundary(side,Number(e.target.value)*1e9)}/></label>)}</div>
-        <div className="primary-edit-buttons"><button onClick={()=>{const point=Math.round(cursor/40000000)*40000000;if(point<=segment.start_ns||point>=segment.stop_ns){setError("请先将播放位置移到所选区间内部。");return;}setEditor({...editor,segments:editor.segments.flatMap((s,i)=>i===part?[{...s,notes:anchoredNotes(s),stop_ns:point},{...s,notes:anchoredNotes(s),segment_id:`segment-${crypto.randomUUID()}`,start_ns:point}]:[s])});}}>在播放位置切分</button>
-          <button disabled={part===editor.segments.length-1} onClick={()=>{const next=editor.segments[part+1];if(segment.fall_event_id&&next.fall_event_id&&segment.fall_event_id!==next.fall_event_id){setError("不能合并两次独立跌倒。");return;}setEditor({...editor,segments:editor.segments.flatMap((s,i)=>i===part?[joined(s,next)]:i===part+1?[]:[s])});}}>合并下一段</button></div>
-        {isFall && <label>撞击时刻（秒；缺失时该区间屏蔽）<input type="number" step="0.04" value={fall ? fall.impact_ns/1e9 : ""} onChange={e=>{const event_id=segment.fall_event_id??`fall-${segment.segment_id}`;const events=editor.fall_events.filter(f=>f.event_id!==event_id);if(e.target.value!==""){const impact_ns=Math.round(Number(e.target.value)*25)*40000000;if(Number.isFinite(impact_ns))events.push({event_id,code:segment.primary_code!,start_ns:segment.start_ns,stop_ns:segment.stop_ns,impact_ns,evidence:"human replay inspection"});}setEditor({...editor,fall_events:events});}}/></label>}
+        <div className="primary-edit-buttons"><button onClick={split} disabled={!viewerReady}>在播放位置切分 <kbd>S</kbd></button>
+          <button disabled={part===editor.segments.length-1 || !viewerReady} onClick={merge}>合并下一段 <kbd>M</kbd></button></div>
+        {isFall && <label>撞击时刻（秒，可留空）<input type="number" step="0.04" value={fall?.impact_ns != null ? fall.impact_ns/1e9 : ""} onChange={e=>{const event_id=segment.fall_event_id??`fall-${segment.segment_id}`;const events=editor.fall_events.filter(f=>f.event_id!==event_id);if(e.target.value!==""){const impact_ns=Math.round(Number(e.target.value)*25)*40000000;if(Number.isFinite(impact_ns))events.push({event_id,code:segment.primary_code!,start_ns:segment.start_ns,stop_ns:segment.stop_ns,impact_ns,evidence:"human replay inspection"});}setEditor({...editor,fall_events:events});}}/></label>}
         <label>区间语义<textarea aria-label="区间语义" rows={2} value={segment.semantic_text ?? ""} onChange={e=>change({semantic_text:e.target.value})} placeholder="可自由描述动作，无需与列表文字一致"/></label>
         {segment.notes?.map((n,i)=><label key={n.note_id}>区间备注 · {sec(n.start_ns)}–{sec(n.stop_ns)} s<textarea aria-label={`区间备注 ${i+1}`} rows={2} value={n.text} onChange={e=>change({notes:segment.notes!.map((v,j)=>i===j?{...v,text:e.target.value}:v)})}/></label>)}
         <button onClick={()=>change({notes:[...(segment.notes??[]),{note_id:`note-${crypto.randomUUID()}`,start_ns:segment.start_ns,stop_ns:segment.stop_ns,text:""}]})}>添加区间备注</button>
-      </fieldset>}</div><footer className="primary-actions" hidden={!!previewId}><div className="primary-save-status" role="status">{notice || (dirty ? "有未保存修改" : "检查完毕后通过整条；提交后保持当前位置")}{duration > usable && <small> · {sec(duration-usable)} 秒未知或事件不完整，保持屏蔽</small>}</div>
-        <div><button disabled={busy||!lease} onClick={()=>void save()}>保存草稿</button><button className="primary-save" disabled={busy||!lease} onClick={()=>void save("pass")}>通过整条录制</button></div>
+      </fieldset>}</div><footer className="primary-actions" hidden={!!previewId}><div className="primary-save-status" role="status">{notice || (dirty ? "修改已在本机暂存，尚未通过" : "检查完毕后通过整条；提交后保持当前位置")}{duration > usable && <small> · {sec(duration-usable)} 秒待判，保持屏蔽</small>}</div>
+        <div><button className="primary-save" disabled={busy||!lease} onClick={()=>void save("pass")}>通过整条录制 <kbd>Ctrl/⌘ Enter</kbd></button></div>
         <button disabled={busy||!lease} onClick={()=>{pause();setRejecting(true);}}>质量不合格</button>
         {!lease && <button disabled={busy} onClick={()=>void open(current.motion_sha256,id)}>重新领取编辑</button>}
       </footer></aside></div>}
