@@ -56,6 +56,8 @@ class MotionLabelWorker:
                     id TEXT PRIMARY KEY, motion TEXT, release_json TEXT, feature_json TEXT,
                     state TEXT, attempts INTEGER DEFAULT 0, not_before REAL DEFAULT 0,
                     created REAL, error TEXT, seconds REAL);
+                CREATE TABLE IF NOT EXISTS enqueue_cursor(
+                    release TEXT PRIMARY KEY, position INTEGER);
                 CREATE INDEX IF NOT EXISTS inference_queue
                     ON inference_jobs(state,not_before,created);
             """)
@@ -70,7 +72,15 @@ class MotionLabelWorker:
             return 0
         validate_model(self.service, release["model"])
         with self.service.db() as db:
-            features = db.execute("SELECT id,feature FROM motions").fetchall()
+            release_id = document_sha256(release)
+            position = db.execute(
+                "SELECT position FROM enqueue_cursor WHERE release=?", (release_id,)
+            ).fetchone()
+            features = db.execute(
+                "SELECT rowid AS position,id,feature FROM motions "
+                "WHERE rowid>? ORDER BY rowid LIMIT 1000",
+                (position[0] if position else 0,),
+            ).fetchall()
             count = 0
             for row in features:
                 feature = json.loads(row["feature"])
@@ -83,6 +93,11 @@ class MotionLabelWorker:
                     (key, row["id"], json.dumps(release), row["feature"], "queued", time.time()),
                 )
                 count += cursor.rowcount
+            if features:
+                db.execute(
+                    "INSERT OR REPLACE INTO enqueue_cursor VALUES(?,?)",
+                    (release_id, features[-1]["position"]),
+                )
         return count
 
     def infer(self, feature, model):

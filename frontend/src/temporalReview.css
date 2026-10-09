@@ -105,3 +105,8 @@
 .primary-note-list { display: grid; gap: 8px; }
 .primary-actions > small { font-size: 11px; opacity: .75; }
 .primary-fields .primary-boundaries select { padding-left: 8px; padding-right: 4px; }
+
+.motion-preview-banner { flex-wrap: wrap; gap: .6rem; flex: 0 0 auto; }
+.motion-preview-banner label { display: flex; align-items: center; gap: .4rem; }
+.motion-preview-banner a { color: #8cc8ff; }
+.primary-actions[hidden] { display: none; }

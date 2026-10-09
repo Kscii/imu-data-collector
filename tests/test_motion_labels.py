@@ -164,7 +164,8 @@ def test_all_unknown_can_be_reviewed_but_never_exported(tmp_path):
     _, _, service, mid, variant = seed(tmp_path)
     lease = service.claim(mid, "human-test")
     body = {
-        "document": service.case(mid)["editor_template"], "lease_token": lease["token"],
+        "document": service.case(mid)["editor_template"],
+        "lease_token": lease["token"],
         "activity_rules_version": ACTIVITY_RULES_VERSION,
     }
     c = variant["candidate"]
@@ -425,7 +426,25 @@ def test_new_sensor_variant_inherits_review_and_latest_snapshot_deduplicates(tmp
     store.write_json(
         source.commit_key(c["candidate_id"], commit["version_id"]), commit, if_generation_match=0
     )
-    store.write_json(service.root + "/variants/new.json", newer, if_generation_match=0)
+    variant_key = (
+        service.root + "/variants/" + c["candidate_id"] + "-" + commit["version_id"] + ".json"
+    )
+    store.write_json(variant_key, newer, if_generation_match=0)
+    feature = service.feature(mid)
+    feed_key = service.root + "/index-feed/new.json"
+    store.write_json(
+        feed_key,
+        {
+            "schema": "imu.motion_label_feed.v1",
+            "feed_key": feed_key,
+            "feature": {
+                "key": service.root + "/feature-manifests/" + feature["feature_id"] + ".json",
+                "sha256": document_sha256(feature),
+            },
+            "variant": {"key": variant_key, "sha256": document_sha256(newer)},
+        },
+        if_generation_match=0,
+    )
     service.refresh(force=True)
     case = service.case(mid)
     assert case["status"] == "accepted" and case["review"] == accepted["review"]
@@ -457,6 +476,8 @@ def test_non_admin_can_review_but_cannot_use_experimental_or_model_routes(tmp_pa
     with TestClient(app) as client:
         assert client.get("/api/v1/synthetic/motions").status_code == 200
         assert client.get("/api/v1/synthetic/motions/models").status_code == 403
+        assert client.get("/api/v1/synthetic/motions/previews").status_code == 403
+        assert client.get("/api/v1/synthetic/motions/previews/test").status_code == 403
         assert client.get("/api/v1/synthetic/temporal/runs").status_code == 403
         assert client.get("/api/v1/synthetic/temporal/runs/unknown/training").status_code == 403
         assert (
@@ -603,3 +624,109 @@ def test_migration_preserves_semantics_and_never_creates_acceptance(tmp_path):
         migrate(old, run, service, True)["records"][0]["status"]
         == "existing-production-version-kept"
     )
+
+
+def test_candidate_preview_is_read_only_and_protects_holdout(tmp_path):
+    from imu_data_collector.motion_label_previews import MotionLabelPreviews
+
+    store, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    service.edit(
+        mid,
+        variant["candidate"]["candidate_id"],
+        variant["candidate"]["version_id"],
+        body,
+        "human-test",
+        decision="pass",
+    )
+    state_before = service.state(mid)
+    human = service.case(mid)["editor_template"]
+    candidate = deepcopy(human)
+    candidate["segments"][0]["primary_code"] = "walking"
+    manifest = {
+        "schema": "imu.motion_preview.v1",
+        "preview_id": "test",
+        "title": "Test",
+        "models": {"baseline": "A", "candidate": "C"},
+        "activity_rules_version": ACTIVITY_RULES_VERSION,
+        "created_at_utc": "test",
+        "records": [
+            {
+                "motion_sha256": mid,
+                "candidate": variant["candidate"],
+                "human_revision": state_before[0]["accepted"],
+                "documents": {"human": human, "baseline": human, "candidate": candidate},
+            }
+        ],
+    }
+    service.immutable(service.root + "/previews/test.json", manifest)
+    previews = MotionLabelPreviews(service)
+    assert previews.listing("test")["total"] == 1
+    case = previews.case("test", mid)
+    assert case["editor_template"]["segments"][0]["primary_code"] == "walking"
+    assert case["preview"]["documents"]["human"] == human
+    assert service.state(mid) == state_before
+    feature = service.feature(mid)
+    feature["group_key"] = "protected"
+    with service.db() as db:
+        db.execute("UPDATE motions SET feature=? WHERE id=?", (json.dumps(feature), mid))
+    service.immutable(
+        service.root + "/holdouts/test.json", {"run_id": "test", "group_keys": ["protected"]}
+    )
+    assert previews.listing("test")["total"] == 0
+    with pytest.raises(ValueError):
+        previews.case("test", mid)
+
+
+def test_discovery_is_incremental_and_bad_receipt_does_not_block_good(tmp_path, monkeypatch):
+    from imu_data_collector.motion_label_discovery import MotionLabelDiscovery
+
+    store, _, service, mid, variant = seed(tmp_path)
+    feature = service.feature(mid)
+
+    def feed(name, digest):
+        key = service.root + "/index-feed/" + name + ".json"
+        store.write_json(
+            key,
+            {
+                "schema": "imu.motion_label_feed.v1",
+                "feed_key": key,
+                "feature": {
+                    "key": service.root + "/feature-manifests/" + feature["feature_id"] + ".json",
+                    "sha256": digest,
+                },
+                "variant": {
+                    "key": service.root
+                    + "/variants/"
+                    + variant["candidate"]["candidate_id"]
+                    + "-"
+                    + variant["candidate"]["version_id"]
+                    + ".json",
+                    "sha256": document_sha256(variant),
+                },
+            },
+            if_generation_match=0,
+        )
+        return key
+
+    bad = feed("001-bad", "0" * 64)
+    good = feed("002-good", document_sha256(feature))
+    visited = []
+    original = store.list_page
+
+    def page(prefix, after, limit):
+        visited.append((prefix, after, limit))
+        return original(prefix, after, limit)
+
+    monkeypatch.setattr(store, "list_page", page)
+    assert service.refresh(force=True) == 0
+    assert all("/index-feed/" in p for p, _, _ in visited)
+    discovery = MotionLabelDiscovery(service)
+    assert discovery.meta("feed_cursor") == good
+    with service.db() as db:
+        assert db.execute("SELECT key FROM discovery_errors").fetchone()[0] == bad
+    feed("000-late", document_sha256(feature))
+    discovery.set_meta("reconciled_at", 0)
+    service.refresh(force=True)
+    assert any("/variants/" in p for p, _, _ in visited)
+    assert service.feature(mid) == feature

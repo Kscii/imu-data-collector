@@ -66,6 +66,8 @@ class ObjectStore(Protocol):
 
     def list_after(self, prefix: str, after_key: str | None) -> list[ObjectInfo]: ...
 
+    def list_page(self, prefix: str, after_key: str | None, limit: int) -> list[ObjectInfo]: ...
+
     def delete(self, key: str, *, if_generation_match: int | None) -> bool: ...
 
     def copy(
@@ -251,6 +253,9 @@ class LocalFilesystemStore:
         return [info for info in self.list(prefix)
                 if after_key is None or info.key > after_key]
 
+    def list_page(self, prefix: str, after_key: str | None, limit: int) -> list[ObjectInfo]:
+        return self.list_after(prefix, after_key)[:limit]
+
     def delete(self, key: str, *, if_generation_match: int | None) -> bool:
         path = self.resolve(key)
         if not path.is_file():
@@ -431,6 +436,12 @@ class GcsObjectStore:
         return [self._info(blob) for blob in self.client.list_blobs(
             self.bucket, prefix=prefix, start_offset=after_key)
             if after_key is None or blob.name > after_key]
+
+    def list_page(self, prefix: str, after_key: str | None, limit: int) -> list[ObjectInfo]:
+        return [self._info(blob) for blob in self.client.list_blobs(
+            self.bucket, prefix=prefix, start_offset=after_key,
+            max_results=limit + 1, page_size=limit + 1)
+            if after_key is None or blob.name > after_key][:limit]
 
     def delete(self, key: str, *, if_generation_match: int | None) -> bool:
         _safe_key(key)

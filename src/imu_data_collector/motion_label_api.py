@@ -3,6 +3,7 @@
 from fastapi import HTTPException, Request
 
 from .motion_label_models import active_model, list_models, promote_model
+from .motion_label_previews import MotionLabelPreviews
 from .motion_label_service import MotionLabelService
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import document_sha256
@@ -29,6 +30,23 @@ def register_motion_label_routes(app, source, current_actor):
             raise HTTPException(403, "仅管理员可管理自动标注模型")
         return actor
 
+    previews = MotionLabelPreviews(service)
+
+    @app.get(root + "/previews")
+    def preview_list(request: Request):
+        admin(request)
+        return invoke(previews.previews)
+
+    @app.get(root + "/previews/{preview_id}")
+    def preview_cases(preview_id: str, request: Request):
+        admin(request)
+        return invoke(previews.listing, preview_id)
+
+    @app.get(root + "/previews/{preview_id}/{mid}")
+    def preview_case(preview_id: str, mid: str, request: Request):
+        admin(request)
+        return invoke(previews.case, preview_id, mid)
+
     @app.get(root)
     def listing(
         request: Request, offset: int = 0, limit: int = 30, status: str = "all", search: str = ""
@@ -54,11 +72,31 @@ def register_motion_label_routes(app, source, current_actor):
                 if exists
                 else []
             )
+            discovery_errors = (
+                db.execute("SELECT count(*) FROM discovery_errors").fetchone()[0]
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='discovery_errors'"
+                ).fetchone()
+                else 0
+            )
+            timing = (
+                dict(
+                    db.execute(
+                        "SELECT count(*) AS completed,coalesce(sum(seconds),0) AS seconds,"
+                        "coalesce(avg(seconds),0) AS mean_seconds "
+                        "FROM inference_jobs WHERE state='complete'"
+                    ).fetchone()
+                )
+                if exists
+                else {"completed": 0, "seconds": 0, "mean_seconds": 0}
+            )
         return {
             "models": invoke(list_models, service),
             "active": active,
             "active_sha256": document_sha256(active) if active else None,
             "jobs": jobs,
+            "timing": timing,
+            "discovery_errors": discovery_errors,
         }
 
     @app.get(root + "/summary")

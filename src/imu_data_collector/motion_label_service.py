@@ -24,7 +24,6 @@ from .motion_annotations import (
     require,
     reviewed_ranges,
     usable_ns,
-    validate_motion,
 )
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
@@ -125,97 +124,9 @@ class MotionLabelService:
         try:
             if not force and time.monotonic() - self.last_scan < 30:
                 return 0
-            count = 0
-            changed = set()
-            with self.db() as db:
-                known = {
-                    r["key"]: r["generation"]
-                    for r in db.execute("SELECT key,generation FROM objects")
-                }
-                for category in ("feature-manifests", "variants"):
-                    for item in self.store.list(f"{self.root}/{category}/"):
-                        if known.get(item.key) == item.generation:
-                            continue
-                        value, generation = self.store.read_json(item.key)
-                        if category == "feature-manifests":
-                            require(
-                                value["schema"] == "imu.motion_features.v1",
-                                "Invalid feature manifest",
-                            )
-                            validate_motion(value["template"])
-                            mid = value["binding"]["motion_sha256"]
-                            require(
-                                value["template"]["motion_sha256"] == mid
-                                and value["feature_id"] == document_sha256(value["binding"])
-                                and value["object_key"]
-                                == f"{self.root}/features/{value['feature_id']}.npz",
-                                "Feature binding differs",
-                            )
-                            old = db.execute(
-                                "SELECT feature FROM motions WHERE id=?", (mid,)
-                            ).fetchone()
-                            if old:
-                                prior = json.loads(old[0])
-                                # A changed geometry recipe needs a new model-compatible cache;
-                                # never silently let object-list order select one.
-                                require(
-                                    prior["feature_id"] == value["feature_id"],
-                                    "Motion feature recipe changed; migrate explicitly",
-                                )
-                            db.execute(
-                                "INSERT OR IGNORE INTO motions(id,feature,dataset,member,updated) "
-                                "VALUES(?,?,?,?,?)",
-                                (
-                                    mid,
-                                    json.dumps(value),
-                                    value["source_dataset"],
-                                    value["source_member"],
-                                    now(),
-                                ),
-                            )
-                        else:
-                            require(
-                                value["schema"] == "imu.motion_variant.v1", "Invalid motion variant"
-                            )
-                            c = value["candidate"]
-                            commit = self.source._commit(c["candidate_id"], c["version_id"])
-                            require(
-                                c["commit_sha256"] == document_sha256(commit)
-                                and c["input_hashes"]
-                                == {o["role"]: o["sha256"] for o in commit["objects"]}
-                                and c["input_hashes"]["motion"] == value["motion_sha256"]
-                                and value["policy_sha256"] == commit["policy_sha256"]
-                                and value["configuration_id"]
-                                == document_sha256(value["configuration"]),
-                                "Variant is not bound to a published machine-QA candidate",
-                            )
-                            feature = db.execute(
-                                "SELECT feature FROM motions WHERE id=?", (value["motion_sha256"],)
-                            ).fetchone()
-                            if not feature:
-                                continue
-                            project_motion(json.loads(feature[0])["template"], c, value["clock"])
-                            db.execute(
-                                "INSERT OR IGNORE INTO variants VALUES(?,?,?,?)",
-                                (
-                                    c["candidate_id"] + "/" + c["version_id"],
-                                    value["motion_sha256"],
-                                    value["configuration_id"],
-                                    json.dumps(value),
-                                ),
-                            )
-                            changed.add(value["motion_sha256"])
-                        db.execute(
-                            "INSERT OR REPLACE INTO objects VALUES(?,?,?)",
-                            (item.key, generation, json.dumps(value)),
-                        )
-                        count += 1
-                        if count >= limit:
-                            break
-                    if count >= limit:
-                        break
-            for mid in changed:
-                self.refresh_summary(mid, self.state(mid)[0])
+            from .motion_label_discovery import MotionLabelDiscovery
+
+            count = MotionLabelDiscovery(self).refresh(limit)
             self.last_scan = time.monotonic()
             return count
         finally:

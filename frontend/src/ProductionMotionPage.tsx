@@ -18,6 +18,8 @@ type Annotation = {candidate: Candidate; clock: {duration_ns: number; source_rat
 type Row = {motion_sha256: string; status: string;
   entry: {candidate: Candidate; source_dataset: string; source_member: string}};
 type Detail = Row & {variants: Variant[]; editor_template: Annotation; suggestion: Annotation | null;
+  preview?: {models: {baseline: string; candidate: string}; activity_rules_version: string;
+    documents: Record<"human" | "baseline" | "candidate", Annotation>};
   legacy_quality: {decision:string;reason:string|null;reviewer:string} | null;
   has_suggestion: boolean; review: {revision_sha256: string} | null; draft: {revision_sha256: string} | null};
 type Lease = {token: string; expires_at: number};
@@ -33,6 +35,8 @@ export async function motionApi<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
+  const previewId = new URLSearchParams(location.search).get("motion_preview");
+  const [comparison, setComparison] = useState<"human" | "baseline" | "candidate">("candidate");
   const [rows, setRows] = useState<Row[]>([]), [total, setTotal] = useState(0), [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState("all"), [search, setSearch] = useState("");
   const [current, setCurrent] = useState<Detail | null>(null), [editor, setEditor] = useState<Annotation | null>(null);
@@ -66,13 +70,14 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     const eligible = s.primary_code && (!fall || (event && event.impact_ns>=event.start_ns && event.impact_ns<event.stop_ns));
     return n+(eligible ? s.stop_ns-s.start_ns : 0);
   }, 0) ?? 0;
-  const dirty = !!editor && JSON.stringify(editor) !== JSON.stringify(current?.editor_template);
+  const dirty = !previewId && !!editor && JSON.stringify(editor) !== JSON.stringify(current?.editor_template);
   const control = (action: string, fields = {}) => iframe.current?.contentWindow?.postMessage({type: "imu-synthetic-review-control", action, ...fields}, location.origin);
   const pause = () => {follow.current = false; setPlaying(false); control("pause");};
   const seek = (ns: number, boundary = false) => {if (!viewerReady) return; setPlaying(false); control("seek", {frame: sourceFrame(ns, rate, boundary)});};
   const selectPart = (index: number) => {pause(); setPart(index); seek(editor!.segments[index].start_ns, true);};
   const toggle = () => {if (!viewerReady) return; follow.current = true; control("toggle");};
   const persist = () => {
+    if (previewId) return;
     const d = currentRef.current, e = editorRef.current;
     if (d && e && JSON.stringify(e) !== JSON.stringify(d.editor_template)) {
       localStorage.setItem(cacheKey(d), JSON.stringify({document: e, draft_sha256: d.draft?.revision_sha256 ?? null,
@@ -80,6 +85,13 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     }
   };
   const fetchRows = async (nextOffset = offset) => {
+    if (previewId) {
+      const data = await motionApi<{cases: Row[]; total: number}>(`${root}/previews/${encodeURIComponent(previewId)}`);
+      const filtered = data.cases.filter(r => `${r.entry.source_dataset} ${r.entry.source_member}`.toLowerCase().includes(search.toLowerCase()));
+      const page = filtered.slice(nextOffset, nextOffset+30);
+      setRows(page); setTotal(filtered.length); setOffset(nextOffset);
+      return page;
+    }
     const data = await motionApi<{cases: Row[]; total: number}>(`${root}?limit=30&offset=${nextOffset}&status=${filter}&search=${encodeURIComponent(search)}`);
     setRows(data.cases); setTotal(data.total); setOffset(nextOffset);
     return data.cases;
@@ -96,15 +108,16 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       }
       const savedToken = session.current?.mid === mid ? session.current.token : sessionStorage.getItem(`motion-lease:${mid}`);
       let claimed: Lease | null = null;
-      try {
+      try { if (!previewId) {
         claimed = await motionApi<Lease>(`${root}/${mid}/claim`, {token: savedToken ?? null});
         session.current = {mid, token: claimed.token}; sessionStorage.setItem(`motion-lease:${mid}`, claimed.token);
+      }
       } catch (e) {setError(`${String(e)}；当前以只读方式查看。`);}
       const suffix = variant ? `/variants/${variant.candidate_id}/${variant.version_id}` : "";
-      const data = await motionApi<Detail>(`${root}/${mid}${suffix}`);
+      const data = await motionApi<Detail>(previewId ? `${root}/previews/${encodeURIComponent(previewId)}/${mid}` : `${root}/${mid}${suffix}`);
       if (sequence !== loading.current) return;
-      let value = structuredClone(data.editor_template);
-      const local = localStorage.getItem(cacheKey(data));
+      let value = structuredClone(data.preview?.documents[comparison] ?? data.editor_template);
+      const local = previewId ? null : localStorage.getItem(cacheKey(data));
       if (local) {
         const cached = JSON.parse(local);
         if (cached.draft_sha256 === (data.draft?.revision_sha256 ?? null) && cached.review_sha256 === (data.review?.revision_sha256 ?? null)) {
@@ -185,7 +198,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     return {...doc,fall_events:[...events.values()]};
   };
   const save = async (decision?: "pass" | "reject") => {
-    if (!current || !lease) return;
+    if (previewId || !current || !lease) return;
     setBusy(true); setError(""); pause();
     try {
       const priorStart = segment?.start_ns ?? 0;
@@ -215,7 +228,16 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       <span className="primary-task" title={current?.entry.source_member}>{current?.entry.source_dataset} · {current?.entry.source_member}</span>
       <button disabled={busy || offset+selectedIndex <= 0} onClick={() => void neighbor(-1)}>上一条</button>
       <button disabled={busy || offset+selectedIndex+1 >= total} onClick={() => void neighbor(1)}>下一条</button>
-      {isAdmin && <button onClick={() => {pause();setModels(true);}}>模型与快照</button>}</header>
+      {isAdmin && !previewId && <button onClick={() => {pause();setModels(true);}}>模型与快照</button>}</header>
+    {previewId && <div className="primary-notice motion-preview-banner" role="status">
+      <strong>候选预览 · 只读</strong>
+      <label>查看 <select aria-label="比较标注来源" value={comparison} disabled={!current?.preview || busy} onChange={e=>{
+        const selected=e.target.value as typeof comparison; pause(); setComparison(selected);
+        const doc=current?.preview?.documents[selected]; if(doc){setEditor(structuredClone(doc));setPart(Math.max(0,partAt(doc.segments,cursor)));}
+      }}><option value="human">人工结果</option><option value="baseline">现用模型</option><option value="candidate">候选 C</option></select></label>
+      <span>{comparison === "human" ? "冻结的人工审核" : current?.preview?.models[comparison]} · 规则 {current?.preview?.activity_rules_version}</span>
+      <a href={`?view=synthetic&lang=zh-CN${id ? `&candidate=${encodeURIComponent(id.candidate_id)}&version=${encodeURIComponent(id.version_id)}` : ""}`}>返回正式审核</a>
+    </div>}
     {error && <div className="primary-notice primary-error" role="alert"><span>{error}</span>
       <button onClick={() => {const raw=current ? localStorage.getItem(cacheKey(current)) : null; const url=URL.createObjectURL(new Blob([raw ?? JSON.stringify(editor)],{type:"application/json"}));const a=document.createElement("a");a.href=url;a.download="motion-draft.json";a.click();URL.revokeObjectURL(url);}}>下载草稿</button>
       <button onClick={() => setError("")}>×</button></div>}
@@ -230,9 +252,9 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         style={{width:`${100*(s.stop_ns-s.start_ns)/duration}%`}} className={`${i%2 ? "alternate" : ""} ${!s.primary_code ? "unknown" : ""} ${i===active ? "playing" : ""}`}
         disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} aria-label={`第 ${i+1} 段 ${label(s)}`} title={`${i+1}. ${label(s)} · ${sec(s.start_ns)}–${sec(s.stop_ns)} 秒`} onClick={() => selectPart(i)}>{i+1}</button>)}</div>
       <div className="primary-playback"><button disabled={!viewerReady || busy} onClick={toggle}>{!viewerReady ? "加载回放…" : playing ? "暂停" : "播放"}</button><input type="range" disabled={!viewerReady || busy} aria-label="播放位置" min={0} max={duration/1e9} step={1/rate} value={Math.min(cursor,duration)/1e9} onChange={e => {follow.current=true;seek(Number(e.target.value)*1e9);}}/><span>{sec(cursor)} / {sec(duration)} 秒</span></div>
-    </section><aside className="primary-editor panel"><header><strong>检查与纠正</strong><span>{statusNames[current.status]}</span>
+    </section><aside className="primary-editor panel"><header><strong>{previewId ? "区间对照" : "检查与纠正"}</strong><span>{previewId ? "未启用候选模型" : statusNames[current.status]}</span>
       <small>可用标签 {sec(usable)} / {sec(duration)} 秒 · 未知区间不用于监督训练</small>
-      {current.variants.length > 1 && <select aria-label="IMU版本" disabled={busy} value={`${id?.candidate_id}/${id?.version_id}`} onChange={e => {const v=current.variants.find(v=>`${v.candidate.candidate_id}/${v.candidate.version_id}`===e.target.value);if(v)void open(current.motion_sha256,v.candidate);}}>
+      {!previewId && current.variants.length > 1 && <select aria-label="IMU版本" disabled={busy} value={`${id?.candidate_id}/${id?.version_id}`} onChange={e => {const v=current.variants.find(v=>`${v.candidate.candidate_id}/${v.candidate.version_id}`===e.target.value);if(v)void open(current.motion_sha256,v.candidate);}}>
         {current.variants.map(v=><option key={v.candidate.version_id} value={`${v.candidate.candidate_id}/${v.candidate.version_id}`}>{v.configuration.layout_id} · {v.configuration.profile_id} · {v.configuration.variant}</option>)}</select>}
       {current.has_suggestion && <button onClick={() => {pause();setDifference(true);}}>查看自动标注建议</button>}</header>
       <div className="primary-editor-scroll">{current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}<div ref={list} className="primary-segments" aria-label="活动区间">{editor.segments.map((s,i)=><button key={s.segment_id} disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} className={`${i===part ? "selected" : ""} ${i===active ? "playing" : ""}`} onClick={()=>selectPart(i)}><span>{i+1}. {label(s)}</span><small>{sec(s.start_ns)}–{sec(s.stop_ns)} s</small></button>)}</div>
@@ -248,13 +270,13 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         <label>区间语义<textarea aria-label="区间语义" rows={2} value={segment.semantic_text ?? ""} onChange={e=>change({semantic_text:e.target.value})} placeholder="可自由描述动作，无需与列表文字一致"/></label>
         {segment.notes?.map((n,i)=><label key={n.note_id}>区间备注 · {sec(n.start_ns)}–{sec(n.stop_ns)} s<textarea aria-label={`区间备注 ${i+1}`} rows={2} value={n.text} onChange={e=>change({notes:segment.notes!.map((v,j)=>i===j?{...v,text:e.target.value}:v)})}/></label>)}
         <button onClick={()=>change({notes:[...(segment.notes??[]),{note_id:`note-${crypto.randomUUID()}`,start_ns:segment.start_ns,stop_ns:segment.stop_ns,text:""}]})}>添加区间备注</button>
-      </fieldset>}</div><footer className="primary-actions"><div className="primary-save-status" role="status">{notice || (dirty ? "有未保存修改" : "检查完毕后通过整条；提交后保持当前位置")}</div>
+      </fieldset>}</div><footer className="primary-actions" hidden={!!previewId}><div className="primary-save-status" role="status">{notice || (dirty ? "有未保存修改" : "检查完毕后通过整条；提交后保持当前位置")}</div>
         <div><button disabled={busy||!lease} onClick={()=>void save()}>保存草稿</button><button className="primary-save" disabled={busy||!lease} onClick={()=>void save("pass")}>通过整条录制</button></div>
         <button disabled={busy||!lease} onClick={()=>{pause();setRejecting(true);}}>质量不合格</button>
         {!lease && <button disabled={busy} onClick={()=>void open(current.motion_sha256,id)}>重新领取编辑</button>}
       </footer></aside></div>}
     {queue && <div className="primary-overlay"><section role="dialog" aria-modal="true" aria-label="审核队列" className="primary-drawer panel"><header><strong>审核队列 · {total} 条</strong><button onClick={()=>setQueue(false)}>关闭</button></header>
-      <form onSubmit={e=>{e.preventDefault();void fetchRows(0).catch(e=>setError(String(e)));}}><select aria-label="审核状态" value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">全部</option>{Object.entries(statusNames).map(([v,n])=><option key={v} value={v}>{n}</option>)}</select><input aria-label="搜索录制" value={search} onChange={e=>setSearch(e.target.value)} placeholder="来源或文件名"/><button>筛选</button></form>
+      <form onSubmit={e=>{e.preventDefault();void fetchRows(0).catch(e=>setError(String(e)));}}><select aria-label="审核状态" disabled={!!previewId} value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">全部</option>{Object.entries(statusNames).map(([v,n])=><option key={v} value={v}>{n}</option>)}</select><input aria-label="搜索录制" value={search} onChange={e=>setSearch(e.target.value)} placeholder="来源或文件名"/><button>筛选</button></form>
       <div className="primary-queue-list">{rows.map((r,i)=><button key={r.motion_sha256} disabled={busy} className={current?.motion_sha256===r.motion_sha256?"selected":""} onClick={()=>void open(r.motion_sha256)}><strong>{offset+i+1}. {r.entry.source_dataset}</strong><span>{statusNames[r.status]}</span><small>{r.entry.source_member}</small></button>)}</div>
       <footer><button disabled={offset===0} onClick={()=>void fetchRows(offset-30)}>上一页</button><button disabled={offset+rows.length>=total} onClick={()=>void fetchRows(offset+30)}>下一页</button></footer></section></div>}
     {rejecting && <div className="primary-overlay"><section role="dialog" aria-modal="true" aria-label="质量不合格" className="primary-drawer panel"><header><strong>质量不合格</strong><button onClick={()=>setRejecting(false)}>取消</button></header><label>问题范围<select value={rejectScope} onChange={e=>setRejectScope(e.target.value)}><option value="motion">动捕本身：影响所有 IMU 版本</option><option value="variant">当前 IMU 版本：其他版本保留</option></select></label><label>原因<textarea value={reason} onChange={e=>setReason(e.target.value)}/></label><button disabled={busy||!reason.trim()} onClick={()=>void save("reject")}>保存拒绝决定</button></section></div>}
