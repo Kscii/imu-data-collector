@@ -13,6 +13,11 @@ import {
   type RuntimeConfiguration,
 } from "./DeviceConfigurationPages";
 import { resolveAnnotationShortcut } from "./annotationShortcuts";
+import { ApiRequestError, NetworkRequestError, RequestTimeoutError, requestJson } from "./apiRequest";
+import {
+  AnnotationSaveFlow, annotationContentMatches, syncContentMatches,
+  saveIsBusy, saveIsLocked, type AnnotationSaveState, type PreparedSave,
+} from "./annotationSave";
 import { intervalFollowAnchorIndex, intervalsAtTime } from "./annotationTimeline";
 import { requireCurrentDeviceList } from "./captureContract";
 import {
@@ -37,7 +42,6 @@ document.title = __APP_KIND__ === "annotation"
 
 type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "external" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
-type AnnotationSaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
 const CAPTURE_FORM_KEY = "imu-capture-form-v1";
 const FALL_ACTIVITY_COLORS = ["#ef4444", "#f97316", "#e11d48", "#d946ef", "#a855f7", "#f59e0b", "#fb7185", "#c026d3"];
@@ -587,6 +591,7 @@ type ReviewDocument = {
     updated_at_utc: string | null;
   };
   annotations: AnnotationDocument;
+  sync: { anchors: SyncAnchor[]; policy: string; apply_fixed_offset: boolean; reviewer_id: string | null };
   participant_assignment: {
     status: "unassigned" | "selected" | "confirmed";
     participant_id: string | null;
@@ -802,45 +807,46 @@ const exclusionLabels: Record<Exclusion["reason"], string> = {
   other: "其他"
 };
 
-class ApiRequestError extends Error {
-  constructor(message: string, readonly status: number, readonly detail?: unknown) {
-    super(message);
-    this.name = "ApiRequestError";
+async function api<T>(path: string, init?: RequestInit, timeoutMs = 45_000): Promise<T> {
+  try {
+    return await requestJson<T>(path, init, timeoutMs);
+  } catch (error) {
+    if (error instanceof RequestTimeoutError) {
+      error.message = tr(
+        `请求超过 ${(timeoutMs / 1000).toFixed(0)} 秒仍未完成，已停止等待`,
+        `The request did not finish within ${(timeoutMs / 1000).toFixed(0)} seconds and was cancelled`,
+      );
+    } else if (error instanceof ApiRequestError) {
+      error.message = apiErrorMessage(error.detail, error.status, error.statusText);
+    } else if (error instanceof NetworkRequestError) {
+      error.message = tr("网络连接中断，请检查连接后重试", "The connection was interrupted. Check your connection and retry.");
+    }
+    throw error;
   }
 }
 
-async function api<T>(path: string, init?: RequestInit, timeoutMs = 45_000): Promise<T> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  const abortFromCaller = () => controller.abort();
-  init?.signal?.addEventListener("abort", abortFromCaller, { once: true });
-  try {
-    const response = await fetch(path, {
-      ...init,
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) }
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const detail = payload.detail;
-      if (detail && typeof detail === "object") {
-        throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status, detail);
-      }
-      throw new ApiRequestError(apiErrorMessage(detail, response.status, response.statusText), response.status, detail);
-    }
-    return response.json();
-  } catch (error) {
-    if ((error as Error).name === "AbortError") {
-      throw new Error(tr(
-        `请求超过 ${(timeoutMs / 1000).toFixed(0)} 秒仍未完成，已停止等待`,
-        `The request did not finish within ${(timeoutMs / 1000).toFixed(0)} seconds and was cancelled`,
-      ));
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timer);
-    init?.signal?.removeEventListener("abort", abortFromCaller);
-  }
+function annotationSaveLabel(state: AnnotationSaveState): string {
+  const labels: Record<AnnotationSaveState, string> = {
+    idle: tr("无待保存修改", "No pending changes"),
+    saving: tr("正在保存…", "Saving…"),
+    refreshing: tr("已保存，正在更新状态…", "Saved; updating status…"),
+    checking: tr("保存结果待确认，正在核对…", "Checking whether changes were saved…"),
+    saved: tr("已保存", "Saved"),
+    refresh_failed: tr("已保存，状态更新失败", "Saved; status refresh failed"),
+    unknown: tr("暂时无法确认保存结果", "Save outcome is unknown"),
+    retryable: tr("云端版本未变，可重试保存", "Server version unchanged; retry available"),
+    error: tr("保存未完成", "Save not completed"),
+    conflict: tr("版本冲突", "Version conflict"),
+    next_step: tr("标注已保存，待继续完成", "Annotations saved; completion pending"),
+  };
+  return labels[state];
+}
+
+function annotationRecoveryLabel(state: AnnotationSaveState): string {
+  if (state === "refresh_failed") return tr("重试更新状态", "Retry status refresh");
+  if (state === "unknown") return tr("核对保存结果", "Check save outcome");
+  if (state === "next_step") return tr("继续完成标注", "Continue completion");
+  return tr("重试保存", "Retry save");
 }
 
 const CAPTURE_TAB_LEASE_KEY = "imu-data-collector:capture-tab-lease:v1";
@@ -1051,8 +1057,10 @@ export default function App() {
   const captureInteractionBlocked = !ownsCaptureTab || versionMismatch;
   const liveAgeMs = liveReceivedAt > 0 ? Math.max(0, clock - liveReceivedAt) : Number.POSITIVE_INFINITY;
   const liveFresh = liveTransport === "live" && liveAgeMs < 2_500;
+  const annotationLeaveGuard = useRef<() => boolean>(() => true);
 
   const selectTab = (next: AppTab) => {
+    if (tab === "annotate" && next !== tab && !annotationLeaveGuard.current()) return;
     setTab(next);
     const url = new URL(location.href);
     url.searchParams.set("view", tabView(next));
@@ -1459,7 +1467,7 @@ export default function App() {
         />
       )}
       {annotationApplication && tab === "annotate" && taxonomy && session && (
-        <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} recordingsLoaded={recordingsLoaded} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} />
+        <AnnotationPage recordings={recordings.filter((item) => item.purpose !== "calibration_evidence")} recordingsLoaded={recordingsLoaded} taxonomy={taxonomy} session={session} participants={config?.allowed_unikeys ?? []} onChanged={refreshRecordings} leaveGuard={annotationLeaveGuard} />
       )}
       {annotationApplication && tab === "synthetic" && config?.synthetic_enabled && <SyntheticMotionPage target={config.synthetic_target ?? "dev"} />}
       {annotationApplication && tab === "data" && session && <DataManagementPage isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
@@ -2206,7 +2214,7 @@ function TaxonomyManagementRow({ entry, editing, editBlocked, busy, onStartEdit,
   </div>;
 }
 
-function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, participants, onChanged }: { recordings: Recording[]; recordingsLoaded: boolean; taxonomy: Taxonomy; session: Session; participants: string[]; onChanged: () => Promise<Recording[]> }) {
+function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, participants, onChanged, leaveGuard }: { recordings: Recording[]; recordingsLoaded: boolean; taxonomy: Taxonomy; session: Session; participants: string[]; onChanged: () => Promise<Recording[]>; leaveGuard: { current: () => boolean } }) {
   const [selected, setSelected] = useState(() => new URLSearchParams(location.search).get("recording") ?? "");
   const [recordingDrawerOpen, setRecordingDrawerOpen] = useState(false);
   const [recordingQuery, setRecordingQuery] = useState("");
@@ -2259,12 +2267,15 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
   const recordingSearchRef = useRef<HTMLInputElement>(null);
   const selectedRecordingButtonRef = useRef<HTMLButtonElement>(null);
   const retrySaveRef = useRef<(() => void) | null>(null);
+  const saveFlowRef = useRef<AnnotationSaveFlow<ReviewDocument> | null>(null);
+  const selectionRef = useRef(selected);
+  selectionRef.current = selected;
   const locateTimerRef = useRef<number | null>(null);
-  const selectedRecordingAvailable = Boolean(selected && recordings.some((item) => item.recording_id === selected));
 
   useEffect(() => {
     if (!recordingsLoaded) return;
     if (selected && recordings.some((item) => item.recording_id === selected)) return;
+    if (saveIsLocked(saveFlowRef.current?.state ?? "idle")) return;
     setSelected(preferredRecordingId(recordings, session.unikey));
   }, [recordings, recordingsLoaded, selected, session.unikey]);
 
@@ -2278,8 +2289,10 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
   }, [selected, taskTab, loadedRecording]);
 
   useEffect(() => {
-    if (!selectedRecordingAvailable) return;
+    if (!selected || !recordingsLoaded) return;
     const controller = new AbortController();
+    saveFlowRef.current?.dispose();
+    saveFlowRef.current = null;
     setError("");
     setLoadedRecording("");
     setDoc(null);
@@ -2300,6 +2313,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
       api<ReviewDocument>(`/api/v1/recordings/${selected}/review`, { signal: controller.signal }),
       api<RecordingStatus>(`/api/v1/recordings/${selected}/status`, { signal: controller.signal })
     ]).then(([annotations, data, syncState, frames, reviewDocument, recordingStatus]) => {
+      if (controller.signal.aborted || selectionRef.current !== selected) return;
       setDoc(annotations);
       setTimeline(data);
       setSync(syncState);
@@ -2327,10 +2341,15 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
               : "sync"
       );
     }).catch((e) => {
-      if ((e as Error).name !== "AbortError") setError((e as Error).message);
+      if (!controller.signal.aborted && selectionRef.current === selected && (e as Error).name !== "AbortError") setError((e as Error).message);
     });
-    return () => controller.abort();
-  }, [selected, selectedRecordingAvailable, reloadNonce, participants.join("|")]);
+    return () => {
+      controller.abort();
+      saveFlowRef.current?.dispose();
+      saveFlowRef.current = null;
+    };
+  // Late participant/config updates must not discard an in-flight save or draft.
+  }, [selected, recordingsLoaded, reloadNonce]);
 
   useEffect(() => {
     if (!recordingDrawerOpen) return;
@@ -2378,12 +2397,21 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
   }, [recordingDrawerOpen, recordingQueueTab]);
 
   useEffect(() => {
-    const pending = saveState === "saving" || saveState === "error" || saveState === "conflict";
-    if (!pending) return;
-    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    const pending = () => saveIsLocked(saveFlowRef.current?.state ?? saveState);
+    const confirmLeave = () => !pending() || window.confirm(tr(
+      "保存或状态核对尚未完成。离开会丢弃本页的未确认修改，已发送的请求仍可能保存。确定离开吗？",
+      "Saving or verification is unfinished. Leaving discards unconfirmed changes on this page; sent requests may still commit. Leave anyway?",
+    ));
+    leaveGuard.current = confirmLeave;
+    const warn = (event: BeforeUnloadEvent) => {
+      if (pending()) { event.preventDefault(); event.returnValue = ""; }
+    };
     window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [saveState]);
+    return () => {
+      leaveGuard.current = () => true;
+      window.removeEventListener("beforeunload", warn);
+    };
+  }, [saveState, leaveGuard]);
 
   useEffect(() => () => {
     if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current);
@@ -2396,7 +2424,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
     }
     const controller = new AbortController();
     api<Taxonomy>(`/api/v1/taxonomy?version=${encodeURIComponent(doc.taxonomy_version)}`, { signal: controller.signal })
-      .then(setRecordingTaxonomy)
+      .then(value => { if (!controller.signal.aborted) setRecordingTaxonomy(value); })
       .catch((value) => {
         if ((value as Error).name !== "AbortError") setError((value as Error).message);
       });
@@ -2518,39 +2546,83 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
     setError(requestError.message);
   };
 
-  const persistAnnotations = async (nextDocument: AnnotationDocument, finalized = false) => {
-    if (!selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || saveState === "saving") return false;
-    const pendingDocument = { ...nextDocument, finalized };
-    retrySaveRef.current = () => void persistAnnotations(pendingDocument, finalized);
-    setDoc(pendingDocument);
-    setSaveState("saving");
+  const startSaveFlow = (
+    steps: ((base: ReviewDocument) => PreparedSave<ReviewDocument>)[],
+    refresh?: (confirmed: ReviewDocument, signal: AbortSignal) => Promise<void>,
+    complete = false,
+  ): Promise<boolean> => {
+    if (!selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator
+      || saveIsLocked(saveFlowRef.current?.state ?? saveState)) return Promise.resolve(false);
+    const recordingId = selected;
+    saveFlowRef.current?.dispose();
     setSaveMessage("");
     setError("");
-    try {
-      const saved = await api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, {
-        method: "PUT",
-        body: JSON.stringify({
-          expected_revision: review.revision,
-          document: { ...pendingDocument, revision: doc ? doc.revision + 1 : pendingDocument.revision + 1 }
-        })
-      });
-      const [updatedReview, updatedStatus] = await Promise.all([
-        api<ReviewDocument>(`/api/v1/recordings/${selected}/review`),
-        api<RecordingStatus>(`/api/v1/recordings/${selected}/status`)
-      ]);
-      setDoc(saved);
-      setReview(updatedReview);
-      setStatus(updatedStatus);
-      setSaveState("saved");
-      retrySaveRef.current = null;
-      return true;
-    } catch (value) {
-      registerSaveFailure(value);
-      return false;
-    }
+    const isCurrent = () => selectionRef.current === recordingId && saveFlowRef.current === flow;
+    const flow = new AnnotationSaveFlow<ReviewDocument>({
+      initialReview: review, steps,
+      readReview: signal => api<ReviewDocument>(`/api/v1/recordings/${recordingId}/review`, { signal }),
+      acceptReview: confirmed => {
+        if (!isCurrent()) return;
+        setReview(confirmed);
+        setDoc(confirmed.annotations);
+      },
+      refresh,
+      changed: (state, failure) => {
+        if (!isCurrent()) return;
+        setSaveState(state);
+        setSaveMessage(state === "conflict"
+          ? tr("云端已有不同修改；当前内容仍保留在本页。重新载入前请确认是否放弃这些修改。", "The server has different changes. Your content remains on this page; reloading discards it.")
+          : failure instanceof Error ? failure.message : "");
+      },
+      completed: () => {
+        if (!isCurrent()) return;
+        retrySaveRef.current = null;
+        if (complete) { setTaskTab("data"); void onChanged(); }
+        // Status is descriptive; review carries the revision/ownership needed to edit.
+        const refreshSummary = () => {
+          void api<RecordingStatus>(`/api/v1/recordings/${recordingId}/status`).then(value => {
+            if (!isCurrent()) return;
+            setStatus(value);
+            setSaveMessage("");
+            retrySaveRef.current = null;
+          }).catch(() => {
+            if (!isCurrent()) return;
+            retrySaveRef.current = refreshSummary;
+            setSaveMessage(tr("内容已保存；概览状态暂未刷新。", "Content saved; the status summary could not be refreshed."));
+          });
+        };
+        refreshSummary();
+      },
+    });
+    saveFlowRef.current = flow;
+    retrySaveRef.current = () => { void flow.recover(); };
+    return flow.start();
+  };
+
+  const annotationSaveStep = (nextDocument: AnnotationDocument, finalized: boolean) => {
+    const recordingId = selected;
+    const snapshot = structuredClone({ ...nextDocument, finalized });
+    return (base: ReviewDocument): PreparedSave<ReviewDocument> => {
+      const document = { ...snapshot, revision: base.annotations.revision + 1 };
+      const body = JSON.stringify({ expected_revision: base.revision, document });
+      return {
+        expectedRevision: base.revision,
+        write: signal => api<AnnotationDocument>(`/api/v1/recordings/${recordingId}/annotations`, { method: "PUT", body, signal }),
+        matches: current => current.recording_id === recordingId && annotationContentMatches(document, current.annotations, annotator),
+      };
+    };
+  };
+
+  const persistAnnotations = (nextDocument: AnnotationDocument, finalized = false) => {
+    if (saveIsLocked(saveFlowRef.current?.state ?? saveState)) return Promise.resolve(false);
+    setDoc({ ...nextDocument, finalized });
+    return startSaveFlow([annotationSaveStep(nextDocument, finalized)]);
   };
 
   const reloadCurrentRecording = () => {
+    if (!leaveGuard.current()) return;
+    saveFlowRef.current?.dispose();
+    saveFlowRef.current = null;
     setSaveState("idle");
     setSaveMessage("");
     setError("");
@@ -2655,7 +2727,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
   const changeWorkflow = async (
     action: "assign" | "reopen"
   ) => {
-    if (!selected || !review) return;
+    if (!selected || !review || saveIsLocked(saveFlowRef.current?.state ?? saveState)) return;
     if (
       action === "assign"
       && review.workflow.state === "in_progress"
@@ -2704,41 +2776,25 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
 
   const finalizeAndComplete = async () => {
     if (!selected || !review || !doc || !canMutate) return;
-    setSaveState("saving");
-    setSaveMessage("");
-    retrySaveRef.current = () => void finalizeAndComplete();
-    setError("");
-    try {
-      const annotations = await api<AnnotationDocument>(`/api/v1/recordings/${selected}/annotations`, {
-        method: "PUT",
-        body: JSON.stringify({
-          expected_revision: review.revision,
-          document: { ...doc, revision: doc.revision + 1, finalized: true }
-        })
-      });
-      setDoc(annotations);
-      const finalizedReview = await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`);
-      const completed = await api<ReviewDocument>(`/api/v1/recordings/${selected}/workflow`, {
-        method: "POST",
-        body: JSON.stringify({
-          action: "complete",
-          expected_revision: finalizedReview.revision,
-          comment: ""
-        })
-      });
-      setReview(completed);
-      setStatus(await api<RecordingStatus>(`/api/v1/recordings/${selected}/status`));
-      await onChanged();
-      setSaveState("saved");
-      retrySaveRef.current = null;
-      setTaskTab("data");
-    } catch (value) {
-      registerSaveFailure(value);
-    }
+    const recordingId = selected;
+    await startSaveFlow([
+      annotationSaveStep(doc, true),
+      (base): PreparedSave<ReviewDocument> => {
+        const body = JSON.stringify({ action: "complete", expected_revision: base.revision, comment: "" });
+        return {
+          expectedRevision: base.revision,
+          write: signal => api<ReviewDocument>(`/api/v1/recordings/${recordingId}/workflow`, { method: "POST", body, signal }),
+          matches: current => current.recording_id === recordingId
+            && current.workflow.state === "completed" && current.workflow.annotator_id === annotator
+            && current.active_export?.source_review_revision === base.revision
+            && annotationContentMatches(base.annotations, current.annotations, annotator),
+        };
+      },
+    ], undefined, true);
   };
 
   const permanentlyDeleteRecording = async () => {
-    if (!selected || deleteConfirmation !== `DELETE ${selected}`) return;
+    if (!selected || deleteConfirmation !== `DELETE ${selected}` || saveIsLocked(saveFlowRef.current?.state ?? saveState)) return;
     setDeleteBusy(true);
     setError("");
     try {
@@ -2798,39 +2854,29 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
 
   const choices = annotationKind === "exclude" ? [] : taxonomy[annotationKind].filter((item) => item.active);
   const persistSync = async (nextSync: SyncState, applyFixedOffset = false) => {
-    if (!selected || !review || review.workflow.state !== "in_progress" || review.workflow.annotator_id !== annotator || saveState === "saving") return false;
-    setSync(nextSync);
-    retrySaveRef.current = () => void persistSync(nextSync, applyFixedOffset);
-    setSaveState("saving");
-    setSaveMessage("");
-    setError("");
-    try {
-      const model = await api<Omit<SyncState, "anchors">>(`/api/v1/recordings/${selected}/sync`, {
-        method: "PUT",
-        body: JSON.stringify({
-          expected_revision: review.revision,
-          document: {
-            anchors: nextSync.anchors,
-            policy: "conditional_fixed_offset_v1",
-            apply_fixed_offset: applyFixedOffset,
-            reviewer_id: annotator
-          }
-        })
-      });
-      const timelineData = await api<{ time_s: number[]; values: number[][]; unit: string }>(`/api/v1/recordings/${selected}/timeline`);
-      const savedSync = { ...nextSync, ...model };
-      setSync(savedSync);
+    if (!selected || !review || !canMutate || saveIsLocked(saveFlowRef.current?.state ?? saveState)) return false;
+    const recordingId = selected;
+    const snapshot = structuredClone(nextSync);
+    const document = { anchors: snapshot.anchors, policy: "conditional_fixed_offset_v1", apply_fixed_offset: applyFixedOffset, reviewer_id: annotator };
+    setSync(snapshot);
+    return startSaveFlow([base => {
+      const body = JSON.stringify({ expected_revision: base.revision, document });
+      return {
+        expectedRevision: base.revision,
+        write: signal => api<SyncState>(`/api/v1/recordings/${recordingId}/sync`, { method: "PUT", body, signal }),
+        matches: current => current.recording_id === recordingId && syncContentMatches(document, current.sync, annotator),
+      };
+    }], async (confirmed, signal) => {
+      // Re-read the model too: a lost PUT response must not leave stale quality/offsets.
+      const [model, timelineData] = await Promise.all([
+        api<SyncState>(`/api/v1/recordings/${recordingId}/sync`, { signal }),
+        api<{ time_s: number[]; values: number[][]; unit: string }>(`/api/v1/recordings/${recordingId}/timeline`, { signal }),
+      ]);
+      if (signal.aborted || selectionRef.current !== recordingId) return;
+      setSync({ ...model, anchors: confirmed.sync.anchors });
       setTimeline(timelineData);
-      const updatedReview = await api<ReviewDocument>(`/api/v1/recordings/${selected}/review`);
-      setReview(updatedReview);
-      setSaveState("saved");
-      retrySaveRef.current = null;
-      if (savedSync.quality === "verified") setTaskTab("annotate");
-      return true;
-    } catch (value) {
-      registerSaveFailure(value);
-      return false;
-    }
+      if (model.quality === "verified") setTaskTab("annotate");
+    });
   };
 
   const saveSync = async (applyFixedOffset = false) => {
@@ -2921,7 +2967,8 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
     && sync.anchors.some((item) => item.role === "end_tap");
   const canEdit = review?.workflow.state === "in_progress"
     && review.workflow.annotator_id === annotator;
-  const saveLocked = saveState === "saving" || saveState === "error" || saveState === "conflict";
+  const saveLocked = saveIsLocked(saveState);
+  const saveBusy = saveIsBusy(saveState);
   const canMutate = canEdit && !saveLocked;
   const canClaim = review?.workflow.state === "unassigned";
   const canTakeOver = review?.workflow.state === "in_progress"
@@ -3154,8 +3201,10 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
       else if (action.kind === "jump_selected_end") jumpToSelectedIntervalEnd();
       else if (action.kind === "mark") mark(action.target);
       else if (action.kind === "select") setAnnotationKind(action.target);
-      else if (saveState === "error") retrySaveRef.current?.();
-      else if (saveState !== "conflict") void save(false);
+      else if (!saveIsBusy(saveState) && saveState !== "conflict") {
+        if (saveIsLocked(saveState)) retrySaveRef.current?.();
+        else void save(false);
+      }
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
@@ -3172,11 +3221,13 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
         {review && <span className={`state state-${review.workflow.state === "completed" ? "ready" : review.workflow.state === "in_progress" ? "in_progress" : "needs_attention"}`}>
           {review.workflow.state === "unassigned" ? "未领取" : review.workflow.state === "in_progress" ? tr(`标注中 · ${review.workflow.annotator_id}`, `Annotating · ${review.workflow.annotator_id}`) : "已完成"}
         </span>}
-        <span className={`save-indicator save-${saveState}`}>
-          {saveState === "saving" ? "正在保存…" : saveState === "saved" ? "已保存" : saveState === "error" ? "保存失败" : saveState === "conflict" ? "版本冲突" : "无待保存修改"}
+        <span className={`save-indicator save-${saveState}`} role="status" title={saveMessage}>
+          {annotationSaveLabel(saveState)}
         </span>
         {(canClaim || canTakeOver) && <button className="primary" onClick={() => changeWorkflow("assign")}>{canTakeOver ? "接管任务" : "领取任务"}</button>}
-        {(saveState === "error" || saveState === "conflict") && <button className="danger" onClick={saveState === "conflict" ? reloadCurrentRecording : () => retrySaveRef.current?.()}>{saveState === "conflict" ? "重新载入" : "重试保存"}</button>}
+        {saveLocked && !saveBusy && saveState !== "conflict" && retrySaveRef.current && <button onClick={() => retrySaveRef.current?.()}>{annotationRecoveryLabel(saveState)}</button>}
+        {saveState === "saved" && retrySaveRef.current && <button onClick={() => retrySaveRef.current?.()}>{tr("重试更新状态", "Retry status refresh")}</button>}
+        {saveLocked && !saveBusy && <button className="danger" onClick={reloadCurrentRecording}>{tr("重新载入", "Reload")}</button>}
       </section>
 
       {recordingDrawerOpen && <>
@@ -3244,7 +3295,15 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
                 <strong>{tr("当前状态下没有匹配录制", "No matching recordings in this status")}</strong>
                 <span>{tr("可以调整上方搜索或筛选条件，其他状态的数量仍显示在页签中。", "Adjust the search or filters above; counts for other statuses remain visible in the tabs.")}</span>
               </div>}
-              {activeRecordingQueue.map((recording) => <button ref={selected === recording.recording_id ? selectedRecordingButtonRef : undefined} key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} disabled={saveLocked} onClick={() => { setSelected(recording.recording_id); setRecordingDrawerOpen(false); }}>
+              {activeRecordingQueue.map((recording) => <button ref={selected === recording.recording_id ? selectedRecordingButtonRef : undefined} key={recording.recording_id} className={selected === recording.recording_id ? "selected" : ""} onClick={() => {
+                if (selected !== recording.recording_id) {
+                  if (!leaveGuard.current()) return;
+                  saveFlowRef.current?.dispose();
+                  saveFlowRef.current = null;
+                  setSelected(recording.recording_id);
+                }
+                setRecordingDrawerOpen(false);
+              }}>
                 <strong>{recording.participant_id ?? tr("待选择参与者", "Participant pending")} · {tierLabel(recording.data_tier)}</strong>
                 <span>{recording.recording_id}</span>
                 <span>{recording.collection_id} · {recording.duration_ns ? seconds(recording.duration_ns) : "—"}</span>
@@ -3303,7 +3362,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
 
           <div className={`annotation-task-scroll ${taskTab === "annotate" ? "annotation-task-scroll-annotate" : ""}`}>
             {error && <div className="error-banner">{userVisibleMessage(error)}</div>}
-            {saveMessage && saveState !== "saved" && <p className="stage-help warning-text">{saveMessage}</p>}
+            {saveMessage && <p className="stage-help warning-text" role="status">{saveMessage}</p>}
             {review && !canEdit && <div className="task-notice"><strong>{editDisabledReason}</strong></div>}
 
             {taskTab === "sync" && <>
@@ -3416,7 +3475,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
           <footer className="annotation-save-bar">
             <span>{canEdit ? "结构化修改会立即保存" : editDisabledReason}</span>
             <span>{doc?.finalized ? "已定稿" : "草稿"} · {sync?.quality === "verified" ? "同步已验证" : "同步待验证"}</span>
-            <button disabled={!canEdit || saveState === "saving" || saveState === "conflict"} onClick={() => saveState === "error" ? retrySaveRef.current?.() : void save(false)}>保存 / 重试（Ctrl+S）</button>
+            <button disabled={!canEdit || saveBusy || saveState === "conflict" || (saveLocked && !retrySaveRef.current)} onClick={() => saveLocked ? retrySaveRef.current?.() : void save(false)}>{saveLocked ? annotationRecoveryLabel(saveState) : tr("保存", "Save")}（Ctrl+S）</button>
           </footer>
         </section>
       </section>}
