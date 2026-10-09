@@ -19,7 +19,12 @@ from imu_data_collector.motion_label_service import MotionLabelService
 from imu_data_collector.motion_label_worker import MotionLabelWorker
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 from imu_data_collector.synthetic_motion import SyntheticReviewService
-from imu_data_collector.synthetic_temporal_contract import PERIOD_NS, document_sha256
+from imu_data_collector.synthetic_temporal_contract import (
+    ACTIVITY_RULES_VERSION,
+    PERIOD_NS,
+    activity_rules_evidence,
+    document_sha256,
+)
 
 
 def seed(tmp_path):
@@ -101,6 +106,7 @@ def edit_body(service, mid, variant):
     ]
     return {
         "document": document,
+        "activity_rules_version": ACTIVITY_RULES_VERSION,
         "lease_token": lease["token"],
         "expected_review_sha256": None,
         "expected_draft_sha256": None,
@@ -122,6 +128,10 @@ def test_whole_approval_unknown_mask_and_snapshot_frozen_inheritance(tmp_path):
     revision = store.read_json(request["entries"][0]["review_key"])[0]
     doc = revision["temporal_annotation"]
     validate_inheritance(doc, "human-test")
+    assert activity_rules_evidence() in doc["source_evidence"]
+    review = service.resolve(result["review"])
+    assert review["activity_rules"] == activity_rules_evidence()
+    assert review["activity_rules_range"] == {"start_ns": 0, "stop_ns": 4_000_000_000}
     assert doc["segments"][1]["primary_code"] is None
     assert doc["segments"][1]["semantic_text"] == "难以归类的动作"
     tampered = deepcopy(doc)
@@ -138,10 +148,25 @@ def test_whole_approval_unknown_mask_and_snapshot_frozen_inheritance(tmp_path):
     assert service.create_snapshot("admin")["snapshot_id"] == snapshot["snapshot_id"]
 
 
+@pytest.mark.parametrize("version", [None, "2026-10-09.1"])
+def test_outdated_rule_editor_cannot_create_review(tmp_path, version):
+    _, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    body["activity_rules_version"] = version
+    before = service.state(mid)
+    c = variant["candidate"]
+    with pytest.raises(ObjectConflictError, match="分类规则已更新"):
+        service.edit(mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass")
+    assert service.state(mid) == before
+
+
 def test_all_unknown_can_be_reviewed_but_never_exported(tmp_path):
     _, _, service, mid, variant = seed(tmp_path)
     lease = service.claim(mid, "human-test")
-    body = {"document": service.case(mid)["editor_template"], "lease_token": lease["token"]}
+    body = {
+        "document": service.case(mid)["editor_template"], "lease_token": lease["token"],
+        "activity_rules_version": ACTIVITY_RULES_VERSION,
+    }
     c = variant["candidate"]
     result = service.edit(
         mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass"

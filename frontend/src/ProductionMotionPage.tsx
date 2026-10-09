@@ -168,6 +168,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   };
   const finalized = () => {
     if (!editor) throw new Error("没有可保存的区间");
+    if (!rules) throw new Error("分类规则尚未加载，请稍后重试。");
     const doc = structuredClone(editor), events = new Map<string,Fall>();
     for (const s of doc.segments) {
       const fall = doc.taxonomy.primary.find(t => t.code === s.primary_code)?.is_fall;
@@ -189,7 +190,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     try {
       const priorStart = segment?.start_ns ?? 0;
       const result = await motionApi<Detail>(`${casePath}/${decision ? "review" : "draft"}`, {
-        document: finalized(), lease_token: lease.token, expected_draft_sha256: current.draft?.revision_sha256 ?? null,
+        document: finalized(), activity_rules_version: rules?.version, lease_token: lease.token, expected_draft_sha256: current.draft?.revision_sha256 ?? null,
         expected_review_sha256: current.review?.revision_sha256 ?? null, decision, scope: rejectScope, reason});
       localStorage.removeItem(cacheKey(current)); setCurrent(result); setEditor(structuredClone(result.editor_template));
       setPart(Math.max(0,partAt(result.editor_template.segments,priorStart))); setRejecting(false);
@@ -238,7 +239,8 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       {segment && <fieldset className="primary-fields motion-fields" disabled={!lease || busy} onFocusCapture={e=>{if((e.target as HTMLElement).matches("input,textarea,select"))pause();}}>
         <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null});}}>
           {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
-        {definition && <details className="primary-definition"><summary>类别定义与切分说明</summary><p>{definition.definition}</p><p>包括：{definition.includes}</p><p>不包括：{definition.excludes}</p><p>切分：{definition.boundaries}</p><p>{definition.example}</p></details>}
+        {definition && ["stand_up", "get_up"].includes(definition.code) && <div className="primary-definition" aria-label="起立起身分类提示"><p>{definition.definition}</p><p>按转换起始姿态分类；手撑不是分界，中途短暂姿态不另拆。</p></div>}
+        {definition && <details className="primary-definition"><summary>类别定义与切分说明</summary><p>{definition.definition}</p><p>包括：{definition.includes}</p><p>不包括：{definition.excludes}</p><p>切分：{definition.boundaries}</p><p>{definition.example}</p><small>规则 {rules?.version}</small></details>}
         <div className="primary-boundaries">{(["start_ns","stop_ns"] as const).map((side,i)=><label key={side}>{i ? "结束（秒）" : "开始（秒）"}<input type="number" aria-label={i ? "结束秒" : "开始秒"} step="0.04" value={segment[side]/1e9} disabled={i ? part===editor.segments.length-1 : part===0} onChange={e=>boundary(side,Number(e.target.value)*1e9)}/></label>)}</div>
         <div className="primary-edit-buttons"><button onClick={()=>{const point=Math.round(cursor/40000000)*40000000;if(point<=segment.start_ns||point>=segment.stop_ns){setError("请先将播放位置移到所选区间内部。");return;}setEditor({...editor,segments:editor.segments.flatMap((s,i)=>i===part?[{...s,notes:anchoredNotes(s),stop_ns:point},{...s,notes:anchoredNotes(s),segment_id:`segment-${crypto.randomUUID()}`,start_ns:point}]:[s])});}}>在播放位置切分</button>
           <button disabled={part===editor.segments.length-1} onClick={()=>{const next=editor.segments[part+1];if(segment.fall_event_id&&next.fall_event_id&&segment.fall_event_id!==next.fall_event_id){setError("不能合并两次独立跌倒。");return;}setEditor({...editor,segments:editor.segments.flatMap((s,i)=>i===part?[joined(s,next)]:i===part+1?[]:[s])});}}>合并下一段</button></div>

@@ -27,7 +27,7 @@ type Metric = {variant: string; partition: string; macro_f1: number | null; iden
 type Report = {report: {reference_count: number; reference_completed?: number; reference_excluded?: number; development_count?: number; metrics: Metric[]}};
 type Snapshot = {snapshot_id: string; state: string; candidate_count: number; result: {shards: {object_key: string}[]} | null};
 const names: Record<string, string> = {standing: "站立", walking: "行走", running: "跑步", sitting: "坐姿",
-  lying: "卧姿", squatting: "蹲姿", sit_down: "坐下", stand_up: "起立（坐姿到站立）", lie_down: "躺下", get_up: "起身（其他低位姿态到站立）",
+  lying: "卧姿", squatting: "蹲姿", sit_down: "坐下", stand_up: "起立（坐／蹲／跪姿→站立）", lie_down: "躺下", get_up: "起身（卧姿／爬撑→站立）",
   squatting_down: "蹲下", stair_up: "上楼", stair_down: "下楼", bend_or_pick_up: "弯腰／拾物",
   stumble_recovery: "失衡恢复", jumping: "跳跃", turning: "原地转向", crawling: "爬行", kneeling: "跪姿",
   forward_fall: "向前跌倒", backward_fall: "向后跌倒", left_lateral_fall: "向左跌倒", right_lateral_fall: "向右跌倒",

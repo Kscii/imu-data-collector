@@ -27,7 +27,14 @@ from .motion_annotations import (
     validate_motion,
 )
 from .storage import ObjectConflictError
-from .synthetic_temporal_contract import SHA256, document_sha256, formal_labels, validate_document
+from .synthetic_temporal_contract import (
+    ACTIVITY_RULES_VERSION,
+    SHA256,
+    activity_rules_evidence,
+    document_sha256,
+    formal_labels,
+    validate_document,
+)
 
 
 def now():
@@ -382,6 +389,8 @@ class MotionLabelService:
         return self.feature(mid)["template"]
 
     def edit(self, mid, cid, vid, body, actor, *, decision=None):
+        if body.get("activity_rules_version") != ACTIVITY_RULES_VERSION:
+            raise ObjectConflictError("分类规则已更新；请保存本地草稿并刷新页面后按新规则检查。")
         variant = self.variant(mid, cid, vid)
         require(variant is not None, "Unknown IMU variant")
         state, generation = self.state(mid)
@@ -393,6 +402,9 @@ class MotionLabelService:
         edited = deepcopy(edited)
         base = self.base_document(mid, state)
         edited["source_evidence"] = deepcopy(base["source_evidence"])
+        rules = activity_rules_evidence()
+        if rules not in edited["source_evidence"]:
+            edited["source_evidence"].append(rules)
         edited["producer"] = {"kind": "human-production-draft", "reviewer": actor}
         draft_base = base
         preserve_unseen_draft = bool(
@@ -415,6 +427,11 @@ class MotionLabelService:
             "motion_sha256": mid,
             "document": document,
             "author": actor,
+            "activity_rules": rules,
+            "activity_rules_range": {
+                "start_ns": variant["clock"]["source_start_ns"],
+                "stop_ns": variant["clock"]["source_start_ns"] + variant["clock"]["duration_ns"],
+            },
             "created_at_utc": now(),
             "previous": state["draft"],
         }
@@ -445,6 +462,8 @@ class MotionLabelService:
                     "schema": REVIEW_SCHEMA,
                     "motion_sha256": mid,
                     "document": document,
+                    "activity_rules": rules,
+                    "activity_rules_range": revision["activity_rules_range"],
                     "decision": decision,
                     "reviewer": actor,
                     "reason": reason,
