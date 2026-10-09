@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { beijingDay, chartColumns, coverageLabel, dayRange } from "./externalDeviceData.ts";
+Object.defineProperty(globalThis, "window", {configurable: true, value: {location: {search: "?lang=zh-CN"}}});
+const { beijingDay, chartColumns, coverageLabel, dayRange, chooseExternalMetric, latestMetricRange, metricPreferenceKey } = await import("./externalDeviceData.ts");
 
 test("Beijing calendar uses fixed UTC+8 across year and UTC day boundaries", () => {
   assert.equal(beijingDay(new Date("2025-12-31T16:00:00Z")), "2026-01-01");
@@ -44,7 +45,7 @@ test("bad ranges fall back safely and all history starts at the earliest record"
   assert.equal(range.start, "2026-01-01T01:02:03.004Z");
 });
 
-import { chooseExternalMetric, latestMetricRange, metricPreferenceKey } from "./externalDeviceData.ts";
+
 test("explicit URL metric wins; device type remembers selection; unavailable values fall back", () => {
   const available = ["HR", "ST", "KCAL", "energy_kcal"];
   assert.equal(chooseExternalMetric("radar-watch", available, "KCAL", "ST"), "KCAL");

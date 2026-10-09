@@ -15,6 +15,7 @@ from imu_data_collector import external_device_insights as insights
 from imu_data_collector.auth import Actor
 from imu_data_collector.config import Settings
 from imu_data_collector.external_device_domain import PREFIX, now, timestamp, utc
+from imu_data_collector.external_device_labels import summary_presentation
 from imu_data_collector.external_device_runtime import ExternalDeviceRuntime
 from imu_data_collector.http_download import object_download_response
 from imu_data_collector.storage import ObjectStore
@@ -280,7 +281,7 @@ def register_external_devices(
         )
         if not rows:
             raise HTTPException(404, "找不到该睡眠报告")
-        return {**rows[0], "summary": json.loads(rows[0]["summary"])}
+        return {**rows[0], "summary": summary_presentation(json.loads(rows[0]["summary"]))}
 
     @router.get("/devices/{identifier}/events")
     def events(

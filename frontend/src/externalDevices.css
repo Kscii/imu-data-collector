@@ -32,7 +32,7 @@ body:has(.external-page) { min-width: 0; overflow: hidden; }
 .external-sync-status.warning i { background: #fbbf24; }
 .external-sync-status span { margin-left: auto; }
 .external-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 10px; }
-.external-toolbar { padding: 12px 16px 10px; border: 1px solid #253754; border-radius: 10px; background: #101d30; }
+.external-toolbar { min-width: 0; padding: 12px 16px 10px; border: 1px solid #253754; border-radius: 10px; background: #101d30; }
 .external-toolbar-top { display: flex; align-items: center; gap: 16px; min-width: 0; }
 .external-device-heading { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
 .external-device-heading strong { font-size: 17px; overflow-wrap: anywhere; }
@@ -118,7 +118,7 @@ body:has(.external-page) { min-width: 0; overflow: hidden; }
 .external-toolbar-top .external-refresh-button { margin-left: auto; }
 .external-reports-button { white-space: nowrap; }
 .external-metric-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.external-quick-metrics { display: flex; gap: 4px; }
+.external-quick-metrics { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px; }
 .external-quick-metrics button { background: #14283f; color: #a8bfda; border-color: #29415c; padding: 6px 12px; white-space: nowrap; }
 .external-metric-toolbar .external-metric { margin-left: 2px; }
 .external-metric-toolbar .external-metric select { width: 160px; max-width: none; padding: 6px 9px; }
@@ -161,3 +161,6 @@ body:has(.external-page) { min-width: 0; overflow: hidden; }
   .external-toolbar-top .external-device-heading { flex: 1 0 calc(100% - 80px); }
   .external-device-heading strong { white-space: nowrap; overflow-wrap: normal; }
 }
+
+html[lang="en"] .external-metric-toolbar .external-metric { max-width: 100%; }
+html[lang="en"] .external-metric-toolbar .external-metric select { width: 240px; max-width: 100%; }
