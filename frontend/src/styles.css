@@ -269,7 +269,8 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .annotation-recording-summary strong { white-space: nowrap; font-size: 12px; }
 .annotation-recording-summary code { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #91a4bd; font-size: 11px; user-select: all; }
 .save-indicator { border-radius: 999px; padding: 5px 9px; font-size: 11px; white-space: nowrap; color: #9eb0c8; background: #0b1525; }
-.save-saving { color: #fde68a; }
+.save-saving, .save-refreshing, .save-checking, .save-unknown, .save-retryable, .save-next_step { color: #fde68a; }
+.save-refresh_failed { color: #fde68a; background: #313022; }
 .save-saved { color: #86efac; }
 .save-error, .save-conflict { color: #fecaca; background: #431b22; }
 .annotation-workbench-body { min-height: 0; display: grid; grid-template-columns: minmax(720px, 1fr) minmax(440px, 500px); gap: 10px; overflow: hidden; }
