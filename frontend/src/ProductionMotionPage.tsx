@@ -153,7 +153,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       }
       navigationAnchor.current = null;
       setCurrent(data); setEditor(value); setLease(claimed); setPart(0); setFrameIndex(0); setPlaying(false); setViewerReady(false);
-      if (previewId && initialSeconds !== undefined && Number.isFinite(initialSeconds) && initialSeconds >= 0) {
+      if (initialSeconds !== undefined && Number.isFinite(initialSeconds) && initialSeconds >= 0) {
         initialSeek.current = Math.min(initialSeconds * 1e9, value.clock.duration_ns);
       }
       if (data.entry.candidate.candidate_id === currentRef.current?.entry.candidate.candidate_id &&

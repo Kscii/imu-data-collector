@@ -1,6 +1,7 @@
 """Loopback-only production workbench against an isolated local store."""
 
 import argparse
+import re
 from copy import deepcopy
 from pathlib import Path
 
@@ -10,6 +11,16 @@ from starlette.routing import Mount, Route
 
 from imu_data_collector.annotation_api import create_annotation_app
 from imu_data_collector.config import load_settings
+
+
+def review_write_path(path):
+    return bool(
+        re.fullmatch(
+            r"/api/v1/synthetic/motions/[0-9a-f]{64}/"
+            r"(?:claim|release|variants/[^/]+/[^/]+/(?:draft|review))",
+            path,
+        )
+    )
 
 
 def mount_calibration(app, settings, store, state):
@@ -57,6 +68,11 @@ def main():
         action="store_true",
         help="Reject all editing requests in research comparisons.",
     )
+    parser.add_argument(
+        "--reviews-only",
+        action="store_true",
+        help="Allow recording review writes only in an isolated development task.",
+    )
     parser.add_argument("--calibration-store", type=Path)
     parser.add_argument("--calibration-state", type=Path)
     parser.add_argument(
@@ -81,12 +97,29 @@ def main():
     settings.identity.allowed_unikeys = tuple(set(settings.identity.allowed_unikeys) | {args.actor})
     settings.identity.admins = tuple(set(settings.identity.admins) | {args.actor})
     app = create_annotation_app(settings)
+    # This loopback workbench has no background inference worker to discover
+    # features. Populate its actual API catalog before the first lookup.
+    while app.state.motion_label_service.refresh(force=True) == 256:
+        pass
     if args.read_only:
 
         @app.middleware("http")
         async def read_only(request, call_next):
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 return JSONResponse({"detail": "本页仅用于只读实验对照"}, status_code=403)
+            return await call_next(request)
+
+    if args.reviews_only:
+
+        @app.middleware("http")
+        async def reviews_only(request, call_next):
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                path = request.url.path
+                if not review_write_path(path):
+                    return JSONResponse(
+                        {"detail": "本开发任务只接受录制审核，不启用模型或创建训练快照"},
+                        status_code=403,
+                    )
             return await call_next(request)
 
     if args.calibration_store:

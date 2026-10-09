@@ -137,6 +137,10 @@
 @media (max-height: 720px) {
   .posture-workbench .primary-fields, .posture-workbench .interval-semantics { gap: 4px; }
   .posture-workbench .primary-editor, .posture-workbench .primary-editor-scroll { gap: 6px; }
+  .posture-workbench .primary-toolbar button,
+  .posture-workbench .primary-fields button,
+  .posture-workbench .primary-actions button { padding: 5px 8px; }
+  .posture-workbench .primary-fields select { padding: 6px 8px; }
 }
 .posture-workbench .primary-editor header > small { order: 1; }
 .posture-workbench .primary-editor header > button { padding: 4px 6px; }

@@ -117,7 +117,16 @@ def sequence_decode(
             joints=joints,
             boundary_scores=boundary_scores,
         )
-        return semantic_module().finalize_segments(decoded, metadata)
+        semantic = semantic_module()
+        if (
+            metadata["segmentation_policy"].get("version")
+            == semantic.REFINEMENT_VERSION
+            and joints is not None
+        ):
+            decoded["refinement_features"] = semantic.semantic_features(
+                joints, decoded["valid"]
+            )
+        return semantic.finalize_segments(decoded, metadata)
     if metadata.get("decoder", {}).get("kind") == SEMANTIC_RUNTIME_VERSION:
         semantic = semantic_module()
         return semantic.semantic_decode(

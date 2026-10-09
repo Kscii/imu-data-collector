@@ -148,9 +148,7 @@ def duration_path(
     result = np.full(t_count, -1, np.int64)
     transition = weight * np.log(matrix)
     ages = np.arange(1, d + 1)[None, :]
-    penalty = strength * np.maximum(
-        0, 1 - ages / np.maximum(1, np.array(minimum)[:, None])
-    )
+    penalty = strength * np.maximum(0, 1 - ages / np.maximum(1, np.array(minimum)[:, None]))
     edges = np.flatnonzero(np.diff(np.r_[False, valid, False]))
     for a, b in zip(edges[::2], edges[1::2], strict=True):
         if b - a < hard_minimum:
@@ -160,16 +158,11 @@ def duration_path(
         delta[:, 0 if hard_minimum > 1 else -1] = emission[a]
         back = np.empty((b - a, k, d), np.int32)
         for t in range(a + 1, b):
-            boundary_weight = 1 - 0.75 * (
-                float(boundary[t]) if boundary is not None else 0
-            )
+            boundary_weight = 1 - 0.75 * (float(boundary[t]) if boundary is not None else 0)
             exit_values = delta - penalty * boundary_weight
             exit_values[:, : hard_minimum - 1] = -np.inf
             best_age = exit_values.argmax(1)
-            choices = (
-                exit_values[np.arange(k), best_age][:, None]
-                + transition * boundary_weight
-            )
+            choices = exit_values[np.arange(k), best_age][:, None] + transition * boundary_weight
             np.fill_diagonal(choices, -np.inf)
             previous_class = choices.argmax(0)
             new = np.full_like(delta, -np.inf)
@@ -196,6 +189,7 @@ def duration_path(
 
 
 SEGMENTATION_VERSION = "product-duration-20261010-v3"
+REFINEMENT_VERSION = "product-refinement-20261010-v1"
 SOFT_SECONDS = {
     **dict.fromkeys(
         ("standing", "sitting", "lying", "squatting", "kneeling", "walking", "running"),
@@ -219,6 +213,115 @@ def segmentation_policy(hard_seconds=0.1, soft_strength=0.4):
     }
 
 
+def refinement_policy(soft_strength=0, gap_seconds=0, boundary_seconds=0):
+    """Fixed research grid; legacy duration policies keep their original behavior."""
+    if soft_strength not in (0, 0.4, 1.2):
+        raise ValueError("Unknown refinement duration preference")
+    if gap_seconds not in (0, 0.2, 0.4) or boundary_seconds not in (0, 0.2):
+        raise ValueError("Unknown local refinement window")
+    return {
+        **segmentation_policy(0.1, soft_strength),
+        "version": REFINEMENT_VERSION,
+        "gap_seconds": gap_seconds,
+        "boundary_seconds": boundary_seconds,
+    }
+
+
+def refine_local_path(path, valid, probability, unknown, labels, policy, features, blocked):
+    """Evidence-supported local repair, with no fixed class priority.
+
+    Unknown holes may become either adjacent ordinary class. The untouched
+    unknown hypothesis competes on the same evidence scale. Boundary moves
+    are bounded by five frames and never create a short run. This does not
+    calibrate confidence, infer contact, or invent a third/critical activity.
+    """
+    gap = round(policy["gap_seconds"] * 25)
+    radius = round(policy["boundary_seconds"] * 25)
+    minimum = int(np.ceil(policy["hard_seconds"] * 25 - 1e-9))
+    result = path.copy()
+    filled, shifted = np.zeros(len(path), bool), np.zeros(len(path), bool)
+    ordinary = {
+        i
+        for i, code in enumerate(labels)
+        if code not in ("fall", "stumble_recovery", "other_activity")
+    }
+    evidence = np.log(np.maximum(probability, 1e-20))
+    if features is not None:
+        if features.shape != (len(path), len(FEATURE_NAMES)):
+            raise ValueError("Refinement geometry and path differ")
+        evidence += 0.15 * semantic_bias(features, labels)
+
+    def safe(a, b):
+        return bool(valid[a:b].all() and not blocked[a:b].any())
+
+    def change(point):
+        if features is None or point < 3 or point + 3 > len(path):
+            return 0.0
+        if not safe(point - 3, point + 3):
+            return 0.0
+        cols = [0, 1, 6, 7, 8]
+        before = np.median(features[point - 3 : point, cols], axis=0)
+        after = np.median(features[point : point + 3, cols], axis=0)
+        return float(np.clip(np.abs(after - before) / [0.2, 0.15, 0.3, 0.3, 0.4], 0, 1).mean())
+
+    if gap:
+        edges = np.r_[0, np.flatnonzero(np.diff(path)) + 1, len(path)]
+        for a, b in pairwise(edges):
+            if path[a] >= 0 or b - a > gap or a == 0 or b == len(path):
+                continue
+            left, right = int(result[a - 1]), int(result[b])
+            if left not in ordinary or right not in ordinary or not safe(a - 1, b + 1):
+                continue
+            abstain = float(np.log(np.maximum(unknown[a:b], 1e-20)).sum())
+            if left == right:
+                score, point = float(evidence[a:b, left].sum()), b
+            else:
+                choices = [
+                    (
+                        float(evidence[a:t, left].sum() + evidence[t:b, right].sum())
+                        - 0.15
+                        + 0.35 * change(t),
+                        t,
+                    )
+                    for t in range(a, b + 1)
+                ]
+                score, point = max(choices, key=lambda x: (x[0], -abs(x[1] - (a + b) / 2)))
+            if score > abstain + 1e-8:
+                result[a:point], result[point:b] = left, right
+                filled[a:b] = True
+
+    if radius:
+        # Anchors are frozen before this pass; sequential moves cannot drift an
+        # anchor by repeated updates or cross an adjacent boundary.
+        edges = np.r_[0, np.flatnonzero(np.diff(result)) + 1, len(result)]
+        previous = int(edges[0])
+        for index, anchor in enumerate(edges[1:-1], 1):
+            end = int(edges[index + 1])
+            left, right = int(result[anchor - 1]), int(result[anchor])
+            lo, hi = max(previous + minimum, anchor - radius), min(end - minimum, anchor + radius)
+            if left not in ordinary or right not in ordinary or lo > hi:
+                previous = int(anchor)
+                continue
+            a, b = min(lo, anchor), max(hi, anchor)
+            if not safe(max(previous, a - 1), min(end, b + 1)):
+                previous = int(anchor)
+                continue
+
+            def score(t, a=a, b=b, left=left, right=right):
+                return float(
+                    evidence[a:t, left].sum() + evidence[t:b, right].sum()
+                ) + 0.35 * change(t)
+
+            point = max(range(lo, hi + 1), key=lambda t: (score(t), -abs(t - anchor)))
+            if score(point) > score(int(anchor)) + 1e-8:
+                result[a:point], result[point:b] = left, right
+                shifted[min(point, anchor) : max(point, anchor)] = True
+                previous = point
+            else:
+                previous = int(anchor)
+    return result, filled, shifted
+
+
 def finalize_segments(decoded, metadata, *, start=0, stop=None):
     """Constrain the final (possibly cropped) candidate path, after rejection.
 
@@ -232,17 +335,20 @@ def finalize_segments(decoded, metadata, *, start=0, stop=None):
         return decoded
     if policy.get("version") not in (
         SEGMENTATION_VERSION,
+        REFINEMENT_VERSION,
         "product-duration-20261010-v1",
         "product-duration-20261010-v2",
     ):
         raise ValueError("Unknown segmentation policy")
+    refinement = policy["version"] == REFINEMENT_VERSION
+    if refinement and policy != refinement_policy(
+        policy["soft_strength"], policy["gap_seconds"], policy["boundary_seconds"]
+    ):
+        raise ValueError("Refinement policy differs from the fixed research grid")
+    preserve_evidence = policy["version"] in (SEGMENTATION_VERSION, REFINEMENT_VERSION)
     hard = float(policy["hard_seconds"])
     strength = float(policy["soft_strength"])
-    if (
-        not np.isfinite([hard, strength]).all()
-        or not 0.1 <= hard <= 2
-        or not 0 <= strength <= 4
-    ):
+    if not np.isfinite([hard, strength]).all() or not 0.1 <= hard <= 2 or not 0 <= strength <= 4:
         raise ValueError("Invalid duration policy")
     minimum = int(np.ceil(hard * 25 - 1e-9))
     labels = metadata["labels"]
@@ -264,25 +370,21 @@ def finalize_segments(decoded, metadata, *, start=0, stop=None):
     emission[np.arange(len(old)), np.where(old >= 0, old, k)] += 0.5
     supported = metadata["supported_indices"]
     emission[:, [i for i in range(k) if i not in supported]] = -np.inf
-    critical = [
-        i for i, code in enumerate(labels) if code in ("fall", "stumble_recovery")
-    ]
+    critical = [i for i, code in enumerate(labels) if code in ("fall", "stumble_recovery")]
     cores = []
     edges = np.r_[0, np.flatnonzero(np.diff(old)) + 1, len(old)]
     for a, b in pairwise(edges):
         if old[a] in critical:
             cores.append((int(a), int(b), int(old[a])))
     outside_evidence = []
-    if policy["version"] == SEGMENTATION_VERSION:
+    if preserve_evidence:
         # A second pass after projection must not forget events masked by the
         # full-recording pass. Reintroduce the original cores, not guessed labels.
         for a, b, code in decoded.get("duration_event_evidence", []):
             if b <= start or a >= stop:
                 outside_evidence.append((int(a), int(b), int(code)))
             else:
-                cores.append(
-                    (max(0, int(a) - start), min(stop, int(b)) - start, int(code))
-                )
+                cores.append((max(0, int(a) - start), min(stop, int(b)) - start, int(code)))
         cores = sorted(set(cores))
     for a, b, code in cores:
         emission[a:b] = -np.inf
@@ -300,18 +402,13 @@ def finalize_segments(decoded, metadata, *, start=0, stop=None):
             emission[point] = -np.inf
             emission[point, k] = 0
     soft = policy["soft_seconds"]
-    ages = [max(minimum, int(np.ceil(soft.get(code, 0) * 25))) for code in labels] + [
-        minimum
-    ]
+    ages = [max(minimum, int(np.ceil(soft.get(code, 0) * 25))) for code in labels] + [minimum]
     matrix = np.full((k + 1, k + 1), 1 / (k + 1))
     np.fill_diagonal(matrix, 1)
     path = duration_path(
         emission, valid, matrix, 0.15, ages, strength=strength, hard_minimum=minimum
     )
-    if (
-        policy["version"] != "product-duration-20261010-v1"
-        and (valid & (path < 0)).any()
-    ):
+    if policy["version"] != "product-duration-20261010-v1" and (valid & (path < 0)).any():
         # Conflicting tiny critical events must not erase a usable recording.
         # Preserve their evidence as local abstentions, solve the remaining islands.
         blocked = np.zeros(len(old), bool)
@@ -339,9 +436,30 @@ def finalize_segments(decoded, metadata, *, start=0, stop=None):
             )
     unsegmentable = valid & (path < 0)
     path[path == k] = -1
+    filled, shifted = np.zeros(len(path), bool), np.zeros(len(path), bool)
+    if refinement and not decoded.get("local_refinement_applied", False):
+        blocked = unsegmentable.copy()
+        for a, b, _ in cores:
+            blocked[max(0, a - 10) : min(len(path), b + 10)] = True
+        geometry = decoded.get("refinement_features")
+        path, filled, shifted = refine_local_path(
+            path,
+            valid,
+            probability,
+            unknown,
+            labels,
+            policy,
+            geometry[start:stop] if geometry is not None else None,
+            blocked,
+        )
     result = dict(decoded)
     result["class_indices"] = original.copy()
     result["class_indices"][start:stop] = path
+    if refinement:
+        result["local_refinement_applied"] = True
+        for key, mask in (("short_unknown_filled", filled), ("boundary_adjusted", shifted)):
+            result[key] = np.asarray(decoded.get(key, np.zeros(len(original), bool))).copy()
+            result[key][start:stop] |= mask
     changed = result["class_indices"] != original
     result["high_confidence_indices"] = decoded["high_confidence_indices"].copy()
     result["high_confidence_indices"][changed] = -1
@@ -350,17 +468,15 @@ def finalize_segments(decoded, metadata, *, start=0, stop=None):
     reliability = np.minimum(
         decoded["local_scores"][rows, chosen], decoded["sequence_scores"][rows, chosen]
     )
-    result["reliability"] = np.where(
-        result["class_indices"] >= 0, reliability, 0
-    ).astype(np.float32)
+    result["reliability"] = np.where(result["class_indices"] >= 0, reliability, 0).astype(
+        np.float32
+    )
     result["duration_adjusted"] = changed | np.asarray(
         decoded.get("duration_adjusted", np.zeros(len(original), bool))
     )
     result["duration_unsegmentable"] = (
-        np.asarray(
-            decoded.get("duration_unsegmentable", np.zeros(len(original), bool))
-        ).copy()
-        if policy["version"] == SEGMENTATION_VERSION
+        np.asarray(decoded.get("duration_unsegmentable", np.zeros(len(original), bool))).copy()
+        if preserve_evidence
         else np.zeros(len(original), bool)
     )
     result["duration_unsegmentable"][start:stop] = unsegmentable
@@ -383,8 +499,7 @@ def semantic_decode(
     if f.shape != (len(valid), len(FEATURE_NAMES)):
         raise ValueError("Semantic clock differs")
     weight, duration, gap = (
-        cfg.get(k, 0)
-        for k in ("semantic_weight", "minimum_seconds", "gap_fill_seconds")
+        cfg.get(k, 0) for k in ("semantic_weight", "minimum_seconds", "gap_fill_seconds")
     )
     if (
         weight not in (0.0, 0.5, 1.0)
@@ -449,10 +564,7 @@ def semantic_decode(
         proposal[a:b] = path[a:b]
         filled[a:b] = True
     cutoff = np.array(
-        [
-            cfg.get("calibration", {}).get("high_thresholds", {}).get(code, 2.0)
-            for code in labels
-        ]
+        [cfg.get("calibration", {}).get("high_thresholds", {}).get(code, 2.0) for code in labels]
     )
     high = proposal.copy()
     high[(reliability < cutoff[np.maximum(proposal, 0)]) | filled | ~mask] = -1
