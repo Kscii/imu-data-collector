@@ -62,3 +62,51 @@ test("采集工作台与设备配置入口保持明确可见", () => {
     );
   }
 });
+
+// Vite's parser also sees canvas strings and imperative DOM attributes, unlike a DOM-only scan.
+import { parseAst } from "vite";
+import { readdirSync } from "node:fs";
+
+function untranslatedExternalText(source: string): string[] {
+  const failures: string[] = [];
+  const visit = (node: any, chineseArgument = false) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(child => visit(child, chineseArgument)); return; }
+    const text = node.type === "TemplateElement" ? node.value.raw
+      : ["Literal", "JSXText"].includes(node.type) ? node.value : null;
+    if (!chineseArgument && typeof text === "string" && /[\u3400-\u9fff]/u.test(text)) {
+      failures.push(`line ${source.slice(0, node.start).split("\n").length}: ${text.trim()}`);
+    }
+    if (node.type === "CallExpression" && ["tr", "countLabel"].includes(node.callee?.name)) {
+      const chineseIndex = node.callee.name === "tr" ? 0 : 1;
+      const english = node.arguments[chineseIndex + 1];
+      if (!english || (english.type === "Literal" && !english.value)) failures.push("Missing English argument");
+      node.arguments.forEach((arg: unknown, index: number) => visit(arg, index === chineseIndex));
+      return;
+    }
+    for (const child of Object.values(node)) {
+      if (child && typeof child === "object") visit(child, chineseArgument);
+    }
+  };
+  visit(parseAst(source, {lang: "tsx"}));
+  return failures;
+}
+
+test("external UI literals, templates and accessibility attributes require explicit English", () => {
+  const directory = new URL("./", import.meta.url);
+  const files = readdirSync(directory).filter(file => /^(ExternalDevice.*\.tsx|externalDevice.*\.ts)$/.test(file) && !file.endsWith(".test.ts"));
+  assert.ok(files.length >= 5);
+  for (const file of files) {
+    assert.deepEqual(untranslatedExternalText(readFileSync(new URL(file, directory), "utf8")), [], file);
+  }
+});
+
+test("external translation guard detects JSX, tooltip, template and English-argument omissions", () => {
+  for (const source of [
+    '<button>更新数据</button>', '<button title="下载数据" />',
+    'button.setAttribute("aria-label", "报警")', 'const title = `共有 ${count} 条记录`',
+    'tr("中文", "仍为中文")', 'tr("中文", "")', 'tr("中文")',
+  ]) assert.ok(untranslatedExternalText(source).length, source);
+  assert.deepEqual(untranslatedExternalText('tr(`共有 ${count} 条记录`, `${count} records`)'), []);
+  assert.deepEqual(untranslatedExternalText('countLabel(count, "条记录", "record")'), []);
+});
