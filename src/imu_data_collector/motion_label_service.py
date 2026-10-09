@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import io
 import json
 import sqlite3
 import threading
@@ -13,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
+
 from .motion_annotations import (
     POLICY,
     REVIEW_SCHEMA,
@@ -20,6 +24,7 @@ from .motion_annotations import (
     apply_projection,
     covered,
     normalize_recording,
+    primary_prediction,
     project_motion,
     require,
     reviewed_ranges,
@@ -30,10 +35,12 @@ from .synthetic_temporal_contract import (
     CURRENT_RULES_VERSION,
     CURRENT_TAXONOMY_VERSION,
     SHA256,
+    AnnotationIssues,
     activity_rules_evidence,
     current_document,
     derive_transition_endpoints,
     document_sha256,
+    duration_submission_issues,
     editor_document,
     formal_labels,
     partial_fall_events,
@@ -305,6 +312,61 @@ class MotionLabelService:
             return self.resolve(state["prediction"])["document"]
         return self.feature(mid)["template"]
 
+    def project_prediction(self, prediction, variant):
+        """Recheck duration after a candidate crop, using bound sequence evidence."""
+        document = prediction["document"]
+        quality = prediction.get("quality") or {}
+        metadata = quality.get("duration_projection")
+        clock = variant["clock"]
+        if metadata and (
+            clock["source_start_ns"] or clock["sample_count"] != document["clock"]["sample_count"]
+        ):
+            from .semantic_runtime import finalize_segments
+
+            key = quality["sequence_scores_key"]
+            require(
+                key.startswith(self.root + "/sequence-manifests/"),
+                "Sequence reference escapes namespace",
+            )
+            descriptor = self.store.read_json(key)[0]
+            require(
+                descriptor["object_key"].startswith(self.root + "/sequences/"),
+                "Sequence payload escapes namespace",
+            )
+            payload = self.store.read_bytes(descriptor["object_key"])
+            require(
+                len(payload) == descriptor["byte_length"]
+                and hashlib.sha256(payload).hexdigest() == descriptor["sha256"],
+                "Sequence payload hash differs",
+            )
+            with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+                decoded = {k: archive[k] for k in archive.files}
+            start = clock["source_start_ns"] // 40_000_000
+            stop = start + clock["sample_count"]
+            final = finalize_segments(decoded, metadata, start=start, stop=stop)
+            # Retain known impact timestamps if the reconstructed event contains them.
+            values = final["class_indices"]
+            edges = np.r_[0, np.flatnonzero(np.diff(values)) + 1, len(values)]
+            impacts = {}
+            for a, b in zip(edges[:-1], edges[1:], strict=True):
+                if values[a] < 0 or metadata["labels"][values[a]] != "fall":
+                    continue
+                points = [
+                    e["impact_ns"] / 40_000_000
+                    for e in document["fall_events"]
+                    if e["impact_ns"] is not None and a < e["impact_ns"] / 40_000_000 < b
+                ]
+                if len(points) == 1:
+                    impacts[int(a)] = points[0]
+            document = primary_prediction(
+                document,
+                metadata["labels"],
+                values,
+                document["producer"]["model_id"],
+                impacts=impacts,
+            )
+        return project_motion(document, variant["candidate"], clock)
+
     def edit(self, mid, cid, vid, body, actor, *, decision=None):
         if (
             body.get("activity_rules_version") != CURRENT_RULES_VERSION
@@ -320,6 +382,8 @@ class MotionLabelService:
         self.check_edit(state, body, actor)
         edited = body["document"]
         validate_document(edited, expected_candidate=variant["candidate"])
+        if decision != "reject" and (issues := duration_submission_issues(edited)):
+            raise AnnotationIssues(issues)
         require(edited["clock"] == variant["clock"], "Edited clock differs")
         # The server owns provenance and producer identity, not arbitrary editor input.
         edited = derive_transition_endpoints(edited)
@@ -437,6 +501,8 @@ class MotionLabelService:
         )
         base = self.base_document(mid, state)
         document = project_motion(base, variant["candidate"], variant["clock"])
+        if prediction and not state["draft"] and not state["accepted"]:
+            document = self.project_prediction(prediction, variant)
         result = {
             "motion_sha256": mid,
             "variants": variants,
@@ -497,9 +563,20 @@ class MotionLabelService:
                 result["suggestion_quality"] = projected_quality
                 if not state["draft"] and not state["accepted"]:
                     result["prediction_quality"] = projected_quality
-            suggested = project_motion(
-                prediction["document"], variant["candidate"], variant["clock"]
-            )
+            suggested = self.project_prediction(prediction, variant)
+            if prediction.get("quality", {}).get("duration_projection"):
+                # Cropping may adjust boundaries: stale confidence/evidence must
+                # not be attached to a different interval just by overlap.
+                current_shapes = {
+                    (s["start_ns"], s["stop_ns"], s["primary_code"]) for s in suggested["segments"]
+                }
+                for key in ("prediction_quality", "suggestion_quality"):
+                    if result.get(key):
+                        result[key]["intervals"] = [
+                            s
+                            for s in result[key]["intervals"]
+                            if (s["start_ns"], s["stop_ns"], s["primary_code"]) in current_shapes
+                        ]
 
             def shape(d):
                 return [

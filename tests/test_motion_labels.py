@@ -1144,3 +1144,84 @@ def test_isolated_calibration_routes_cannot_publish_or_change_main_reviews(tmp_p
                 == 403
             )
         assert isolated.state(mid)[0]["accepted"] is None
+
+
+def test_new_short_edit_rejected_without_rewriting_historical_document(tmp_path):
+    from imu_data_collector.synthetic_temporal_contract import (
+        AnnotationIssues,
+        duration_submission_issues,
+        validate_document,
+    )
+
+    _, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    body["document"]["segments"][0]["stop_ns"] = 80_000_000
+    body["document"]["segments"][1]["start_ns"] = 80_000_000
+    before_doc = deepcopy(body["document"])
+    assert validate_document(body["document"]) == before_doc
+    issues = duration_submission_issues(body["document"])
+    assert issues[0]["code"] == "minimum_duration"
+    before = service.state(mid)
+    c = variant["candidate"]
+    with pytest.raises(AnnotationIssues, match="0.12"):
+        service.edit(mid, c["candidate_id"], c["version_id"], body, "human-test", decision="pass")
+    assert service.state(mid) == before
+    assert body["document"] == before_doc
+
+
+def test_duration_is_checked_again_on_scored_candidate_projection(tmp_path):
+    import hashlib
+
+    import numpy as np
+
+    from imu_data_collector.motion_annotations import primary_prediction
+    from imu_data_collector.motion_label_runtime import default_sequence_decoder
+    from imu_data_collector.semantic_runtime import segmentation_policy
+    from imu_data_collector.synthetic_temporal_contract import CURRENT_PRIMARY
+
+    store, _, service, mid, variant = seed(tmp_path)
+    template = service.feature(mid)["template"]
+    labels = list(CURRENT_PRIMARY)
+    values = np.array([0] * 49 + [1] * 51)
+    scores = np.full((100, len(labels)), 0.001)
+    scores[np.arange(100), values] = 0.985
+    decoded = {
+        "class_indices": values,
+        "high_confidence_indices": values,
+        "local_scores": scores,
+        "sequence_scores": scores,
+        "valid": np.ones(100, bool),
+    }
+    path = tmp_path / "sequence.npz"
+    np.savez_compressed(path, **decoded)
+    object_key = service.root + "/sequences/test.npz"
+    store.put_file(path, object_key, content_type="application/octet-stream", metadata={})
+    manifest = service.root + "/sequence-manifests/test.json"
+    store.write_json(
+        manifest,
+        {
+            "object_key": object_key,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "byte_length": path.stat().st_size,
+        },
+        if_generation_match=0,
+    )
+    metadata = {
+        "labels": labels,
+        "supported_indices": [0, 1],
+        "decoder": default_sequence_decoder(labels),
+        "segmentation_policy": segmentation_policy(),
+    }
+    prediction = {
+        "document": primary_prediction(template, labels, values, "research"),
+        "quality": {"sequence_scores_key": manifest, "duration_projection": metadata},
+    }
+    original_hash = document_sha256(prediction)
+    cropped = deepcopy(variant)
+    cropped["clock"].update(
+        source_start_ns=48 * 40_000_000, sample_count=52, duration_ns=52 * 40_000_000
+    )
+    result = service.project_prediction(prediction, cropped)
+    assert all(s["stop_ns"] - s["start_ns"] >= 120_000_000 for s in result["segments"])
+    assert result["clock"] == cropped["clock"]
+    assert document_sha256(prediction) == original_hash

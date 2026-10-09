@@ -6,7 +6,7 @@ import {MotionModelPanel} from "./MotionModelPanel";
 import {IntervalSemantics} from "./IntervalSemantics";
 import {MotionEvidence, type MotionPredictionQuality} from "./MotionEvidence";
 import type {ActivityRules} from "./activityRules";
-import {postureNames, deriveTransitionEndpoints, reviewIssues, reviewShortcut, type Transition, type ReviewIssue, type ReviewCommand} from "./postureReview";
+import {durationIssues, postureNames, deriveTransitionEndpoints, reviewIssues, reviewShortcut, type Transition, type ReviewIssue, type ReviewCommand} from "./postureReview";
 import "./temporalReview.css";
 
 const cohortBase = typeof location !== "undefined" && location.pathname.startsWith("/calibration/") ? "/calibration" : "";
@@ -221,6 +221,11 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     pause(); setIssues([]);
     const point = Math.round(cursor / 40000000) * 40000000;
     if (point <= segment.start_ns || point >= segment.stop_ns) {setError("请先将播放位置移到所选区间内部。"); return;}
+    if (!rules) {setError("分类规则尚未加载，请稍后重试。"); return;}
+    const minimum = rules.segmentation?.minimum_interval_ns ?? 40000000;
+    if (point-segment.start_ns < minimum || segment.stop_ns-point < minimum) {
+      setError(`切分后每段至少需要 ${(minimum/1e9).toFixed(2)} 秒，请移动播放位置。`); return;
+    }
     setEditor({...editor, segments: editor.segments.flatMap((s, i) => i === part ? [
       {...s, notes: anchoredNotes(s), stop_ns: point},
       {...s, notes: anchoredNotes(s), segment_id: `segment-${crypto.randomUUID()}`, start_ns: point},
@@ -259,6 +264,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const save = async (decision?: "pass" | "reject") => {
     if (previewId || !current || !lease || submissionInFlight.current) return;
     const found = decision === "pass" && editor ? reviewIssues(editor.segments) : [];
+    if (decision !== "reject" && editor && rules?.segmentation) found.push(...durationIssues(editor.segments, rules.segmentation.minimum_interval_ns));
     if (decision === "pass" && editor) for (const event of editor.fall_events) {
       const parts = editor.segments.filter(s => s.primary_code === "fall" && (s.fall_event_id === event.event_id || `fall-${s.segment_id}` === event.event_id));
       if (parts.length && event.impact_ns !== null && !(event.impact_ns > parts[0].start_ns && event.impact_ns < parts.at(-1)!.stop_ns))

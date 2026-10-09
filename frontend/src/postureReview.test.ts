@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {deriveTransitionEndpoints, postureNames, reviewIssues, reviewShortcut, supportPosture} from "./postureReview.ts";
+import {durationIssues, deriveTransitionEndpoints, postureNames, reviewIssues, reviewShortcut, supportPosture} from "./postureReview.ts";
 
 test("shortcuts respect typing, IME, repeat and explicit approval chord", () => {
   for (const [key, command] of [["s", "split"], ["m", "merge"], ["p", "previous"], ["n", "next"], [" ", "toggle"]]) {
@@ -78,4 +78,14 @@ test("adjacent transitions and contradictory endpoints produce actionable issues
   assert.equal(reviewIssues(parts)[0].code, "adjacent_transitions");
   assert.deepEqual(reviewIssues(parts)[0].segment_ids, ["s1", "s2"]);
   assert.equal(reviewIssues([{...parts[0],primary_code:"other_activity"}])[0].code, "other_semantics");
+});
+
+
+test("duration validation uses the server rule and leaves invalid data masked", () => {
+  const parts = [{segment_id: "short", start_ns: 0, stop_ns: 80000000, primary_code: "standing", resolution: "identified"},
+    {segment_id: "invalid", start_ns: 80000000, stop_ns: 120000000, primary_code: null, resolution: "invalid_data"},
+    {segment_id: "legal", start_ns: 120000000, stop_ns: 240000000, primary_code: "walking", resolution: "identified"}];
+  assert.deepEqual(durationIssues(parts, 120000000).map(i=>i.segment_ids), [["short"]]);
+  assert.deepEqual(durationIssues(parts, 200000000).map(i=>i.segment_ids), [["short"], ["legal"]]);
+  assert.equal(parts[0].stop_ns, 80000000);
 });

@@ -106,6 +106,18 @@ def sequence_decode(
     Posterior scores alone are not correctness probabilities. High-confidence
     output requires a separately calibrated local AND contextual threshold.
     """
+    if metadata.get("segmentation_policy"):
+        base = dict(metadata)
+        base.pop("segmentation_policy")
+        decoded = sequence_decode(
+            scores,
+            valid,
+            base,
+            outside_scores=outside_scores,
+            joints=joints,
+            boundary_scores=boundary_scores,
+        )
+        return semantic_module().finalize_segments(decoded, metadata)
     if metadata.get("decoder", {}).get("kind") == SEMANTIC_RUNTIME_VERSION:
         semantic = semantic_module()
         return semantic.semantic_decode(

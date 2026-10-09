@@ -296,6 +296,25 @@ class MotionLabelWorker:
                 "runtime_version": metadata["decoder"]["kind"],
                 "semantic_runtime_sha256": sha(Path(__file__).with_name("semantic_runtime.py")),
                 "sequence_scores_key": decoded_key,
+                **(
+                    {
+                        "duration_projection": {
+                            k: metadata[k]
+                            for k in (
+                                "labels",
+                                "supported_indices",
+                                "decoder",
+                                "segmentation_policy",
+                            )
+                        },
+                        "duration_unsegmentable_seconds": float(
+                            decoded["duration_unsegmentable"].sum() / 25
+                        ),
+                        "duration_event_evidence": decoded["duration_event_evidence"].tolist(),
+                    }
+                    if metadata.get("segmentation_policy")
+                    else {}
+                ),
             }
         else:
             indices = reject(scores, joints, valid, metadata)

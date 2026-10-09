@@ -19,6 +19,7 @@ export function reviewShortcut(event: KeyInput, editing = false, onButton = fals
   return ({s: "split", m: "merge", p: "previous", n: "next"} as const)[event.key.toLowerCase() as "s"] ?? null;
 }
 type Part = {segment_id: string; start_ns: number; stop_ns: number; primary_code: string | null;
+  resolution?: string;
   transition?: Transition | null; semantic_text?: string; notes?: {text: string}[]};
 export function deriveTransitionEndpoints<T extends Part>(parts: T[]): (T & {transition: Transition | null})[] {
   return parts.map((part, i) => ({...part, transition: part.primary_code === "posture_transition" ? {
@@ -50,4 +51,11 @@ export function reviewIssues(parts: Part[]): ReviewIssue[] {
       add("missing_transition", `第 ${i}、${i + 1} 段支撑姿态直接变化，请补充真实转换或明确待判范围。`, before, part);
   });
   return issues;
+}
+
+export function durationIssues(parts: Part[], minimumNs: number): ReviewIssue[] {
+  return parts.flatMap((s, i) => s.resolution !== "invalid_data" && s.stop_ns-s.start_ns < minimumNs ? [{
+    code: "minimum_duration", segment_ids: [s.segment_id],
+    message: `第 ${i+1} 段（${(s.start_ns/1e9).toFixed(2)}–${(s.stop_ns/1e9).toFixed(2)} 秒）短于 ${(minimumNs/1e9).toFixed(2)} 秒，请调整边界或合并相邻区间。`,
+  }] : []);
 }

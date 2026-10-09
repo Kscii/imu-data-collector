@@ -117,6 +117,7 @@ def _promote_model(service, model_id, actor, expected_active_sha256):
         metadata = service.store.read_json(model["metadata"]["object_key"])[0]
         if (
             metadata.get("semantic_features")
+            or metadata.get("segmentation_policy")
             or metadata.get("decoder", {}).get("kind") == "semantic-duration-v1"
         ):
             semantic_sha = hashlib.sha256(

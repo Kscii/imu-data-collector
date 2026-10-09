@@ -30,7 +30,13 @@ FEATURE_NAMES = (
     "velocity_valid",
     "geometry_valid",
 )
-PROTECTED = {"fall", "stumble_recovery", "jumping", "posture_transition", "other_activity"}
+PROTECTED = {
+    "fall",
+    "stumble_recovery",
+    "jumping",
+    "posture_transition",
+    "other_activity",
+}
 
 
 def semantic_features(joints, valid):
@@ -121,32 +127,52 @@ def semantic_bias(features, labels):
     return out * f[:, 18, None]
 
 
-def duration_path(emission, valid, matrix, weight, minimum, boundary=None, strength=0.4):
+def duration_path(
+    emission,
+    valid,
+    matrix,
+    weight,
+    minimum,
+    boundary=None,
+    strength=0.4,
+    hard_minimum=1,
+):
     """Viterbi with capped state ages and a finite short-run exit penalty.
 
-    No minimum is applied at clip/invalid-run edges. No maximum duration exists.
+    Soft preferences allow clip edges; hard_minimum applies at every valid edge.
+    No maximum duration exists.
     A boundary prediction can reduce, but never increase, the switching cost.
     """
     t_count, k = emission.shape
-    d = max(1, int(max(minimum, default=0)))
+    d = max(hard_minimum, int(max(minimum, default=0)), 1)
     result = np.full(t_count, -1, np.int64)
     transition = weight * np.log(matrix)
     ages = np.arange(1, d + 1)[None, :]
-    penalty = strength * np.maximum(0, 1 - ages / np.maximum(1, np.array(minimum)[:, None]))
+    penalty = strength * np.maximum(
+        0, 1 - ages / np.maximum(1, np.array(minimum)[:, None])
+    )
     edges = np.flatnonzero(np.diff(np.r_[False, valid, False]))
     for a, b in zip(edges[::2], edges[1::2], strict=True):
-        delta = np.full((k, d), -1e12)
+        if b - a < hard_minimum:
+            continue
+        delta = np.full((k, d), -np.inf)
         # A recording may start halfway through an action.
-        delta[:, -1] = emission[a]
+        delta[:, 0 if hard_minimum > 1 else -1] = emission[a]
         back = np.empty((b - a, k, d), np.int32)
         for t in range(a + 1, b):
-            boundary_weight = 1 - 0.75 * (float(boundary[t]) if boundary is not None else 0)
+            boundary_weight = 1 - 0.75 * (
+                float(boundary[t]) if boundary is not None else 0
+            )
             exit_values = delta - penalty * boundary_weight
+            exit_values[:, : hard_minimum - 1] = -np.inf
             best_age = exit_values.argmax(1)
-            choices = exit_values[np.arange(k), best_age][:, None] + transition * boundary_weight
-            np.fill_diagonal(choices, -1e12)
+            choices = (
+                exit_values[np.arange(k), best_age][:, None]
+                + transition * boundary_weight
+            )
+            np.fill_diagonal(choices, -np.inf)
             previous_class = choices.argmax(0)
-            new = np.full_like(delta, -1e12)
+            new = np.full_like(delta, -np.inf)
             new[:, 0] = choices[previous_class, np.arange(k)]
             back[t - a, :, 0] = previous_class * d + best_age[previous_class]
             for age in range(1, d):
@@ -157,12 +183,192 @@ def duration_path(emission, valid, matrix, weight, minimum, boundary=None, stren
             new[improve, -1] = stay[improve]
             back[t - a, improve, -1] = np.flatnonzero(improve) * d + d - 1
             delta = new + emission[t, :, None]
+        delta[:, : hard_minimum - 1] = -np.inf
+        if not np.isfinite(delta).any():
+            continue
         state = int(delta.argmax())
         for t in range(b - 1, a - 1, -1):
             code, age = divmod(state, d)
             result[t] = code
             if t > a:
                 state = int(back[t - a, code, age])
+    return result
+
+
+SEGMENTATION_VERSION = "product-duration-20261010-v3"
+SOFT_SECONDS = {
+    **dict.fromkeys(
+        ("standing", "sitting", "lying", "squatting", "kneeling", "walking", "running"),
+        0.6,
+    ),
+    **dict.fromkeys(("stair_up", "stair_down"), 0.8),
+    **dict.fromkeys(("ground_support", "bending", "other_activity"), 0.4),
+    **dict.fromkeys(("posture_transition", "jumping"), 0.32),
+    "fall": 0.0,
+    "stumble_recovery": 0.0,
+}
+
+
+def segmentation_policy(hard_seconds=0.1, soft_strength=0.4):
+    """Experimental preferences, not physiological limits or changed human truth."""
+    return {
+        "version": SEGMENTATION_VERSION,
+        "hard_seconds": hard_seconds,
+        "soft_strength": soft_strength,
+        "soft_seconds": dict(SOFT_SECONDS),
+    }
+
+
+def finalize_segments(decoded, metadata, *, start=0, stop=None):
+    """Constrain the final (possibly cropped) candidate path, after rejection.
+
+    Invalid data stay masked. Critical event cores are pinned, and gaps between
+    distinct events retain an unknown separator. Infeasible blocks abstain and
+    retain their original event evidence in diagnostics; no ordinary tag absorbs it.
+    Changed frames never acquire calibrated high-confidence status.
+    """
+    policy = metadata.get("segmentation_policy")
+    if not policy:
+        return decoded
+    if policy.get("version") not in (
+        SEGMENTATION_VERSION,
+        "product-duration-20261010-v1",
+        "product-duration-20261010-v2",
+    ):
+        raise ValueError("Unknown segmentation policy")
+    hard = float(policy["hard_seconds"])
+    strength = float(policy["soft_strength"])
+    if (
+        not np.isfinite([hard, strength]).all()
+        or not 0.1 <= hard <= 2
+        or not 0 <= strength <= 4
+    ):
+        raise ValueError("Invalid duration policy")
+    minimum = int(np.ceil(hard * 25 - 1e-9))
+    labels = metadata["labels"]
+    original = np.asarray(decoded["class_indices"])
+    stop = len(original) if stop is None else stop
+    if not 0 <= start < stop <= len(original):
+        raise ValueError("Invalid projection extent")
+    old = original[start:stop]
+    valid = np.asarray(decoded["valid"], bool)[start:stop]
+    k = len(labels)
+    # Full-sequence posterior already contains both past and future evidence.
+    local = np.asarray(decoded["local_scores"])[start:stop]
+    posterior = np.asarray(decoded["sequence_scores"])[start:stop]
+    probability = np.sqrt(np.maximum(local * posterior, 1e-20))
+    cutoff = metadata["decoder"].get("candidate_min_local_score", 0.45)
+    unknown = np.maximum(cutoff, 1 - probability.max(1))
+    emission = np.log(np.maximum(np.column_stack((probability, unknown)), 1e-20))
+    # Retain accepted sequence evidence unless the duration/evidence gain exceeds it.
+    emission[np.arange(len(old)), np.where(old >= 0, old, k)] += 0.5
+    supported = metadata["supported_indices"]
+    emission[:, [i for i in range(k) if i not in supported]] = -np.inf
+    critical = [
+        i for i, code in enumerate(labels) if code in ("fall", "stumble_recovery")
+    ]
+    cores = []
+    edges = np.r_[0, np.flatnonzero(np.diff(old)) + 1, len(old)]
+    for a, b in pairwise(edges):
+        if old[a] in critical:
+            cores.append((int(a), int(b), int(old[a])))
+    outside_evidence = []
+    if policy["version"] == SEGMENTATION_VERSION:
+        # A second pass after projection must not forget events masked by the
+        # full-recording pass. Reintroduce the original cores, not guessed labels.
+        for a, b, code in decoded.get("duration_event_evidence", []):
+            if b <= start or a >= stop:
+                outside_evidence.append((int(a), int(b), int(code)))
+            else:
+                cores.append(
+                    (max(0, int(a) - start), min(stop, int(b)) - start, int(code))
+                )
+        cores = sorted(set(cores))
+    for a, b, code in cores:
+        emission[a:b] = -np.inf
+        emission[a:b, code] = 0
+    # Do not create a new critical event during duration cleanup.
+    for i in critical:
+        allowed = np.zeros(len(old), bool)
+        for a, b, code in cores:
+            if code == i:
+                allowed[max(0, a - minimum + 1) : min(len(old), b + minimum - 1)] = True
+        emission[~allowed, i] = -np.inf
+    for (_, b, _), (c, _, _) in pairwise(cores):
+        if c > b:
+            point = (b + c - 1) // 2
+            emission[point] = -np.inf
+            emission[point, k] = 0
+    soft = policy["soft_seconds"]
+    ages = [max(minimum, int(np.ceil(soft.get(code, 0) * 25))) for code in labels] + [
+        minimum
+    ]
+    matrix = np.full((k + 1, k + 1), 1 / (k + 1))
+    np.fill_diagonal(matrix, 1)
+    path = duration_path(
+        emission, valid, matrix, 0.15, ages, strength=strength, hard_minimum=minimum
+    )
+    if (
+        policy["version"] != "product-duration-20261010-v1"
+        and (valid & (path < 0)).any()
+    ):
+        # Conflicting tiny critical events must not erase a usable recording.
+        # Preserve their evidence as local abstentions, solve the remaining islands.
+        blocked = np.zeros(len(old), bool)
+        edges = np.flatnonzero(np.diff(np.r_[False, valid, False]))
+        for a, b in zip(edges[::2], edges[1::2], strict=True):
+            if b - a < minimum or not (path[a:b] < 0).all():
+                continue
+            for c, d, _ in cores:
+                if a <= c < b:
+                    blocked[max(a, c - minimum + 1) : min(b, d + minimum - 1)] = True
+        if blocked.any():
+            remaining = valid & ~blocked
+            edges = np.flatnonzero(np.diff(np.r_[False, remaining, False]))
+            for a, b in zip(edges[::2], edges[1::2], strict=True):
+                if b - a < minimum:
+                    blocked[a:b] = True
+            path = duration_path(
+                emission,
+                valid & ~blocked,
+                matrix,
+                0.15,
+                ages,
+                strength=strength,
+                hard_minimum=minimum,
+            )
+    unsegmentable = valid & (path < 0)
+    path[path == k] = -1
+    result = dict(decoded)
+    result["class_indices"] = original.copy()
+    result["class_indices"][start:stop] = path
+    changed = result["class_indices"] != original
+    result["high_confidence_indices"] = decoded["high_confidence_indices"].copy()
+    result["high_confidence_indices"][changed] = -1
+    chosen = np.maximum(result["class_indices"], 0)
+    rows = np.arange(len(original))
+    reliability = np.minimum(
+        decoded["local_scores"][rows, chosen], decoded["sequence_scores"][rows, chosen]
+    )
+    result["reliability"] = np.where(
+        result["class_indices"] >= 0, reliability, 0
+    ).astype(np.float32)
+    result["duration_adjusted"] = changed | np.asarray(
+        decoded.get("duration_adjusted", np.zeros(len(original), bool))
+    )
+    result["duration_unsegmentable"] = (
+        np.asarray(
+            decoded.get("duration_unsegmentable", np.zeros(len(original), bool))
+        ).copy()
+        if policy["version"] == SEGMENTATION_VERSION
+        else np.zeros(len(original), bool)
+    )
+    result["duration_unsegmentable"][start:stop] = unsegmentable
+    result["duration_event_evidence"] = np.array(
+        outside_evidence
+        + [(a + start, b + start, c) for a, b, c in cores if unsegmentable[a:b].any()],
+        dtype=np.int64,
+    ).reshape(-1, 3)
     return result
 
 
@@ -177,7 +383,8 @@ def semantic_decode(
     if f.shape != (len(valid), len(FEATURE_NAMES)):
         raise ValueError("Semantic clock differs")
     weight, duration, gap = (
-        cfg.get(k, 0) for k in ("semantic_weight", "minimum_seconds", "gap_fill_seconds")
+        cfg.get(k, 0)
+        for k in ("semantic_weight", "minimum_seconds", "gap_fill_seconds")
     )
     if (
         weight not in (0.0, 0.5, 1.0)
@@ -242,7 +449,10 @@ def semantic_decode(
         proposal[a:b] = path[a:b]
         filled[a:b] = True
     cutoff = np.array(
-        [cfg.get("calibration", {}).get("high_thresholds", {}).get(code, 2.0) for code in labels]
+        [
+            cfg.get("calibration", {}).get("high_thresholds", {}).get(code, 2.0)
+            for code in labels
+        ]
     )
     high = proposal.copy()
     high[(reliability < cutoff[np.maximum(proposal, 0)]) | filled | ~mask] = -1
@@ -262,11 +472,21 @@ def semantic_decode(
 
 def interval_evidence(decoded, start, stop, code):
     """Observable signals and logged edits, not a neural causal explanation."""
+    evidence = []
+    duration = int(np.asarray(decoded.get("duration_adjusted", []))[start:stop].sum())
+    if duration:
+        evidence.append(
+            {
+                "kind": "adjustment",
+                "code": "minimum_duration",
+                "seconds": round(duration / 25, 3),
+                "text": f"{duration / 25:.2f} 秒经过最短时长及前后序列证据调整，仍需人工检查",
+            }
+        )
     if "semantic_features" not in decoded or stop <= start:
-        return []
+        return evidence
     f = decoded["semantic_features"][start:stop]
     f = f[f[:, 18] > 0]
-    evidence = []
     filled = int(decoded["inferred_fill"][start:stop].sum())
     if filled:
         evidence.append(
@@ -289,7 +509,14 @@ def interval_evidence(decoded, start, stop, code):
                     "text": f"下肢运动中位速度 {speed:.2f} 腿长／秒",
                 }
             )
-        elif code in ("bending", "lying", "ground_support", "sitting", "squatting", "kneeling"):
+        elif code in (
+            "bending",
+            "lying",
+            "ground_support",
+            "sitting",
+            "squatting",
+            "kneeling",
+        ):
             angle = float(np.degrees(np.arccos(np.clip(np.median(f[:, 0]), -1, 1))))
             evidence.append(
                 {

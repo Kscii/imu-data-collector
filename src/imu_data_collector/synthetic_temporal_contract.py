@@ -50,7 +50,8 @@ FALLS = frozenset((*PRIMARY[-5:], "fall"))
 PRODUCTION_RULES_VERSION = "2026-10-09.3"
 CURRENT_SCHEMA = "imu.temporal_annotation.v3"
 CURRENT_TAXONOMY_VERSION = "3.0.0"
-CURRENT_RULES_VERSION = "2026-10-10.1"
+CURRENT_RULES_VERSION = "2026-10-10.2"
+MANUAL_MINIMUM_NS = 120_000_000  # ceil(0.1 s / 40 ms), separate from experiment grid
 CURRENT_PRIMARY = (
     "standing",
     "sitting",
@@ -341,8 +342,17 @@ def activity_rules(version=TAXONOMY_VERSION):
     }
 
 
-def activity_rules_evidence(version=TAXONOMY_VERSION):
+def activity_rules_evidence(version=TAXONOMY_VERSION, *, rule_version=None):
     rules = activity_rules(version)
+    if rule_version == "2026-10-10.1" and version == CURRENT_TAXONOMY_VERSION:
+        # Exact historical rules for replaying frozen supervision; never migrate
+        # old human boundaries just because the new submission rule has changed.
+        rules["version"] = rule_version
+        rules.pop("segmentation")
+        for item in rules["primary"]:
+            item["boundaries"] = "以可观察的活动或支撑变化切分，不强制最短停留时长。"
+    elif rule_version is not None and rule_version != rules["version"]:
+        raise ValueError("Unsupported historical activity rules")
     return {
         "kind": "activity-rules",
         "version": rules["version"],
@@ -1217,6 +1227,12 @@ def current_activity_rules():
         "taxonomy_version": CURRENT_TAXONOMY_VERSION,
         "hdf5_version": "3.3.0",
         "support_postures": list(SUPPORT_POSTURES),
+        "segmentation": {
+            "version": "manual-duration-20261010-v1",
+            "hard_seconds": 0.1,
+            "minimum_interval_ns": MANUAL_MINIMUM_NS,
+            "historical_reviews_unchanged": True,
+        },
         "principles": [
             "每个时刻仅一个主活动；不确定与数据无效独立保留，不充当其他活动真值。",
             "转换区间不直接相邻；有真实中间姿态就保留，无可辨认中间姿态则合并，不虚构短姿态。",
@@ -1236,7 +1252,7 @@ def current_activity_rules():
                 definition=_CURRENT_DEFINITIONS[c][1],
                 includes="",
                 excludes="",
-                boundaries="以可观察的活动或支撑变化切分，不强制最短停留时长。",
+                boundaries="按可观察变化切分；新提交普通区间至少0.12秒（25Hz下3帧），无效数据单独屏蔽。",
                 example="",
                 rationale=_CURRENT_DEFINITIONS[c][2],
             )
@@ -1362,6 +1378,25 @@ class AnnotationIssues(ValueError):
     def __init__(self, issues):
         self.issues = issues
         super().__init__("标注存在需要修改的问题：" + "；".join(i["message"] for i in issues))
+
+
+def duration_submission_issues(document):
+    """New writes only. Historical review validation deliberately ignores this rule."""
+    if document["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION:
+        return []
+    return [
+        {
+            "code": "minimum_duration",
+            "message": (
+                f"第 {i + 1} 段（{s['start_ns'] / 1e9:.2f}–{s['stop_ns'] / 1e9:.2f} 秒）"
+                f"短于 {MANUAL_MINIMUM_NS / 1e9:.2f} 秒，请调整边界或合并相邻区间。"
+            ),
+            "segment_ids": [s["segment_id"]],
+        }
+        for i, s in enumerate(document["segments"])
+        if s["resolution"] != "invalid_data"
+        and s["stop_ns"] - s["start_ns"] < MANUAL_MINIMUM_NS
+    ]
 
 
 def submission_issues(document):
