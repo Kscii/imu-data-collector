@@ -90,6 +90,8 @@ VIEWER_BRIDGE = b"""<script>
   const report = () => {
     const slider = document.querySelector('#time');
     parent.postMessage({type: 'imu-synthetic-review-ready', version,
+      ready: typeof document.querySelector('#play')?.onclick === 'function'
+        && typeof slider?.oninput === 'function',
       frame: slider ? Number(slider.value) : 0,
       maxFrame: slider ? Number(slider.max) : 0, playing: isPlaying()}, location.origin);
   };

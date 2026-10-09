@@ -41,6 +41,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const [models, setModels] = useState(false), [difference, setDifference] = useState(false), [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState(""), [rejectScope, setRejectScope] = useState("motion");
   const [frameIndex, setFrameIndex] = useState(0), [playing, setPlaying] = useState(false);
+  const [viewerReady, setViewerReady] = useState(false);
   const [plotBounds, setPlotBounds] = useState({left: 50, right: 50});
   const [rules, setRules] = useState<ActivityRules | null>(null);
   const iframe = useRef<HTMLIFrameElement>(null), list = useRef<HTMLDivElement>(null);
@@ -68,9 +69,9 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const dirty = !!editor && JSON.stringify(editor) !== JSON.stringify(current?.editor_template);
   const control = (action: string, fields = {}) => iframe.current?.contentWindow?.postMessage({type: "imu-synthetic-review-control", action, ...fields}, location.origin);
   const pause = () => {follow.current = false; setPlaying(false); control("pause");};
-  const seek = (ns: number, boundary = false) => {setPlaying(false); control("seek", {frame: sourceFrame(ns, rate, boundary)});};
+  const seek = (ns: number, boundary = false) => {if (!viewerReady) return; setPlaying(false); control("seek", {frame: sourceFrame(ns, rate, boundary)});};
   const selectPart = (index: number) => {pause(); setPart(index); seek(editor!.segments[index].start_ns, true);};
-  const toggle = () => {follow.current = true; control("toggle");};
+  const toggle = () => {if (!viewerReady) return; follow.current = true; control("toggle");};
   const persist = () => {
     const d = currentRef.current, e = editorRef.current;
     if (d && e && JSON.stringify(e) !== JSON.stringify(d.editor_template)) {
@@ -85,7 +86,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   };
   const open = async (mid: string, variant?: Candidate) => {
     const sequence = ++loading.current;
-    setBusy(true); setError(""); setNotice(""); setLease(null);
+    setBusy(true); setError(""); setNotice(""); setLease(null); setViewerReady(false);
     pause();
     try {
       persist();
@@ -110,7 +111,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
           value = cached.document; setNotice("已恢复本地未提交草稿。");
         } else setError("存在基于旧审核版本的本地草稿，未覆盖服务器结果；可下载本地草稿进行核对。");
       }
-      setCurrent(data); setEditor(value); setLease(claimed); setPart(0); setFrameIndex(0); setPlaying(false);
+      setCurrent(data); setEditor(value); setLease(claimed); setPart(0); setFrameIndex(0); setPlaying(false); setViewerReady(false);
       if (data.entry.candidate.candidate_id === currentRef.current?.entry.candidate.candidate_id &&
           data.entry.candidate.version_id === currentRef.current?.entry.candidate.version_id) control("seek", {frame: 0});
       chartReady.current = false; follow.current = true; setQueue(false); setDifference(false);
@@ -137,7 +138,10 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       if (event.origin !== location.origin || event.source !== iframe.current?.contentWindow) return;
       if (["imu-synthetic-review-frame", "imu-synthetic-review-ready"].includes(event.data?.type) && Number.isInteger(event.data.frame)) setFrameIndex(event.data.frame);
       if (typeof event.data?.playing === "boolean") setPlaying(event.data.playing);
-      if (event.data?.type === "imu-synthetic-review-ready") control("chart-ready", {ready: chartReady.current});
+      if (event.data?.type === "imu-synthetic-review-ready") {
+        setViewerReady(event.data.ready === true);
+        control("chart-ready", {ready: chartReady.current});
+      }
       if (event.data?.type === "imu-synthetic-review-key" && event.data.key === " ") toggle();
     };
     const keyboard = (event: KeyboardEvent) => {
@@ -145,7 +149,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     };
     addEventListener("message", listener); addEventListener("keydown", keyboard);
     return () => {removeEventListener("message", listener); removeEventListener("keydown", keyboard);};
-  }, [base, queue, models, difference, rejecting]);
+  }, [base, queue, models, difference, rejecting, viewerReady]);
   useEffect(() => {
     if (follow.current && active >= 0) setPart(active);
     const container = list.current, item = container?.children[active] as HTMLElement | undefined;
@@ -223,14 +227,14 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       <div className="primary-time-context">{activeSegment && progress && <><strong>第 {active+1} 段 · {label(activeSegment)}</strong><span>{sec(activeSegment.start_ns)}–{sec(activeSegment.stop_ns)} 秒</span><span>段内 {sec(progress.elapsed)} / {sec(progress.duration)} 秒（{Math.round(progress.fraction*100)}%）</span></>}</div>
       <div className="primary-timeline" style={{marginLeft:plotBounds.left+7,marginRight:plotBounds.right+7}}>{editor.segments.map((s,i) => <button key={s.segment_id}
         style={{width:`${100*(s.stop_ns-s.start_ns)/duration}%`}} className={`${i%2 ? "alternate" : ""} ${!s.primary_code ? "unknown" : ""} ${i===active ? "playing" : ""}`}
-        aria-current={i===active ? "step" : undefined} aria-label={`第 ${i+1} 段 ${label(s)}`} title={`${i+1}. ${label(s)} · ${sec(s.start_ns)}–${sec(s.stop_ns)} 秒`} onClick={() => selectPart(i)}>{i+1}</button>)}</div>
-      <div className="primary-playback"><button onClick={toggle}>{playing ? "暂停" : "播放"}</button><input type="range" aria-label="播放位置" min={0} max={duration/1e9} step={1/rate} value={Math.min(cursor,duration)/1e9} onChange={e => {follow.current=true;seek(Number(e.target.value)*1e9);}}/><span>{sec(cursor)} / {sec(duration)} 秒</span></div>
+        disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} aria-label={`第 ${i+1} 段 ${label(s)}`} title={`${i+1}. ${label(s)} · ${sec(s.start_ns)}–${sec(s.stop_ns)} 秒`} onClick={() => selectPart(i)}>{i+1}</button>)}</div>
+      <div className="primary-playback"><button disabled={!viewerReady || busy} onClick={toggle}>{!viewerReady ? "加载回放…" : playing ? "暂停" : "播放"}</button><input type="range" disabled={!viewerReady || busy} aria-label="播放位置" min={0} max={duration/1e9} step={1/rate} value={Math.min(cursor,duration)/1e9} onChange={e => {follow.current=true;seek(Number(e.target.value)*1e9);}}/><span>{sec(cursor)} / {sec(duration)} 秒</span></div>
     </section><aside className="primary-editor panel"><header><strong>检查与纠正</strong><span>{statusNames[current.status]}</span>
       <small>可用标签 {sec(usable)} / {sec(duration)} 秒 · 未知区间不用于监督训练</small>
       {current.variants.length > 1 && <select aria-label="IMU版本" disabled={busy} value={`${id?.candidate_id}/${id?.version_id}`} onChange={e => {const v=current.variants.find(v=>`${v.candidate.candidate_id}/${v.candidate.version_id}`===e.target.value);if(v)void open(current.motion_sha256,v.candidate);}}>
         {current.variants.map(v=><option key={v.candidate.version_id} value={`${v.candidate.candidate_id}/${v.candidate.version_id}`}>{v.configuration.layout_id} · {v.configuration.profile_id} · {v.configuration.variant}</option>)}</select>}
-      {current.has_suggestion && <button onClick={() => {pause();setDifference(true);}}>查看新模型建议</button>}</header>
-      <div className="primary-editor-scroll">{current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}<div ref={list} className="primary-segments" aria-label="活动区间">{editor.segments.map((s,i)=><button key={s.segment_id} aria-current={i===active ? "step" : undefined} className={`${i===part ? "selected" : ""} ${i===active ? "playing" : ""}`} onClick={()=>selectPart(i)}><span>{i+1}. {label(s)}</span><small>{sec(s.start_ns)}–{sec(s.stop_ns)} s</small></button>)}</div>
+      {current.has_suggestion && <button onClick={() => {pause();setDifference(true);}}>查看自动标注建议</button>}</header>
+      <div className="primary-editor-scroll">{current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}<div ref={list} className="primary-segments" aria-label="活动区间">{editor.segments.map((s,i)=><button key={s.segment_id} disabled={!viewerReady || busy} aria-current={i===active ? "step" : undefined} className={`${i===part ? "selected" : ""} ${i===active ? "playing" : ""}`} onClick={()=>selectPart(i)}><span>{i+1}. {label(s)}</span><small>{sec(s.start_ns)}–{sec(s.stop_ns)} s</small></button>)}</div>
       {segment && <fieldset className="primary-fields motion-fields" disabled={!lease || busy} onFocusCapture={e=>{if((e.target as HTMLElement).matches("input,textarea,select"))pause();}}>
         <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null});}}>
           {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
@@ -252,7 +256,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       <div className="primary-queue-list">{rows.map((r,i)=><button key={r.motion_sha256} disabled={busy} className={current?.motion_sha256===r.motion_sha256?"selected":""} onClick={()=>void open(r.motion_sha256)}><strong>{offset+i+1}. {r.entry.source_dataset}</strong><span>{statusNames[r.status]}</span><small>{r.entry.source_member}</small></button>)}</div>
       <footer><button disabled={offset===0} onClick={()=>void fetchRows(offset-30)}>上一页</button><button disabled={offset+rows.length>=total} onClick={()=>void fetchRows(offset+30)}>下一页</button></footer></section></div>}
     {rejecting && <div className="primary-overlay"><section role="dialog" aria-modal="true" aria-label="质量不合格" className="primary-drawer panel"><header><strong>质量不合格</strong><button onClick={()=>setRejecting(false)}>取消</button></header><label>问题范围<select value={rejectScope} onChange={e=>setRejectScope(e.target.value)}><option value="motion">动捕本身：影响所有 IMU 版本</option><option value="variant">当前 IMU 版本：其他版本保留</option></select></label><label>原因<textarea value={reason} onChange={e=>setReason(e.target.value)}/></label><button disabled={busy||!reason.trim()} onClick={()=>void save("reject")}>保存拒绝决定</button></section></div>}
-    {difference && current?.suggestion && <div className="primary-overlay"><section role="dialog" aria-modal="true" aria-label="模型差异" className="primary-details panel"><header><strong>新模型建议 · 原人工版本仍有效</strong><button onClick={()=>setDifference(false)}>关闭</button></header><div className="primary-details-scroll"><table><thead><tr><th>当前标注</th><th>新模型建议</th></tr></thead><tbody><tr>{[editor,current.suggestion].map((d,i)=><td key={i}>{d?.segments.map(s=><p key={s.segment_id}>{sec(s.start_ns)}–{sec(s.stop_ns)} s · {label(s)}</p>)}</td>)}</tr></tbody></table></div><button disabled={!lease||busy} onClick={()=>{const suggested=structuredClone(current.suggestion!);for(const s of suggested.segments){const notes=new Map<string,NonNullable<Segment["notes"]>[number]>();for(const old of editor!.segments)if(old.start_ns<s.stop_ns&&old.stop_ns>s.start_ns)for(const n of anchoredNotes(old))notes.set(n.note_id,n);s.notes=[...notes.values()];}setEditor(suggested);setPart(0);setDifference(false);setNotice("新建议已载入编辑区；通过整条后才替换正式人工版本。");}}>载入建议到草稿，保留区间备注</button></section></div>}
+    {difference && current?.suggestion && <div className="primary-overlay"><section role="dialog" aria-modal="true" aria-label="模型差异" className="primary-details panel"><header><strong>自动标注建议 · 当前版本保留</strong><button onClick={()=>setDifference(false)}>关闭</button></header><div className="primary-details-scroll"><table><thead><tr><th>当前标注</th><th>自动标注建议</th></tr></thead><tbody><tr>{[editor,current.suggestion].map((d,i)=><td key={i}>{d?.segments.map(s=><p key={s.segment_id}>{sec(s.start_ns)}–{sec(s.stop_ns)} s · {label(s)}</p>)}</td>)}</tr></tbody></table></div><button disabled={!lease||busy} onClick={()=>{const suggested=structuredClone(current.suggestion!);for(const s of suggested.segments){const notes=new Map<string,NonNullable<Segment["notes"]>[number]>();for(const old of editor!.segments)if(old.start_ns<s.stop_ns&&old.stop_ns>s.start_ns)for(const n of anchoredNotes(old))notes.set(n.note_id,n);s.notes=[...notes.values()];}setEditor(suggested);setPart(0);setDifference(false);setNotice("新建议已载入编辑区；检查后通过整条录制。");}}>载入建议到草稿，保留区间备注</button></section></div>}
     {models && isAdmin && <MotionModelPanel onClose={()=>setModels(false)}/>}
   </main>;
 }
