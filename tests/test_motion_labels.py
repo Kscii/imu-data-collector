@@ -32,7 +32,7 @@ from imu_data_collector.synthetic_temporal_contract import (
 )
 
 
-def seed(tmp_path):
+def seed(tmp_path, *, review_taxonomy_version="3.0.0"):
     store = LocalFilesystemStore(tmp_path / "objects")
     source = SyntheticReviewService(store, None, target="prod")
     cid, vid, _ = _seed(store, source.prefix)
@@ -83,7 +83,7 @@ def seed(tmp_path):
     store.write_json(
         root + "/variants/" + cid + "-" + vid + ".json", variant, if_generation_match=0
     )
-    service = MotionLabelService(source)
+    service = MotionLabelService(source, review_taxonomy_version=review_taxonomy_version)
     assert service.refresh(force=True) == 2
     return store, source, service, mid, variant
 
@@ -111,7 +111,7 @@ def edit_body(service, mid, variant):
     ]
     return {
         "document": document,
-        "activity_rules_version": ACTIVITY_RULES_VERSION,
+        "activity_rules_version": activity_rules_evidence(document["taxonomy"]["version"])["version"],
         "lease_token": lease["token"],
         "expected_review_sha256": None,
         "expected_draft_sha256": None,
@@ -1093,7 +1093,7 @@ def test_interval_issues_survive_api_error_envelope(tmp_path):
             json={
                 "document": doc,
                 "decision": "pass",
-                "activity_rules_version": ACTIVITY_RULES_VERSION,
+                "activity_rules_version": activity_rules_evidence(doc["taxonomy"]["version"])["version"],
                 "lease_token": lease["token"],
             },
         )
@@ -1225,3 +1225,43 @@ def test_duration_is_checked_again_on_scored_candidate_projection(tmp_path):
     assert all(s["stop_ns"] - s["start_ns"] >= 120_000_000 for s in result["segments"])
     assert result["clock"] == cropped["clock"]
     assert document_sha256(prediction) == original_hash
+
+
+def test_v4_review_roundtrip_and_deterministic_legacy_projection(tmp_path):
+    from imu_data_collector.synthetic_temporal_contract import STANDING_RULES_VERSION
+    store, _, service, mid, variant = seed(tmp_path)
+    body = edit_body(service, mid, variant)
+    first = body['document']['segments'][0]
+    body['document']['segments'] = [
+        dict(first, stop_ns=1_000_000_000),
+        dict(first, segment_id='bend', start_ns=1_000_000_000, stop_ns=2_000_000_000,
+             primary_code='bending', semantic_text='弯腰拾物'),
+        body['document']['segments'][1],
+    ]
+    c = variant['candidate']
+    old = service.edit(mid, c['candidate_id'], c['version_id'], body, 'human-test', decision='pass')
+    pointer = deepcopy(old['review'])
+    before = deepcopy(service.resolve(pointer))
+    service.review_taxonomy_version = '4.0.0'
+    projected = service.case(mid, variant)
+    doc = projected['editor_template']
+    assert projected['review'] == pointer
+    assert service.resolve(pointer) == before
+    assert not projected['needs_rule_review']
+    assert doc['taxonomy']['version'] == '4.0.0'
+    assert len(doc['taxonomy']['primary']) == 15
+    assert 'bending' not in [r['code'] for r in doc['taxonomy']['primary']]
+    assert doc['segments'][0]['stop_ns'] == 2_000_000_000
+    assert any(n['text'] == '弯腰拾物' and n['start_ns'] == 1_000_000_000 for n in doc['segments'][0]['notes'])
+    inherited = store.read_json(service.create_snapshot('admin')['request_key'])[0]
+    assert inherited['entries']
+    assert service.resolve(pointer) == before
+    lease = service.claim(mid, 'human-test', body['lease_token'])
+    result = service.edit(mid, c['candidate_id'], c['version_id'], dict(
+        body, document=doc, activity_rules_version=STANDING_RULES_VERSION,
+        expected_review_sha256=pointer['revision_sha256'], lease_token=lease['token']),
+        'human-test', decision='pass')
+    assert result['status'] == 'accepted'
+    assert service.resolve(pointer) == before
+    snapshot = store.read_json(service.create_snapshot('admin')['request_key'])[0]
+    assert snapshot['entries']

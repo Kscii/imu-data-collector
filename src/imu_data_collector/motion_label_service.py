@@ -32,15 +32,17 @@ from .motion_annotations import (
 )
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
-    CURRENT_RULES_VERSION,
-    CURRENT_TAXONOMY_VERSION,
     SHA256,
     AnnotationIssues,
     activity_rules_evidence,
     current_document,
+    standing_document,
+    STANDING_TAXONOMY_VERSION,
+    POSTURE_TAXONOMIES,
     derive_transition_endpoints,
     document_sha256,
     duration_submission_issues,
+    standing_editor_document,
     editor_document,
     formal_labels,
     partial_fall_events,
@@ -54,7 +56,9 @@ def now():
 
 
 class MotionLabelService:
-    def __init__(self, source, catalog_path=None):
+    def __init__(self, source, catalog_path=None, *, review_taxonomy_version=STANDING_TAXONOMY_VERSION):
+        require(review_taxonomy_version in POSTURE_TAXONOMIES, "Unsupported review taxonomy")
+        self.review_taxonomy_version = review_taxonomy_version
         self.source, self.store = source, source.store
         self.root = source.prefix + "/motion-labels"
         if catalog_path is None:
@@ -83,6 +87,9 @@ class MotionLabelService:
                 db.execute(
                     "ALTER TABLE motions ADD COLUMN accepted_usable_ns INTEGER NOT NULL DEFAULT 0"
                 )
+
+    def editor_document(self, document):
+        return (standing_editor_document(document) if self.review_taxonomy_version == STANDING_TAXONOMY_VERSION else editor_document(document))
 
     def db(self):
         db = sqlite3.connect(self.path, timeout=30)
@@ -368,14 +375,9 @@ class MotionLabelService:
         return project_motion(document, variant["candidate"], clock)
 
     def edit(self, mid, cid, vid, body, actor, *, decision=None):
-        if (
-            body.get("activity_rules_version") != CURRENT_RULES_VERSION
-            or body.get("document", {}).get("taxonomy", {}).get("version")
-            != CURRENT_TAXONOMY_VERSION
-        ):
-            raise ObjectConflictError(
-                "分类规则已更新；本机修改保持暂存，请刷新页面后按新规则检查。"
-            )
+        target = body.get("document", {}).get("taxonomy", {}).get("version")
+        if target not in POSTURE_TAXONOMIES or body.get("activity_rules_version") != activity_rules_evidence(target)["version"]:
+            raise ObjectConflictError("分类规则已更新；本机修改保持暂存，请刷新页面后按新规则检查。")
         variant = self.variant(mid, cid, vid)
         require(variant is not None, "Unknown IMU variant")
         state, generation = self.state(mid)
@@ -388,7 +390,7 @@ class MotionLabelService:
         # The server owns provenance and producer identity, not arbitrary editor input.
         edited = derive_transition_endpoints(edited)
         base = self.base_document(mid, state)
-        base = current_document(base)
+        base = standing_document(base) if target == STANDING_TAXONOMY_VERSION else current_document(base)
         edited["source_evidence"] = deepcopy(base["source_evidence"])
         rules = activity_rules_evidence(edited["taxonomy"]["version"])
         if rules not in edited["source_evidence"]:
@@ -518,7 +520,7 @@ class MotionLabelService:
             "draft": ({**state["draft"], "document": document} if state["draft"] else None),
             "proposal": {"document": document},
             "proposal_sha256": document_sha256(document),
-            "editor_template": editor_document(document),
+            "editor_template": self.editor_document(document),
             "walking_bouts": walking_bouts(document),
             "prediction_quality": None,
             "suggestion_quality": None,
@@ -587,7 +589,7 @@ class MotionLabelService:
             result["has_suggestion"] = bool(
                 (review or state["draft"]) and shape(suggested) != shape(document)
             )
-            result["suggestion"] = editor_document(suggested) if result["has_suggestion"] else None
+            result["suggestion"] = self.editor_document(suggested) if result["has_suggestion"] else None
         migrations = [
             e
             for e in result["editor_template"]["source_evidence"]
@@ -596,11 +598,11 @@ class MotionLabelService:
         result["migration"] = migrations[-1] if migrations else None
         result["needs_rule_review"] = bool(
             review
-            and review["document"]["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION
+            and review["document"]["taxonomy"]["version"] not in POSTURE_TAXONOMIES
             and migrations
             and migrations[-1]["review_required"]
         )
-        if accepted and review["document"]["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
+        if accepted and review["document"]["taxonomy"]["version"] in POSTURE_TAXONOMIES:
             frozen = project_motion(review["document"], variant["candidate"], variant["clock"])
             result["needs_rule_review"] = any(
                 old.get("transition") != new.get("transition")
@@ -704,7 +706,13 @@ class MotionLabelService:
                 or c["candidate_id"] + "/" + c["version_id"] in state["variant_rejections"]
             ):
                 continue
-            doc = accepted_projection(review, c, variant["clock"])
+            doc = accepted_projection(
+                review, c, variant["clock"],
+                taxonomy_version=STANDING_TAXONOMY_VERSION
+                if self.review_taxonomy_version == STANDING_TAXONOMY_VERSION
+                and review["document"]["taxonomy"]["version"] in POSTURE_TAXONOMIES
+                else None,
+            )
             migrated = current_document(doc)
             pending = [
                 e
@@ -712,7 +720,7 @@ class MotionLabelService:
                 if e.get("kind") == "posture-taxonomy-migration"
             ]
             if partial_fall_events(doc) or (
-                doc["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION
+                doc["taxonomy"]["version"] not in POSTURE_TAXONOMIES
                 and pending
                 and pending[-1]["review_required"]
             ):

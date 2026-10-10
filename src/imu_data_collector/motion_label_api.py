@@ -8,7 +8,7 @@ from .motion_label_previews import MotionLabelPreviews
 from .motion_label_service import MotionLabelService
 from .storage import ObjectConflictError
 from .synthetic_temporal_contract import (
-    CURRENT_TAXONOMY_VERSION,
+    STANDING_TAXONOMY_VERSION as CURRENT_TAXONOMY_VERSION,
     AnnotationIssues,
     activity_rules,
     document_sha256,

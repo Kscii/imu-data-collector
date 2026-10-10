@@ -8,6 +8,10 @@ from copy import deepcopy
 
 from .synthetic_temporal_contract import (
     CURRENT_PRIMARY,
+    STANDING_PRIMARY,
+    STANDING_TAXONOMY_VERSION,
+    POSTURE_TAXONOMIES,
+    standing_document,
     CURRENT_SCHEMA,
     CURRENT_TAXONOMY_VERSION,
     FALLS,
@@ -98,7 +102,7 @@ def validate_motion(document):
     temporary["candidate"] = identity(temporary.pop("motion_sha256"))
     temporary["schema"] = (
         CURRENT_SCHEMA
-        if temporary["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION
+        if temporary["taxonomy"]["version"] in POSTURE_TAXONOMIES
         else SEMANTIC_SCHEMA
     )
     temporary["clock"]["origin"] = "selection_first_imu_sample"
@@ -190,7 +194,7 @@ def project_motion(document, candidate, clock):
     result.update(
         schema=(
             CURRENT_SCHEMA
-            if document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION
+            if document["taxonomy"]["version"] in POSTURE_TAXONOMIES
             else SEMANTIC_SCHEMA
         ),
         candidate=deepcopy(candidate),
@@ -301,6 +305,8 @@ def apply_projection(document, edit):
     validate_document(edit)
     if edit["taxonomy"]["version"] == PRODUCTION_TAXONOMY_VERSION:
         document = production_document(document)
+    elif edit["taxonomy"]["version"] == STANDING_TAXONOMY_VERSION:
+        document = standing_document(document)
     elif edit["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
         document = current_document(document)
     require(document["taxonomy"] == edit["taxonomy"], "Edit taxonomy differs")
@@ -379,9 +385,11 @@ def primary_prediction(template, labels, indices, model_id, *, impacts=None):
         len(values) == template["clock"]["sample_count"], "Prediction clock differs"
     )
     result = deepcopy(template)
-    current = tuple(labels) == CURRENT_PRIMARY
+    current = tuple(labels) in (CURRENT_PRIMARY, STANDING_PRIMARY)
     result["taxonomy"] = taxonomy(
-        CURRENT_TAXONOMY_VERSION
+        STANDING_TAXONOMY_VERSION
+        if tuple(labels) == STANDING_PRIMARY
+        else CURRENT_TAXONOMY_VERSION
         if current
         else PRODUCTION_TAXONOMY_VERSION
         if tuple(labels) == PRODUCTION_PRIMARY
@@ -448,7 +456,7 @@ def primary_prediction(template, labels, indices, model_id, *, impacts=None):
     return validate_motion(derive_transition_endpoints(result) if current else result)
 
 
-def accepted_projection(review, candidate, clock):
+def accepted_projection(review, candidate, clock, *, taxonomy_version=None):
     require(
         review.get("schema") == REVIEW_SCHEMA
         and review.get("reviewer")
@@ -471,6 +479,12 @@ def accepted_projection(review, candidate, clock):
         "kind": "inherited-motion-review",
         "review_sha256": document_sha256(review),
     }
+    if taxonomy_version == STANDING_TAXONOMY_VERSION:
+        require(result["taxonomy"]["version"] in POSTURE_TAXONOMIES,
+                "Only reviewed v3/v4 semantics can inherit the standing projection")
+        result = standing_document(result)
+    elif taxonomy_version is not None:
+        require(taxonomy_version == result["taxonomy"]["version"], "Unsupported inherited taxonomy")
     return validate_document(result)
 
 
@@ -490,5 +504,6 @@ def validate_inheritance(document, reviewer):
         and review["reviewer"] == reviewer,
         "Inherited human review differs",
     )
-    expected = accepted_projection(review, document["candidate"], document["clock"])
+    expected = accepted_projection(review, document["candidate"], document["clock"],
+                                   taxonomy_version=document["taxonomy"]["version"])
     require(document == expected, "Motion projection differs from human acceptance")

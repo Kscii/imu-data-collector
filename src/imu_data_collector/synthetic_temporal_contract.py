@@ -70,6 +70,12 @@ CURRENT_PRIMARY = (
     "fall",
     "other_activity",
 )
+# CURRENT_* is the frozen v3 contract used by existing experiments. New motion
+# reviews opt into v4 explicitly; changing the old constants would change hashes.
+STANDING_TAXONOMY_VERSION = "4.0.0"
+STANDING_RULES_VERSION = "2026-10-10.3"
+STANDING_PRIMARY = tuple(c for c in CURRENT_PRIMARY if c != "bending")
+POSTURE_TAXONOMIES = (CURRENT_TAXONOMY_VERSION, STANDING_TAXONOMY_VERSION)
 SUPPORT_POSTURES = (
     "standing",
     "sitting",
@@ -81,6 +87,8 @@ SUPPORT_POSTURES = (
 
 
 def primary_codes(version=TAXONOMY_VERSION):
+    if version == STANDING_TAXONOMY_VERSION:
+        return STANDING_PRIMARY
     if version == TAXONOMY_VERSION:
         return PRIMARY
     if version == PRODUCTION_TAXONOMY_VERSION:
@@ -285,6 +293,8 @@ def imu_training_code(code):
 
 def activity_rules(version=TAXONOMY_VERSION):
     """One portable source for documentation, the catalog and training maps."""
+    if version == STANDING_TAXONOMY_VERSION:
+        return standing_activity_rules()
     if version == CURRENT_TAXONOMY_VERSION:
         return current_activity_rules()
     codes = primary_codes(version)
@@ -420,7 +430,14 @@ def render_activity_rules_markdown():
         "- [Transition-aware human activity recognition](https://upcommons.upc.edu/entities/publication/4fe86892-c341-41c0-8593-24be87b5d4e3)",
         "",
     ]
-    return "\n".join(lines)
+    latest = standing_activity_rules()
+    current = ["# 主活动分类：15 类站姿词表", "",
+               f"新生产词表 `{STANDING_TAXONOMY_VERSION}`，规则 `{STANDING_RULES_VERSION}`；schema v3，HDF5 3.3。",
+               "历史 3.0.0 的弯腰确定性投影为站姿；原始审核和备注时间范围保留。其他类别不合并。", "",
+               "| Tag | 中文 | 定义 | 保留理由 |", "| --- | --- | --- | --- |"]
+    current += [f"| `{r['code']}` | {r['name_zh']} | {r['definition']} | {r['rationale']} |" for r in latest["primary"]]
+    current += ["", "下面为历史 20／24 类兼容定义，不是新审核的可选列表。", ""]
+    return "\n".join(current + lines)
 
 
 # Ordered, frozen tie-break for independently supported, simultaneous auxiliaries.
@@ -661,7 +678,7 @@ def validate_document(document, *, expected_candidate=None, expected_count=None)
     semantic = document["schema"] in (SEMANTIC_SCHEMA, CURRENT_SCHEMA)
     current = document["schema"] == CURRENT_SCHEMA
     _require(
-        current == (document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION),
+        current == (document["taxonomy"]["version"] in POSTURE_TAXONOMIES),
         "Annotation schema and taxonomy version differ",
     )
     _require(
@@ -1268,6 +1285,82 @@ def current_activity_rules():
     }
 
 
+def standing_activity_rules():
+    rules = deepcopy(current_activity_rules())
+    rules.update(version=STANDING_RULES_VERSION, taxonomy_version=STANDING_TAXONOMY_VERSION)
+    rules["primary"] = [r for r in rules["primary"] if r["code"] != "bending"]
+    standing = next(r for r in rules["primary"] if r["code"] == "standing")
+    standing.update(
+        name_zh="站姿",
+        definition="保持足部站姿支撑，没有持续步行；包括直立、弯腰、保持前屈、回正、站着拾物及轻微挪步。未形成坐、蹲、跪、卧或爬撑等其他主要支撑姿态。",
+        rationale="统计日常站姿时长，不再区分站姿下躯干是否前屈。",
+    )
+    rules["training_profile"].update(
+        id="imu-primary-15-v1", codes=list(STANDING_PRIMARY),
+        mapping={**{c: c for c in STANDING_PRIMARY}, "bending": "standing"},
+    )
+    rules["principles"] = [p.replace("及弯腰映射站姿", "映射站姿").replace("明确站立暂停", "明确站姿暂停") for p in rules["principles"]]
+    rules["principles"].append("历史弯腰确定性映射为站姿；坐姿前倾仍为坐姿，持续行走中的弯腰仍为行走。")
+    return rules
+
+
+def standing_document(document):
+    """Authorized deterministic v3 -> v4 view, preserving acceptance provenance.
+
+    Does not confirm pending labels, infer events, or change the source revision.
+    Also accepts whole-motion documents used before a selection is projected.
+    """
+    if document["taxonomy"]["version"] == STANDING_TAXONOMY_VERSION:
+        return deepcopy(document)
+    result = current_document(document)
+    changes = []
+    for part in result["segments"]:
+        if part["primary_code"] == "bending":
+            changes.append({k: part[k] for k in ("segment_id", "start_ns", "stop_ns")})
+            part["primary_code"] = "standing"
+    result["taxonomy"] = taxonomy(STANDING_TAXONOMY_VERSION)
+    # Only merge equally reviewed known standing spans. Retain original semantic
+    # anchors even when several historical intervals become one display interval.
+    merged = []
+    for part in result["segments"]:
+        prior = merged[-1] if merged else None
+        if (prior and prior["primary_code"] == part["primary_code"] == "standing"
+            and prior["stop_ns"] == part["start_ns"]
+            and all(prior[k] == part[k] for k in ("review_state", "resolution", "pending_reasons"))):
+            notes = {n["note_id"]: n for n in prior["notes"]}
+            for span in (prior, part):
+                for note in span["notes"]:
+                    nid = note["note_id"]
+                    if nid in notes and notes[nid] != note:
+                        nid += "-" + document_sha256(note)[:12]
+                    notes[nid] = dict(note, note_id=nid)
+                if span["semantic_text"].strip():
+                    nid = "standing-semantic-" + span["segment_id"]
+                    note = dict(note_id=nid, text=span["semantic_text"],
+                                start_ns=span["start_ns"], stop_ns=span["stop_ns"])
+                    if nid in notes and notes[nid] != note:
+                        nid += "-" + document_sha256(note)[:12]
+                    notes[nid] = dict(note, note_id=nid)
+            prior.update(stop_ns=part["stop_ns"], semantic_text="", notes=list(notes.values()))
+        else:
+            merged.append(part)
+    result["segments"] = merged
+    result["source_evidence"].append(dict(
+        kind="standing-taxonomy-projection", source_sha256=document_sha256(document),
+        source_taxonomy_version=document["taxonomy"]["version"],
+        target_taxonomy_version=STANDING_TAXONOMY_VERSION,
+        rules_version=STANDING_RULES_VERSION, mapped_intervals=changes,
+        review_required=[], human_revision_unchanged=True,
+    ))
+    # Coarsening the vocabulary must not silently revise historical transition
+    # endpoints. The editor derives them separately and retains its review gate.
+    return result
+
+
+def standing_editor_document(document):
+    return derive_transition_endpoints(standing_document(document))
+
+
 def support_posture(code):
     if code in SUPPORT_POSTURES:
         return code
@@ -1279,7 +1372,7 @@ def support_posture(code):
 def derive_transition_endpoints(document):
     """Recompute editable v3 endpoints without changing the source revision."""
     result = deepcopy(document)
-    if result["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION:
+    if result["taxonomy"]["version"] not in POSTURE_TAXONOMIES:
         return result
     parts = result["segments"]
     for i, part in enumerate(parts):
@@ -1303,7 +1396,7 @@ def editor_document(document):
 
 def current_document(document):
     """Derive a v3 review view, never replace acceptance or invent new human acts."""
-    if document["taxonomy"]["version"] == CURRENT_TAXONOMY_VERSION:
+    if document["taxonomy"]["version"] in POSTURE_TAXONOMIES:
         return deepcopy(document)
     result = semantic_draft(document) if document["schema"] == SCHEMA else deepcopy(document)
     if result["schema"] == SEMANTIC_SCHEMA:
@@ -1382,7 +1475,7 @@ class AnnotationIssues(ValueError):
 
 def duration_submission_issues(document):
     """New writes only. Historical review validation deliberately ignores this rule."""
-    if document["taxonomy"]["version"] != CURRENT_TAXONOMY_VERSION:
+    if document["taxonomy"]["version"] not in POSTURE_TAXONOMIES:
         return []
     return [
         {

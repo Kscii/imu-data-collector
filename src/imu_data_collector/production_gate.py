@@ -19,7 +19,7 @@ def production_gate(report, capability=None):
     capability = capability or ("daily_activity" if version.endswith(".v3") else "fall")
     require(capability in ("daily_activity", "fall"), "Unknown release capability")
     if version.endswith(".v3"):
-        require(report.get("taxonomy_version") == "3.0.0", "需要16类同口径验证")
+        require(report.get("taxonomy_version") in ("3.0.0", "4.0.0"), "需要同词表口径的独立验证")
     else:
         require(capability == "fall", "旧报告不能绕过原联合门槛")
     require(

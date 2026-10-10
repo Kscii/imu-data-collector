@@ -119,7 +119,11 @@ def semantic_bias(features, labels):
         if code in ("walking", "running", "stair_up", "stair_down"):
             out[:, i] = -2 * still + 0.4 * upright * alternating
         elif code == "standing":
-            out[:, i] = 0.6 * still * upright * tall - 0.6 * horizontal
+            out[:, i] = (
+                0.6 * still * tall
+                if "posture_transition" in labels and "bending" not in labels
+                else 0.6 * still * upright * tall - 0.6 * horizontal
+            )
         elif code == "bending":
             out[:, i] = 0.5 * (1 - upright) * tall - 0.4 * (f[:, 1] < 0.35)
         elif code == "lying":
@@ -585,6 +589,18 @@ def semantic_decode(
 def interval_evidence(decoded, start, stop, code):
     """Observable signals and logged edits, not a neural causal explanation."""
     evidence = []
+    for key, label in (("movement_stepping", "检测到连续交替踏步"),
+                       ("movement_transition_context", "前后稳定姿态之间存在支撑姿态变化")):
+        values = np.asarray(decoded.get(key, []))[start:stop]
+        if values.size and values.any():
+            evidence.append({"kind": "observation", "code": key,
+                             "seconds": float(values.sum()) / 25,
+                             "text": label + "；仅作为运动证据，不代表人工确认"})
+    stationary = np.asarray(decoded.get("movement_stationary", []))[start:stop]
+    if code == "standing" and stationary.size:
+        evidence.append({"kind": "observation", "code": "stationary_legs",
+                         "value": float(np.median(stationary)), "unit": "score",
+                         "text": "结合下肢静止及站姿几何判断；弯腰不另分类"})
     duration = int(np.asarray(decoded.get("duration_adjusted", []))[start:stop].sum())
     if duration:
         evidence.append(
@@ -596,7 +612,7 @@ def interval_evidence(decoded, start, stop, code):
             }
         )
     if "semantic_features" not in decoded or stop <= start:
-        return evidence
+        return evidence[:3]
     f = decoded["semantic_features"][start:stop]
     f = f[f[:, 18] > 0]
     filled = int(decoded["inferred_fill"][start:stop].sum())

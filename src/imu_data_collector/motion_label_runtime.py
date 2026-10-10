@@ -106,6 +106,20 @@ def sequence_decode(
     Posterior scores alone are not correctness probabilities. High-confidence
     output requires a separately calibrated local AND contextual threshold.
     """
+    if metadata.get("movement_policy"):
+        if __package__:
+            from .motion_logic import adjust_scores
+        else:
+            from motion_logic import adjust_scores
+        if joints is None:
+            raise ValueError("Movement policy requires canonical motion geometry")
+        adjusted, detail = adjust_scores(scores, joints, valid, metadata["labels"], metadata["movement_policy"])
+        base = dict(metadata)
+        base.pop("movement_policy")
+        result = sequence_decode(adjusted, valid, base, outside_scores=outside_scores,
+                                 joints=joints, boundary_scores=boundary_scores)
+        result.update({"movement_" + key: np.asarray(value) for key, value in detail.items()})
+        return result
     if metadata.get("segmentation_policy"):
         base = dict(metadata)
         base.pop("segmentation_policy")
@@ -294,12 +308,20 @@ def predict_outputs(session, joints, valid, metadata):
         return np.concatenate(output, axis=-1) if auxiliary else output[0]
 
     values = predict_scores(forward, joints, valid)
-    k = len(metadata["labels"])
+    network_labels = metadata.get("network_labels", metadata["labels"])
+    k = len(network_labels)
     expected = k + (2 if auxiliary else 0) + (1 if metadata.get("boundary_head") else 0)
     if values.shape != (len(joints), expected) or not np.isfinite(values).all():
         raise ValueError("Network output shape or values differ")
+    scores = values[:, :k]
+    if network_labels != metadata["labels"]:
+        expected_labels = [c for c in network_labels if c != "bending"]
+        if expected_labels != metadata["labels"] or "bending" not in network_labels:
+            raise ValueError("Unsupported network class projection")
+        scores = np.column_stack([scores[:, i] for i, c in enumerate(network_labels) if c != "bending"])
+        scores[:, metadata["labels"].index("standing")] += values[:, network_labels.index("bending")]
     return {
-        "scores": values[:, :k],
+        "scores": scores,
         **(
             {"impact_scores": values[:, k], "outside_scores": values[:, k + 1]} if auxiliary else {}
         ),

@@ -32,6 +32,7 @@ from .storage import ObjectConflictError, create_object_store
 from .synthetic_motion import SyntheticReviewService
 from .synthetic_temporal_contract import (
     CURRENT_PRIMARY,
+    STANDING_PRIMARY,
     FALLS,
     PRIMARY,
     PRODUCTION_PRIMARY,
@@ -133,7 +134,7 @@ class MotionLabelWorker:
             ).read_text()
         )
         require(
-            tuple(metadata["labels"]) in (PRIMARY, PRODUCTION_PRIMARY, CURRENT_PRIMARY),
+            tuple(metadata["labels"]) in (PRIMARY, PRODUCTION_PRIMARY, CURRENT_PRIMARY, STANDING_PRIMARY),
             "Model labels differ",
         )
         with np.load(data, allow_pickle=False) as saved:
@@ -200,6 +201,7 @@ class MotionLabelWorker:
                     "metadata": model["metadata"]["sha256"],
                     "runtime_sha256": sha(Path(__file__).with_name("motion_label_runtime.py")),
                     "semantic_runtime_sha256": sha(Path(__file__).with_name("semantic_runtime.py")),
+                    "movement_runtime_sha256": sha(Path(__file__).with_name("motion_logic.py")),
                 }
             )
             decoded_key = self.service.root + f"/sequence-manifests/{decoded_id}.json"

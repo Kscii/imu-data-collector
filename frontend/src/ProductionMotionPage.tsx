@@ -55,7 +55,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const [current, setCurrent] = useState<Detail | null>(null), [editor, setStoredEditor] = useState<Annotation | null>(null);
   const setEditor = (update: SetStateAction<Annotation | null>) => setStoredEditor(previous => {
     const next = typeof update === "function" ? update(previous) : update;
-    return next && !previewId && next.taxonomy.version === "3.0.0"
+    return next && !previewId && ["3.0.0", "4.0.0"].includes(next.taxonomy.version)
       ? {...next, segments: deriveTransitionEndpoints(next.segments)} : next;
   });
   const [lease, setLease] = useState<Lease | null>(null), [part, setPart] = useState(0), [queue, setQueue] = useState(false);
@@ -91,7 +91,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
   const usable = editor?.segments.reduce((n, s) => {
     const fall = editor.taxonomy.primary.find(t=>t.code===s.primary_code)?.is_fall;
     const event = editor.fall_events.find(e=>e.event_id===s.fall_event_id||e.event_id===`fall-${s.segment_id}`);
-    const eligible = s.primary_code && (editor.taxonomy.version === "3.0.0" || !fall || (event && event.impact_ns !== null && event.impact_ns>s.start_ns && event.impact_ns<s.stop_ns));
+    const eligible = s.primary_code && (["3.0.0", "4.0.0"].includes(editor.taxonomy.version) || !fall || (event && event.impact_ns !== null && event.impact_ns>s.start_ns && event.impact_ns<s.stop_ns));
     return n+(eligible ? s.stop_ns-s.start_ns : 0);
   }, 0) ?? 0;
   const dirty = !previewId && !!editor && JSON.stringify(editor) !== JSON.stringify(current?.editor_template);
@@ -169,7 +169,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
       await open(found.motion_sha256, {candidate_id,version_id}, time === null ? undefined : Number(time));
     } else if (items[0]) await open(items[0].motion_sha256);
   }).catch(e => setError(String(e)));}, []);
-  useEffect(() => {void motionApi<ActivityRules>(`${root}/activity-rules?version=${encodeURIComponent(editor?.taxonomy.version ?? "3.0.0")}`).then(setRules).catch(e=>setError(String(e)));}, [editor?.taxonomy.version]);
+  useEffect(() => {void motionApi<ActivityRules>(`${root}/activity-rules?version=${encodeURIComponent(editor?.taxonomy.version ?? "4.0.0")}`).then(setRules).catch(e=>setError(String(e)));}, [editor?.taxonomy.version]);
   useEffect(() => {
     if (viewerReady && initialSeek.current !== null) {
       const target = initialSeek.current; initialSeek.current = null;
@@ -249,7 +249,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
     for (const s of doc.segments) {
       const fall = doc.taxonomy.primary.find(t => t.code === s.primary_code)?.is_fall;
       const event = doc.fall_events.find(e => e.event_id === s.fall_event_id || e.event_id === `fall-${s.segment_id}`)
-        ?? (fall && doc.taxonomy.version === "3.0.0" ? {event_id: `fall-${s.segment_id}`, code: s.primary_code!, start_ns: s.start_ns, stop_ns: s.stop_ns, impact_ns: null, evidence: "Human recording review; impact unlocalized"} : undefined);
+        ?? (fall && ["3.0.0", "4.0.0"].includes(doc.taxonomy.version) ? {event_id: `fall-${s.segment_id}`, code: s.primary_code!, start_ns: s.start_ns, stop_ns: s.stop_ns, impact_ns: null, evidence: "Human recording review; impact unlocalized"} : undefined);
       s.review_state = s.primary_code && (!fall || event) ? "confirmed" : "pending";
       s.pending_reasons = s.review_state === "confirmed" ? [] : [fall ? "boundary" : "class"];
       s.fall_event_id = fall && event ? event.event_id : null;
@@ -368,7 +368,7 @@ export function ProductionMotionPage({isAdmin}: {isAdmin: boolean}) {
         {issues.length > 0 && <div className="primary-validation" role="alert"><strong>请修改以下标注后再通过</strong>{issues.map((issue,i)=><button key={i} type="button" onClick={()=>{const at=editor.segments.findIndex(s=>s.segment_id===issue.segment_ids[0]);if(at>=0)selectPart(at);}}>{issue.message}</button>)}</div>}
         {current.legacy_quality && <details className="primary-definition"><summary>历史质量审核：{({pass:"通过",reject:"拒绝",unreviewed:"未审核"} as Record<string,string>)[current.legacy_quality.decision]??current.legacy_quality.decision}</summary><p>{current.legacy_quality.reason??"未填写原因"}</p><small>审核者 {current.legacy_quality.reviewer} · 区间请在此重新检查</small></details>}
         <label>主活动<select aria-label="主活动" value={segment.primary_code ?? segment.resolution} onChange={e=>{const code=e.target.value,known=editor.taxonomy.primary.find(t=>t.code===code);change({primary_code:known?code:null,resolution:known?"identified":code,reason:known?null:unknownNames[code],fall_event_id:null, transition:code==="posture_transition"?{from_posture:null,to_posture:null}:null});setIssues([]);}}>
-          {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).filter(([code])=>editor.taxonomy.version === "3.0.0" ? code !== "uncovered" || segment.resolution === code : code !== "invalid_data").map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
+          {editor.taxonomy.primary.map(t=><option key={t.code} value={t.code}>{names[t.code]}</option>)}{Object.entries(unknownNames).filter(([code])=>["3.0.0", "4.0.0"].includes(editor.taxonomy.version) ? code !== "uncovered" || segment.resolution === code : code !== "invalid_data").map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
         {quality && <small role="status">{quality.reason === "experimental_fall" ? "跌倒实验建议，尚未完成独立验证" : quality.high_confidence_fraction < 1 ? "低可信候选，请检查类别与切点" : quality.boundary_reliable ? "高可信候选" : "类别候选，边界待核"}</small>}
         {!previewId && <div className="primary-edit-buttons"><button onClick={split} disabled={!viewerReady}>在播放位置切分 <kbd>S</kbd></button>
           <button disabled={part===editor.segments.length-1 || !viewerReady} onClick={merge}>合并下一段 <kbd>M</kbd></button></div>}
