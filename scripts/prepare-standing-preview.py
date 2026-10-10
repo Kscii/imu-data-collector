@@ -120,12 +120,18 @@ def main(base, root):
             continue
         checksums = read(path.parent / "checksums.json")
         assert all(sha256_file(path.parent / name) == digest for name, digest in checksums.items())
+        assert read(path.parent / "metadata.json")["training_manifest_sha256"] == sha256_file(path)
         train = set(value["groups"]["train"])
         early = set(value["groups"]["calibration"])
         assert not train & early and not (train | early) & protected
+        held = set()
         if not path.parent.name.startswith("full-"):
             held = set(binding["folds"][int(path.parent.name.rsplit("-", 1)[-1])])
             assert not (train | early) & held
+        assert value["corrections"] == {
+            entry["candidate"]["candidate_id"]: document_sha256(doc)
+            for entry, doc, _ in refs if entry["group_key"] not in held
+        }
         assert value["activity_rules"]["rules"]["taxonomy_version"] == "4.0.0"
         models.append({"model": path.parent.name, "training_manifest_sha256": sha256_file(path)})
     destination = root / "comparison-store"
