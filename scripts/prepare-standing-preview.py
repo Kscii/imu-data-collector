@@ -211,13 +211,25 @@ def main(base, root):
         + "</p>"
     )
     parts.append(
-        "<table><tr><th>方案</th><th>已识别精确率</th><th>正确覆盖率</th><th>错误短段</th><th>边界P90</th></tr>"
+        f"<p>下方回放对照使用种子 {seed}；完整两种子结果如下，不能用单一种子代替总体结论。</p>"
+        "<table><tr><th>方案／种子</th><th>产品分</th><th>已识别精确率</th>"
+        "<th>正确覆盖率</th><th>错误短段</th><th>边界P90</th></tr>"
     )
-    for name in ("baseline", recipe):
-        r = reports[name]
-        parts.append(
-            f"<tr><td>{html.escape(name)}</td><td>{r['identified_precision']:.2%}</td><td>{r['correct_coverage']:.2%}</td><td>{r['wrong_short_segments']}</td><td>{r['boundary_p90_s']:.3f}s</td></tr>"
-        )
+    names = {
+        "baseline": "旧 C 映射",
+        "rules": "旧权重＋规则搜索",
+        "control": "15 类控制重训",
+        "enhanced": "15 类增强监督",
+    }
+    comparison = read(root / "comparison.json")
+    for name, title in names.items():
+        for result_seed, r in sorted(comparison[name].items()):
+            parts.append(
+                f"<tr><td>{title}／{html.escape(result_seed)}</td>"
+                f"<td>{r['product_score']:.2f}</td><td>{r['identified_precision']:.2%}</td>"
+                f"<td>{r['correct_coverage']:.2%}</td><td>{r['wrong_short_segments']}</td>"
+                f"<td>{r['boundary_p90_s']:.3f}s</td></tr>"
+            )
     parts.append(
         "</table><p>“人工参考”沿用原纠正，只把弯腰映射为站姿。开发集结果不能代表独立测试或全库准确率。</p><table><tr><th>录制</th><th>时长</th></tr>"
     )
