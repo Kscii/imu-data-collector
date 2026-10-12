@@ -13,6 +13,7 @@ import {
   type RuntimeConfiguration,
 } from "./DeviceConfigurationPages";
 import { resolveAnnotationShortcut } from "./annotationShortcuts";
+import { AnnotationCursor, annotationSeconds, type AnnotationPosition } from "./annotationCursor";
 import { ApiRequestError, NetworkRequestError, RequestTimeoutError, requestJson } from "./apiRequest";
 import {
   AnnotationSaveFlow, annotationContentMatches, syncContentMatches,
@@ -2247,6 +2248,13 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
   const [exclusionReason, setExclusionReason] = useState<Exclusion["reason"]>("other");
   const [marks, setMarks] = useState<{ start?: number; end?: number; impact?: number }>({});
   const [currentTime, setCurrentTime] = useState(0);
+  const [annotationTimeNs, setAnnotationTimeNs] = useState(0);
+  const annotationCursor = useRef(new AnnotationCursor());
+  const showAnnotationPosition = (position: AnnotationPosition) => {
+    setCurrentFrame(position.frame);
+    setCurrentTime(position.frameTimeNs / 1e9);
+    setAnnotationTimeNs(position.timeNs);
+  };
   const annotator = session.unikey;
   const [sync, setSync] = useState<SyncState | null>(null);
   const [syncRole, setSyncRole] = useState<"start_tap" | "end_tap">("start_tap");
@@ -2301,6 +2309,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
     setReview(null);
     setStatus(null);
     setFrameTimes(null);
+    showAnnotationPosition(annotationCursor.current.reset());
     setLocatedIntervalKey("");
     setSaveState("idle");
     setSaveMessage("");
@@ -2437,9 +2446,8 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
       frameTimes.media_time_ns,
       frameTimes.media_time_ns[0] + INITIAL_VIDEO_PREVIEW_OFFSET_NS
     );
+    showAnnotationPosition(annotationCursor.current.moveToFrame(previewFrame, frameTimes.time_ns[previewFrame]));
     video.current.currentTime = frameTimes.media_time_ns[previewFrame] / 1e9;
-    setCurrentFrame(previewFrame);
-    setCurrentTime(frameTimes.time_ns[previewFrame] / 1e9);
   }, [frameTimes]);
 
   useEffect(() => {
@@ -2450,21 +2458,25 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
     }
   }, [annotationKind, taxonomy.version]);
 
-  const updateVideoPosition = (mediaTime: number) => {
-    if (frameTimes) {
-      const frame = nearestIndex(frameTimes.media_time_ns, Math.round(mediaTime * 1e9));
-      setCurrentFrame(frame);
-      setCurrentTime(frameTimes.time_ns[frame] / 1e9);
+  const updateVideoPosition = (element: HTMLVideoElement) => {
+    if (frameTimes?.frame_count) {
+      const frame = nearestIndex(frameTimes.media_time_ns, Math.round(element.currentTime * 1e9));
+      showAnnotationPosition(annotationCursor.current.observeFrame(
+        frame, frameTimes.time_ns[frame], element.paused, element.seeking,
+      ));
     }
+  };
+
+  const releaseAnnotationBoundary = () => {
+    showAnnotationPosition(annotationCursor.current.releaseBoundary());
   };
 
   const stepFrame = (delta: number) => {
     if (!frameTimes || !video.current) return;
-    const target = Math.max(0, Math.min(frameTimes.frame_count - 1, currentFrame + delta));
+    const target = Math.max(0, Math.min(frameTimes.frame_count - 1, annotationCursor.current.position.frame + delta));
     video.current.pause();
+    showAnnotationPosition(annotationCursor.current.moveToFrame(target, frameTimes.time_ns[target]));
     video.current.currentTime = frameTimes.media_time_ns[target] / 1e9;
-    setCurrentFrame(target);
-    setCurrentTime(frameTimes.time_ns[target] / 1e9);
   };
 
   const loadExperimentWindow = async () => {
@@ -2526,16 +2538,18 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
 
   const mark = (name: "start" | "end" | "impact") => {
     if (!canMutate) return;
-    setMarks((existing) => ({ ...existing, [name]: Math.round(currentTime * 1e9) }));
+    const timeNs = annotationCursor.current.mark(name);
+    setMarks((existing) => ({ ...existing, [name]: timeNs }));
   };
 
-  const jumpToRecordingTime = (timeNs: number) => {
-    if (!frameTimes || !video.current) return;
+  const jumpToRecordingTime = (timeNs: number, exactBoundary = false) => {
+    if (!frameTimes?.frame_count || !video.current) return;
     const frame = nearestIndex(frameTimes.time_ns, timeNs);
     video.current.pause();
+    showAnnotationPosition(exactBoundary
+      ? annotationCursor.current.moveToBoundary(frame, frameTimes.time_ns[frame], timeNs)
+      : annotationCursor.current.moveToFrame(frame, frameTimes.time_ns[frame]));
     video.current.currentTime = frameTimes.media_time_ns[frame] / 1e9;
-    setCurrentFrame(frame);
-    setCurrentTime(frameTimes.time_ns[frame] / 1e9);
   };
 
   const registerSaveFailure = (value: unknown) => {
@@ -2632,7 +2646,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
 
   const setSegmentImpact = (segment: Segment) => {
     if (!canMutate || !doc) return;
-    const timeNs = Math.round(currentTime * 1e9);
+    const timeNs = annotationCursor.current.mark("impact");
     if (timeNs <= segment.start_ns || timeNs >= segment.end_ns) {
       setError("撞击时刻必须严格位于该跌倒区间内");
       return;
@@ -3045,7 +3059,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
       exclusion,
     })),
   ].sort((left, right) => left.start_ns - right.start_ns || left.end_ns - right.end_ns || left.key.localeCompare(right.key)) : [];
-  const currentTimeNs = Math.round(currentTime * 1e9);
+  const currentTimeNs = annotationTimeNs;
   const matchingAnnotationIntervals = intervalsAtTime(orderedAnnotationIntervals, currentTimeNs);
   const activeAnnotationInterval = matchingAnnotationIntervals.length === 1 ? matchingAnnotationIntervals[0] : undefined;
   const currentAnnotationLabels: PlotSelectionLabel[] = matchingAnnotationIntervals.length > 1
@@ -3114,7 +3128,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
   };
 
   const selectAnnotationInterval = (item: OrderedAnnotationInterval, target: "start" | "end" = "start") => {
-    jumpToRecordingTime(target === "start" ? item.start_ns : item.end_ns);
+    jumpToRecordingTime(target === "start" ? item.start_ns : item.end_ns, true);
   };
 
   const jumpToSelectedIntervalEnd = () => {
@@ -3208,7 +3222,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [annotationKind, canEdit, currentFrame, currentTime, frameTimes, doc, review, saveState, selected]);
+  }, [annotationKind, canEdit, currentFrame, currentTime, annotationTimeNs, frameTimes, doc, review, saveState, selected]);
 
   return (
     <main className="annotation-workbench">
@@ -3333,8 +3347,13 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
               tabIndex={0}
               aria-keyshortcuts=", . Shift+, Shift+. I O 2 F N X E Control+S"
               src={`/api/v1/recordings/${selected}/video`}
-              onTimeUpdate={(event) => updateVideoPosition(event.currentTarget.currentTime)}
-              onSeeked={(event) => updateVideoPosition(event.currentTarget.currentTime)}
+              onTimeUpdate={(event) => updateVideoPosition(event.currentTarget)}
+              onSeeked={(event) => updateVideoPosition(event.currentTarget)}
+              onPlay={releaseAnnotationBoundary}
+              onPointerDown={releaseAnnotationBoundary}
+              onKeyDown={(event) => {
+                if ([" ", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) releaseAnnotationBoundary();
+              }}
             />
             {(selectedRecording?.quality_warnings ?? []).length > 0 && <div className="warning-banner compact-banner"><strong>{tr("采集质量警告（允许标注）：", "Capture quality warnings (annotation allowed):")}</strong>{selectedRecording?.quality_warnings?.map((warning) => <div key={warning}>{issueLabel(warning)}</div>)}</div>}
             <div className="frame-controls workbench-frame-controls">
@@ -3350,8 +3369,8 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
           </div>
 
           <div className="panel full-timeline-panel workbench-timeline">
-            <div className="timeline-heading"><div><span>{tr("完整录制 IMU", "Full-recording IMU")}</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} {tr("个峰值保留显示点", "peak-preserving display points")}</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{currentTime.toFixed(3)} s</strong></div></div>
-            {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={currentTime} markers={timelineMarkers} regions={timelineRegions} selectionLabels={currentAnnotationLabels} controlledCursor showMarkerKey={false} height={190} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} onSelectLabel={locateAnnotationInterval} />}
+            <div className="timeline-heading"><div><span>{tr("完整录制 IMU", "Full-recording IMU")}</span><small>{timeline?.unit ?? "—"} · {timeline?.time_s.length ?? 0} {tr("个峰值保留显示点", "peak-preserving display points")}</small></div><div className="timeline-heading-actions">{visibleActivityLegend.length > 0 && <details className="timeline-activity-legend"><summary>{tr("动作颜色", "Activity colors")} · {visibleActivityLegend.length}</summary><div>{visibleActivityLegend.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></details>}{timelineMarkers.length > 0 && <details className="timeline-marker-legend"><summary>{tr("撞击标记", "Impact markers")} · {timelineMarkers.length}</summary><div>{timelineMarkers.map((marker) => <button type="button" key={`${marker.label}-${marker.time}`} onClick={() => jumpToRecordingTime(Math.round(marker.time * 1e9))}><i style={{ background: marker.color }} />{tr("撞击", "Impact")} · {marker.time.toFixed(3)} s</button>)}</div></details>}<strong>{annotationSeconds(annotationTimeNs)}</strong></div></div>
+            {timeline && <Plot time={timeline.time_s} values={timeline.values} cursorTime={annotationTimeNs / 1e9} markers={timelineMarkers} regions={timelineRegions} selectionLabels={currentAnnotationLabels} controlledCursor showMarkerKey={false} height={190} onSelectTime={(time) => jumpToRecordingTime(Math.round(time * 1e9))} onSelectLabel={locateAnnotationInterval} />}
           </div>
         </section>
 
@@ -3415,9 +3434,9 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
             {taskTab === "annotate" && <div className="annotation-tab-layout">
               <div className="panel compact-panel annotation-controls">
                 <div className="panel-title">创建区间</div>
-                <div className="time-readout">{currentTime.toFixed(3)} s · {tr("帧", "frame")} {currentFrame}</div>
+                <div className="time-readout" title={`${annotationTimeNs} ns`}>{annotationSeconds(annotationTimeNs)} · {tr("帧", "frame")} {currentFrame}{annotationTimeNs !== annotationCursor.current.position.frameTimeNs && <small> · {tr("视频", "Video")} {annotationSeconds(annotationCursor.current.position.frameTimeNs)}</small>}</div>
                 <div className="mark-buttons"><button disabled={!canMutate} onClick={() => mark("start")}>起点 I</button><button disabled={!canMutate} onClick={() => mark("end")}>终点 O</button><button disabled={!canMutate || annotationKind !== "fall"} onClick={() => mark("impact")}>撞击 2</button></div>
-                <div className="marks"><span>{tr("起", "Start")} {seconds(marks.start)}</span><span>{tr("止", "End")} {seconds(marks.end)}</span><span>{tr("撞击", "Impact")} {seconds(marks.impact)}</span></div>
+                <div className="marks"><span>{tr("起", "Start")} {annotationSeconds(marks.start)}</span><span>{tr("止", "End")} {annotationSeconds(marks.end)}</span><span>{tr("撞击", "Impact")} {annotationSeconds(marks.impact)}</span></div>
                 <div className="segment-form"><select disabled={!canMutate} value={annotationKind} onChange={(event) => setAnnotationKind(event.target.value as typeof annotationKind)}><option value="non_fall">非跌倒 · 训练</option><option value="fall">跌倒 · 训练</option><option value="exclude">明确排除</option></select>{annotationKind === "exclude" ? <select disabled={!canMutate} value={exclusionReason} onChange={(event) => setExclusionReason(event.target.value as Exclusion["reason"])}>{Object.entries(exclusionLabels).map(([value, display]) => <option value={value} key={value}>{display}</option>)}</select> : <select disabled={!canMutate} value={activity} onChange={(event) => setActivity(event.target.value)}>{choices.map((item) => <option data-no-localize value={item.code} key={item.code}>{item.name}</option>)}</select>}<button className="primary" disabled={!canMutate || marks.start === undefined || marks.end === undefined} onClick={addAnnotationInterval}>添加并保存</button></div>
                 <details><summary>标注规范</summary><p className="stage-help">跌倒区间从首次明确失衡开始，到落地后身体大动作停止并稳定。区间起点同时表示 onset；每个跌倒区间必须有且仅有一个撞击时刻。准备阶段和稳定后的自然状态标为 non_fall。</p></details>
               </div>
@@ -3428,7 +3447,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
                     if (item.kind === "exclusion") {
                       const exclusion = item.exclusion;
                       return <article id={`annotation-${item.key}`} className={`interval-card interval-exclude ${activeAnnotationInterval?.key === item.key ? "interval-selected" : ""} ${locatedIntervalKey === item.key ? "interval-located" : ""}`} key={item.key}>
-                        <button className="interval-jump" onClick={() => selectAnnotationInterval(item)}><strong>{tr("排除", "Excluded")} · {exclusionLabels[exclusion.reason]}</strong><span>{seconds(exclusion.start_ns)} → {seconds(exclusion.end_ns)}</span></button>
+                        <button className="interval-jump" onClick={() => selectAnnotationInterval(item)}><strong>{tr("排除", "Excluded")} · {exclusionLabels[exclusion.reason]}</strong><span title={`${exclusion.start_ns}–${exclusion.end_ns} ns`}>{annotationSeconds(exclusion.start_ns)} → {annotationSeconds(exclusion.end_ns)}</span></button>
                         <div className="interval-actions"><button onClick={() => selectAnnotationInterval(item, "start")}>{tr("到开头", "Go to start")}</button><button onClick={() => selectAnnotationInterval(item, "end")}>{tr("到结尾", "Go to end")} E</button><button disabled={!canMutate} onClick={() => removeExclusion(exclusion.exclusion_id)}>{tr("删除标注", "Delete annotation")}</button></div>
                       </article>;
                     }
@@ -3436,7 +3455,7 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
                     const impact = doc.events.find((event) => event.segment_id === segment.segment_id && event.kind === "impact");
                     const intervalColor = stableActivityColor(segment.binary_label, segment.activity_code, displayTaxonomy[segment.binary_label]);
                     return <article id={`annotation-${item.key}`} className={`interval-card interval-${segment.binary_label} ${activeAnnotationInterval?.key === item.key ? "interval-selected" : ""} ${locatedIntervalKey === item.key ? "interval-located" : ""}`} style={{ borderLeftColor: intervalColor }} key={item.key}>
-                      <button className="interval-jump" onClick={() => selectAnnotationInterval(item)}><strong>{segment.binary_label === "fall" ? tr("跌倒", "Fall") : tr("非跌倒", "Non-fall")} · {activityDisplay(segment.activity_code)}</strong><span>{seconds(segment.start_ns)} → {seconds(segment.end_ns)}</span></button>
+                      <button className="interval-jump" onClick={() => selectAnnotationInterval(item)}><strong>{segment.binary_label === "fall" ? tr("跌倒", "Fall") : tr("非跌倒", "Non-fall")} · {activityDisplay(segment.activity_code)}</strong><span title={`${segment.start_ns}–${segment.end_ns} ns`}>{annotationSeconds(segment.start_ns)} → {annotationSeconds(segment.end_ns)}</span></button>
                       {segment.binary_label === "fall" && <span className={impact ? "success-text" : "warning-text"}>{tr("撞击", "Impact")} {seconds(impact?.time_ns)}</span>}
                       <div className="interval-actions"><button onClick={() => selectAnnotationInterval(item, "start")}>{tr("到开头", "Go to start")}</button><button onClick={() => selectAnnotationInterval(item, "end")}>{tr("到结尾", "Go to end")} E</button>{segment.binary_label === "fall" && impact && <button onClick={() => jumpToRecordingTime(impact.time_ns)}>{tr("查看撞击", "View impact")}</button>}{segment.binary_label === "fall" && <button disabled={!canMutate} onClick={() => setSegmentImpact(segment)}>{impact ? tr("重设撞击", "Reset impact") : tr("设为撞击", "Set impact")}</button>}{segment.binary_label === "fall" && impact && <button disabled={!canMutate} onClick={() => clearSegmentImpact(segment.segment_id)}>{tr("清除撞击", "Clear impact")}</button>}<button disabled={!canMutate} onClick={() => removeSegment(segment.segment_id)}>{tr("删除标注", "Delete annotation")}</button></div>
                     </article>;
@@ -3449,9 +3468,9 @@ function AnnotationPage({ recordings, recordingsLoaded, taxonomy, session, parti
             {taskTab === "data" && review && <>
             {doc && <div className="panel compact-panel review-panel">
               <div className="panel-title">{tr("标注完成情况", "Annotation completeness")}</div>
-              <div className="coverage-track" aria-label={tr("标注覆盖时间轴", "Annotation coverage timeline")}>{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${seconds(segment.start_ns)} → ${seconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${seconds(item.start_ns)} → ${seconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, currentTime * 1e9 / durationNs * 100))}%` }} />}</div>
+              <div className="coverage-track" aria-label={tr("标注覆盖时间轴", "Annotation coverage timeline")}>{durationNs > 0 && doc.segments.map((segment) => <span key={segment.segment_id} className={`coverage-block coverage-${segment.binary_label}`} title={`${segment.segment_id} ${annotationSeconds(segment.start_ns)} → ${annotationSeconds(segment.end_ns)}`} style={{ left: `${segment.start_ns / durationNs * 100}%`, width: `${(segment.end_ns - segment.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && doc.exclusions.map((item) => <span key={item.exclusion_id} className="coverage-block coverage-exclude" title={`${exclusionLabels[item.reason]} ${annotationSeconds(item.start_ns)} → ${annotationSeconds(item.end_ns)}`} style={{ left: `${item.start_ns / durationNs * 100}%`, width: `${(item.end_ns - item.start_ns) / durationNs * 100}%` }} />)}{durationNs > 0 && <span className="coverage-cursor" style={{ left: `${Math.max(0, Math.min(100, annotationTimeNs / durationNs * 100))}%` }} />}</div>
               <div className={`coverage-summary ${uncoveredNs > 0 ? "warning-text" : "success-text"}`}>{uncoveredNs > 0 ? tr(`未覆盖 ${(uncoveredNs / 1e9).toFixed(3)} s`, `Uncovered: ${(uncoveredNs / 1e9).toFixed(3)} s`) : "全时间轴已覆盖"} · {fallWithoutImpactCount > 0 ? tr(`${fallWithoutImpactCount} 个跌倒缺少撞击`, `${fallWithoutImpactCount} falls missing impact`) : "所有跌倒均有撞击"} · {sync?.quality === "verified" ? "同步已验证" : "同步未验证"}</div>
-              {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.map((gap, index) => <button key={`${gap.start}-${gap.end}`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); jumpToRecordingTime(gap.start); setTaskTab("annotate"); }}>{tr("空白", "Uncovered ")}{index + 1} · {seconds(gap.start)}–{seconds(gap.end)}</button>)}</div>}
+              {coverageGaps.length > 0 && <div className="gap-list">{coverageGaps.map((gap, index) => <button key={`${gap.start}-${gap.end}`} title={`${gap.start}–${gap.end} ns`} onClick={() => { setMarks({ start: gap.start, end: gap.end }); jumpToRecordingTime(gap.start, true); setTaskTab("annotate"); }}>{tr("空白", "Uncovered ")}{index + 1} · {annotationSeconds(gap.start)}–{annotationSeconds(gap.end)}</button>)}</div>}
               {review?.workflow.state === "completed"
                 ? <div className="success-banner compact-banner">任务已完成；可在“数据”中下载当前导出，重开后才能修改。</div>
                 : <div className="save-row"><button className="primary" disabled={!canMutate || review?.participant_assignment.status !== "confirmed" || selectedRecording?.data_tier !== "prod" || uncoveredNs > 0 || fallWithoutImpactCount > 0 || sync?.quality !== "verified"} onClick={finalizeAndComplete}>完成标注并生成训练 H5</button></div>}
