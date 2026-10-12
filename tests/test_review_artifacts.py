@@ -49,6 +49,32 @@ def taxonomy() -> dict:
     }
 
 
+@pytest.mark.parametrize("offset_ns", [-1, 0, 1, 1_000_000])
+def test_interval_boundary_coverage_remains_exact(offset_ns: int) -> None:
+    """Frame preview rounding must never become a coverage tolerance."""
+    document = AnnotationDocument.model_validate({
+        "taxonomy_id": "fall_binary_v1",
+        "taxonomy_version": "1.0.0",
+        "finalized": True,
+        "exclusions": [{
+            "exclusion_id": "sync_start_guard", "start_ns": 0,
+            "end_ns": 6_600_000_000, "reason": "sync_tap", "annotator_id": "xfan0282",
+        }],
+        "segments": [{
+            "segment_id": "seg_077", "start_ns": 6_600_000_000 + offset_ns,
+            "end_ns": 10_568_000_000, "binary_label": "non_fall",
+            "activity_code": "walking", "annotator_id": "xfan0282",
+        }],
+    })
+    issues = validate_annotations(document, taxonomy(), 10_568_000_000)
+    if offset_ns == 0:
+        assert issues == []
+    elif offset_ns > 0:
+        assert any("uncovered interval" in issue for issue in issues)
+    else:
+        assert any("overlaps" in issue for issue in issues)
+
+
 def write_source_pair(tmp_path: Path, *, data_tier: str = "prod") -> tuple[Path, Path]:
     h5_path = tmp_path / "recording-1.h5"
     mkv_path = tmp_path / "recording-1.mkv"
