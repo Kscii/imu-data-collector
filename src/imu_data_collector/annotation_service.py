@@ -109,7 +109,7 @@ TRAINING_SNAPSHOT_SCHEMA_VERSION = "4.0.0"
 CLIENT_DELIVERY_JOB_SCHEMA_VERSION = "cw12eu_client_hdf5_job_v1"
 # Embedded videos can take longer than 15 minutes to download. Keep the URL
 # usable for subsequent range requests and retries during a long transfer.
-CLIENT_DELIVERY_SIGNED_URL_TTL = timedelta(hours=6)
+CLIENT_DELIVERY_SIGNED_URL_TTL = timedelta(minutes=30)
 SNAPSHOT_VIEW_SCHEMA_VERSION = "cw12eu_snapshot_view_v1"
 
 
