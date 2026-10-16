@@ -300,13 +300,26 @@ def _install_completed_review(app, store, tmp_path: Path, recording_id: str) -> 
             {
                 "imu_schema_version": "3.2.0",
                 "artifact_profile": "training_dataset",
+                "dataset_id": "cw12eu",
                 "sampling_rate_hz": 25.0,
                 "evaluation_role": "training_only",
+                "axis_frame": "sensor_local",
+                "hdf5_compatibility": "1.14",
+                "feature_columns": json.dumps([
+                    "acceleration_x_mps2", "acceleration_y_mps2", "acceleration_z_mps2",
+                    "angular_velocity_x_rad_s", "angular_velocity_y_rad_s",
+                    "angular_velocity_z_rad_s",
+                ]),
+                "sequence_count": len(sequences),
+                "sample_count": len(values),
+                "annotation_count": len(annotations),
                 "logical_content_sha256": logical_digest,
                 "grid_origin_recording_time_ns": 0,
             }
         )
-        handle.create_dataset("samples", data=values)
+        samples = handle.create_dataset("samples", data=values)
+        samples.attrs["columns"] = handle.attrs["feature_columns"]
+        samples.attrs["units"] = json.dumps(["m/s^2"] * 3 + ["rad/s"] * 3)
         handle.create_dataset("sequences", data=sequences)
         handle.create_dataset("annotations", data=annotations)
     digest = sha256_file(aligned)

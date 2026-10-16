@@ -13,12 +13,14 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from imu_data_collector.client_hdf5 import validate_training_hdf5
 from imu_data_collector.config import ImuSettings
 from imu_data_collector.cw12eu import calibrate_counts
 from imu_data_collector.hdf5_store import sha256_file
 from imu_data_collector.logical_content import logical_content_sha256
 from imu_data_collector.models import (
     BinaryLabel,
+    ExclusionReason,
     ReviewDocument,
     ReviewWorkflowState,
 )
@@ -230,7 +232,13 @@ def _annotation_rows(
             interval_rows[-1] = (0, kind, previous[2], stop, code)
         else:
             interval_rows.append((0, kind, start, stop, code))
-    rows.extend(interval_rows)
+    # Map only after interval construction: distinct detailed reasons must not
+    # collapse adjacent exclusion boundaries when both become ``other``.
+    for sequence_index, kind, start, stop, code in interval_rows:
+        if kind == "exclude":
+            reason = ExclusionReason(code)  # Unknown reasons remain errors.
+            code = "sync_tap" if reason == ExclusionReason.SYNC_TAP else "other"
+        rows.append((sequence_index, kind, start, stop, code))
 
     for event in document.annotations.events:
         relative_ns = event.time_ns - grid_origin_ns
@@ -270,26 +278,8 @@ def _logical_digest(
 
 
 def validate_training_export_logical_content(path: Path) -> str:
-    """Recompute and return the canonical logical digest of one training H5."""
-
-    with h5py.File(path, "r") as handle:
-        if (
-            str(handle.attrs.get("imu_schema_version", "")) != TRAINING_SCHEMA_VERSION
-            or str(handle.attrs.get("artifact_profile", ""))
-            != TRAINING_ARTIFACT_PROFILE
-            or float(handle.attrs.get("sampling_rate_hz", 0.0)) != TARGET_RATE_HZ
-            or str(handle.attrs.get("evaluation_role", "")) != "training_only"
-        ):
-            raise ValueError(f"训练导出合同不匹配：{path}")
-        expected = str(handle.attrs.get("logical_content_sha256", ""))
-        actual = _logical_digest(
-            np.asarray(handle["samples"], dtype=np.float32),
-            np.asarray(handle["sequences"]),
-            np.asarray(handle["annotations"]),
-        )
-    if expected != actual:
-        raise ValueError(f"训练导出 logical_content_sha256 不匹配：{path}")
-    return actual
+    """Validate the full 3.2 contract, including the canonical logical digest."""
+    return validate_training_hdf5(path)
 
 
 def merge_training_exports(
@@ -305,6 +295,7 @@ def merge_training_exports(
     sample_offset = 0
     sequence_offset = 0
     for _participant_id, _recording_id, path in sorted(files):
+        validate_training_export_logical_content(path)
         with h5py.File(path, "r") as source:
             if (
                 str(source.attrs.get("imu_schema_version", "")) != TRAINING_SCHEMA_VERSION
@@ -424,6 +415,7 @@ def merge_training_exports(
             output["annotations"].attrs["point_semantics"] = (
                 "onset/impact have start_sample == stop_sample"
             )
+        validate_training_export_logical_content(temporary)
         temporary.replace(output_path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -611,6 +603,7 @@ def export_aligned(
                     "axis_frame": "sensor_local",
                 }
             )
+        validate_training_export_logical_content(temporary)
         temporary.replace(output_path)
     finally:
         temporary.unlink(missing_ok=True)

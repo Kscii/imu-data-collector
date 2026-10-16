@@ -338,6 +338,15 @@ def _validate_core(
     return values, sequence_rows, annotation_rows
 
 
+def validate_training_hdf5(path: Path) -> str:
+    """Validate the same strict 3.2 core used by client deliveries."""
+    with h5py.File(path, "r") as handle:
+        if set(handle.keys()) != {"samples", "sequences", "annotations"}:
+            raise ValueError("训练 H5 根结构必须为三张核心表")
+        _validate_core(handle, expected_profile=TRAINING_ARTIFACT_PROFILE)
+        return _text(handle.attrs["logical_content_sha256"])
+
+
 def _timing_mapping(view: dict[str, Any], sample_count: int) -> np.ndarray:
     frames = view.get("video_frames") or {}
     recording_times = np.asarray(frames.get("recording_time_ns", []), dtype=np.int64)

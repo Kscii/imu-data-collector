@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from imu_data_collector.annotation_api import create_annotation_app
+from imu_data_collector.artifacts import _logical_digest, validate_training_export_logical_content
 from imu_data_collector.config import (
     AnnotationSettings,
     Settings,
@@ -46,11 +47,13 @@ from imu_data_collector.models import (
     CaptureManifestV2,
     DataTier,
     DeviceConfigurationReference,
+    ExclusionInterval,
     ReviewWorkflowState,
     SensorReference,
     SyncAnchor,
     SyncDocument,
 )
+from imu_data_collector.review import ReviewConflictError
 from imu_data_collector.storage import LocalFilesystemStore, ObjectConflictError
 
 
@@ -657,6 +660,102 @@ def test_admin_can_explicitly_reexport_completed_legacy_training_artifact(
     assert current.active_export.hdf5_schema_version == "3.2.0"
     assert current.active_export.object_key != previous_object
     assert store.stat(previous_object) is not None
+
+
+@pytest.mark.parametrize("concurrent_edit", [False, True])
+def test_reexport_repairs_32_exclusions_with_scoped_preflight_and_revision_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, concurrent_edit: bool,
+) -> None:
+    settings = _settings(tmp_path)
+    store = LocalFilesystemStore(settings.storage.root)
+    recording_id = _publish_calibrated_recording(settings, store, tmp_path)
+    service = create_annotation_app(settings, store).state.annotation_service
+    service.refresh()
+    _ready_review(service, recording_id)
+    manifest = service.required_manifest(recording_id)
+    review, generation = service.reviews.load(manifest)
+    review.annotations.segments[0].end_ns = 1_000_000_000
+    review.annotations.exclusions = [ExclusionInterval(
+        exclusion_id="quality", start_ns=1_000_000_000, end_ns=2_000_000_000,
+        reason="quality_issue", annotator_id="xfan0282",
+    )]
+    store.write_json(service.reviews.key(recording_id), review.model_dump(mode="json"),
+                     if_generation_match=generation)
+    completed = service.update_workflow(
+        recording_id, AnnotationReviewWorkflowRequest(
+            action="complete", expected_revision=review.revision,
+        ), "xfan0282",
+    )
+    original = completed.active_export
+    assert original is not None
+    legacy_path = tmp_path / "legacy.h5"
+    store.download_file(original.object_key, legacy_path)
+    with h5py.File(legacy_path, "r+") as handle:
+        rows = np.asarray(handle["annotations"])
+        rows[-1]["code"] = "quality_issue"
+        handle["annotations"][:] = rows
+        digest = _logical_digest(
+            np.asarray(handle["samples"]), np.asarray(handle["sequences"]), rows,
+        )
+        handle.attrs["logical_content_sha256"] = digest
+    legacy = original.model_copy(update={
+        "object_key": "exports/legacy-detailed-32.h5", "sha256": sha256_file(legacy_path),
+        "logical_content_sha256": digest, "size_bytes": legacy_path.stat().st_size,
+    })
+    store.put_file(legacy_path, legacy.object_key, content_type="application/x-hdf5",
+                   metadata={"sha256": legacy.sha256, "logical_content_sha256": digest})
+    before = service.reviews.mutate(
+        manifest, completed.revision,
+        lambda current: current.model_copy(update={"active_export": legacy}),
+    )
+    with pytest.raises(ValueError, match="exclude code"):
+        validate_training_export_logical_content(legacy_path)
+    for scope in (set(), {recording_id, "missing"}):
+        with pytest.raises(ValueError):
+            service.reexport_completed_training(
+                actor_id="xfan0282", apply=True, recording_ids=scope,
+            )
+        with pytest.raises(ValueError):
+            service.create_training_snapshot("xfan0282", recording_ids=scope)
+    assert service.review(recording_id).revision == before.revision
+    preview = service.reexport_completed_training(actor_id="xfan0282", recording_ids={recording_id})
+    assert [item["status"] for item in preview["recordings"]] == ["ready"]
+    with pytest.raises(ValueError, match="显式重导"):
+        service.create_training_snapshot("xfan0282", recording_ids={recording_id})
+    if concurrent_edit:
+        build = service._build_training_export
+        def race(*args, **kwargs):
+            result = build(*args, **kwargs)
+            current = service.review(recording_id)
+            service.reviews.mutate(manifest, current.revision, lambda item: item)
+            return result
+        monkeypatch.setattr(service, "_build_training_export", race)
+        with pytest.raises(ReviewConflictError):
+            service.reexport_completed_training(
+                actor_id="xfan0282", apply=True, recording_ids={recording_id},
+            )
+        assert service.review(recording_id).active_export == legacy
+        return
+    result = service.reexport_completed_training(
+        actor_id="xfan0282", apply=True, recording_ids={recording_id},
+    )
+    assert result["recordings"][0]["status"] == "reexported"
+    after = service.review(recording_id)
+    assert after.annotations == before.annotations
+    assert after.sync == before.sync
+    assert after.workflow == before.workflow
+    assert after.revision == before.revision + 1
+    assert after.active_export is not None
+    assert after.active_export.object_key != legacy.object_key
+    assert store.stat(legacy.object_key) is not None
+    repeated = service.reexport_completed_training(
+        actor_id="xfan0282", apply=True, recording_ids={recording_id},
+    )
+    assert repeated["recordings"][0]["status"] == "current"
+    assert service.review(recording_id).revision == after.revision
+    snapshot = service.create_training_snapshot("xfan0282", recording_ids={recording_id})
+    assert snapshot["recording_count"] == 1
+    assert store.stat("benchmark-datasets/team/cw12eu/current.json") is None
 
 
 def test_manifest_calibration_must_match_server_evidence(tmp_path: Path) -> None:

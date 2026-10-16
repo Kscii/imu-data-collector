@@ -25,6 +25,8 @@ from imu_data_collector.models import (
     AnnotationEvent,
     BinaryLabel,
     EventKind,
+    ExclusionInterval,
+    ExclusionReason,
     ReviewDocument,
     ReviewWorkflow,
     ReviewWorkflowState,
@@ -266,6 +268,49 @@ def test_training_export_rejects_legacy_flat_table_digest(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="logical_content_sha256"):
         validate_training_export_logical_content(output)
+
+
+@pytest.mark.parametrize("reason", list(ExclusionReason))
+def test_training_export_maps_detailed_exclusions_without_changing_review(
+    tmp_path: Path, reason: ExclusionReason,
+) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    review = completed_review(h5_path, mkv_path)
+    review.annotations.segments[0].end_ns = 1_000_000_000
+    review.annotations.exclusions = [ExclusionInterval(
+        exclusion_id="exclude_001", start_ns=1_000_000_000, end_ns=2_000_000_000,
+        reason=reason, annotator_id="xfan0282",
+    )]
+    before = review.model_dump(mode="json")
+    output = export_aligned(
+        review, h5_path, mkv_path, tmp_path / "aligned.h5",
+        ImuSettings(accel_counts_per_g=4090.0, gyro_counts_per_dps=16.4), taxonomy(),
+    )
+    assert review.model_dump(mode="json") == before
+    with h5py.File(output, "r") as handle:
+        row = handle["annotations"][-1]
+        assert row["kind"] == b"exclude"
+        assert (row["start_sample"], row["stop_sample"]) == (25, 50)
+        assert row["code"] == (b"sync_tap" if reason == ExclusionReason.SYNC_TAP else b"other")
+    validate_training_export_logical_content(output)
+
+
+def test_mapping_preserves_adjacent_different_exclusion_boundaries(tmp_path: Path) -> None:
+    h5_path, mkv_path = write_source_pair(tmp_path)
+    review = completed_review(h5_path, mkv_path)
+    review.annotations.segments = []
+    review.annotations.exclusions = [ExclusionInterval(
+        exclusion_id=f"exclude_{index}", start_ns=index * 1_000_000_000,
+        end_ns=(index + 1) * 1_000_000_000, reason=reason, annotator_id="xfan0282",
+    ) for index, reason in enumerate((ExclusionReason.SETUP, ExclusionReason.QUALITY_ISSUE))]
+    rows = _annotation_rows(review, 0, 50)
+    assert list(rows["code"]) == ["other", "other"]
+    assert list(zip(rows["start_sample"], rows["stop_sample"], strict=True)) == [(0, 25), (25, 50)]
+    with pytest.raises(ValueError):
+        ExclusionInterval(
+            exclusion_id="unknown", start_ns=0, end_ns=1,
+            reason="future_unknown", annotator_id="xfan0282",
+        )
 
 
 def test_fall_onset_is_derived_from_segment_start_and_impact_is_preserved(

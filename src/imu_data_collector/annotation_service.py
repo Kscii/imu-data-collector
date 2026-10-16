@@ -2071,11 +2071,41 @@ class AnnotationService:
             raise ValueError("当前训练导出对象与 review.json 不一致")
         return reference, info
 
+    def _selected_training_manifests(
+        self, recording_ids: set[str] | None
+    ) -> list[CaptureManifestV2]:
+        """Preflight an explicit maintenance scope before publishing any objects."""
+        manifests = list(self.catalog.list())
+        if recording_ids is None:
+            return manifests
+        if not recording_ids:
+            raise ValueError("指定的录制集合不能为空")
+        by_id = {item.recording_id: item for item in manifests}
+        missing = recording_ids - by_id.keys()
+        if missing:
+            raise ValueError("指定录制不存在：" + "、".join(sorted(missing)))
+        selected = [by_id[recording_id] for recording_id in sorted(recording_ids)]
+        for manifest in selected:
+            try:
+                payload, _generation = self.store.read_json(
+                    self.reviews.key(manifest.recording_id)
+                )
+            except FileNotFoundError as error:
+                raise ValueError(f"指定录制缺少 review：{manifest.recording_id}") from error
+            review = ReviewDocument.model_validate(payload)
+            if (
+                manifest.data_tier.value != "prod"
+                or review.workflow.state != ReviewWorkflowState.COMPLETED
+            ):
+                raise ValueError(f"指定录制不是已完成正式录制：{manifest.recording_id}")
+        return selected
+
     def reexport_completed_training(
         self,
         *,
         actor_id: str,
         apply: bool = False,
+        recording_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """将已完成正式录制的派生训练制品重导为当前合同。
 
@@ -2088,11 +2118,13 @@ class AnnotationService:
             raise ValueError("只有管理员可以批量重导训练制品")
         results: list[dict[str, Any]] = []
         with self._release_delete_lock:
-            for manifest in self.catalog.list():
+            for manifest in self._selected_training_manifests(recording_ids):
                 if manifest.data_tier.value != "prod":
                     continue
                 review, _generation = self.reviews.load(manifest)
                 if review.workflow.state != ReviewWorkflowState.COMPLETED:
+                    if recording_ids is not None:
+                        raise ReviewConflictError(f"指定录制已被重开：{manifest.recording_id}")
                     continue
                 previous = review.active_export
                 previous_is_current = False
@@ -2484,7 +2516,9 @@ class AnnotationService:
             "_view": view,
         }
 
-    def create_training_snapshot(self, actor_id: str) -> dict[str, Any]:
+    def create_training_snapshot(
+        self, actor_id: str, *, recording_ids: set[str] | None = None
+    ) -> dict[str, Any]:
         """冻结点击时的已完成 prod 集合，并按内容幂等生成训练快照。"""
 
         self._require_allowed_actor(actor_id)
@@ -2492,7 +2526,7 @@ class AnnotationService:
             files: list[tuple[str, str, Path]] = []
             recordings: list[dict[str, Any]] = []
             incompatible_recordings: list[str] = []
-            for manifest in self.catalog.list():
+            for manifest in self._selected_training_manifests(recording_ids):
                 if manifest.data_tier.value != "prod":
                     continue
                 review, _generation = self.reviews.load(manifest)
@@ -2500,6 +2534,8 @@ class AnnotationService:
                     review.workflow.state != ReviewWorkflowState.COMPLETED
                     or review.active_export is None
                 ):
+                    if recording_ids is not None:
+                        raise ValueError(f"指定录制缺少已完成训练导出：{manifest.recording_id}")
                     continue
                 reference, info = self.active_export(manifest.recording_id)
                 if (
