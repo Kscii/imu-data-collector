@@ -1,9 +1,8 @@
 # IMU device registry and protocol integration
 
-> v0.3.0 已把运行权威迁移到完整的
-> [设备配置 Snapshot v2](device-configuration-v2.md)。本文仍保留协议接入与旧 v1 Git 输入的
-> 说明；`configs/imu-devices.yaml` 现在是生成安装包 bootstrap lock 的迁移输入，不再是团队
-> Current 或审批状态的唯一权威。
+> Runtime authority is the complete [device configuration snapshot](device-configuration-v2.md).
+> This guide also describes protocol onboarding and the legacy Git registry used
+> to generate the bootstrap lock; that registry alone does not define Current or approval.
 
 ## Identity model
 
@@ -18,7 +17,7 @@ platform-local CoreBluetooth UUID. SNs use `IMU-NNNN-RNN`:
 The Git bootstrap input is [`configs/imu-devices.yaml`](../configs/imu-devices.yaml), and its exact
 v2 migration is frozen in `configs/device-config-bootstrap.lock.json`. A capture freezes the
 selected configuration Snapshot/content hashes, `sensor_sn`, SI Profile ID and resolved device
-profile hash into HDF5 1.9. Manifest 3.2 repeats that reference.
+profile hash into HDF5 1.9. Configuration-bearing manifests 3.2/3.3 repeat that reference.
 
 There is no implicit default device. The capture UI must send a selectable SN before preview or
 recording starts; the backend rejects a missing, retired, or unknown SN before it opens BLE. A
@@ -39,7 +38,7 @@ unverified capture `values_si` remains NaN and raw packet bytes/counts remain au
 ## Local onboarding
 
 The capture page can scan recognized advertisements. New permanent SNs and revisions are reserved
-centrally from the “设备与设置” page, then added to the local v2 workspace. Local immutable
+centrally from the **Devices and settings** page, then added to the local v2 workspace. Local immutable
 Snapshots and team candidates are test-only until an administrator approves the team Snapshot.
 
 A local or candidate Snapshot can be used for protocol verification and test capture. Candidate

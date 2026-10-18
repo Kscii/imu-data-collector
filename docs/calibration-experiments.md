@@ -91,9 +91,9 @@ six housing descriptions and report hash accompany the candidate. It stays
 `verified=false`, with only `test` data allowed. Existing configuration review and
 activation remain explicit later actions.
 
-## Share with the team
+## Publish an experiment
 
-Sign in using the existing team Google account and select **Upload experiment**.
+Sign in using the existing allowlisted Google account and select **Upload experiment**.
 The desktop sends raw H5 files and one report JSON through the upload broker.
 After verifying byte sizes and SHA-256 hashes, the broker publishes the manifest.
 The signed-in uploader and the experiment operator are recorded separately.
@@ -124,5 +124,5 @@ and [A Simple Calibration for MEMS Gyros](https://www.analog.com/media/en/techni
 Automated tests use simulated data and do not establish physical sensor accuracy.
 For each target OS, record installer version, host/OS, BLE connection, six-channel
 sample reception, completed raw H5, report generation and upload/download results
-when a teammate performs the first hardware experiment. Windows and both macOS
+when an operator performs the first hardware experiment. Windows and both macOS
 architectures require that physical check; no such result is claimed by this guide.
