@@ -31,7 +31,6 @@ import {
 import {
   apiErrorMessage,
   isEnglish,
-  localizedField,
   tr,
   useDocumentLocalization,
   userVisibleMessage,
@@ -41,7 +40,7 @@ document.title = __APP_KIND__ === "annotation"
   ? tr("IMU 数据标注平台", "IMU Annotation Platform")
   : tr("IMU 数据采集", "IMU Data Capture");
 
-type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "external" | "calibration" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
+type AppTab = "capture" | "settings" | "deviceConfig" | "characterize" | "annotate" | "synthetic" | "data" | "external" | "taxonomy" | "library" | "datasets" | "models" | "delivery";
 type AnnotationTaskTab = "sync" | "annotate" | "data" | "manage";
 
 const CAPTURE_FORM_KEY = "imu-capture-form-v1";
@@ -81,7 +80,7 @@ function nextCollectionId(current: string) {
 function initialTab(annotationApplication: boolean): AppTab {
   const view = new URLSearchParams(location.search).get("view");
   const mapping: Record<string, AppTab> = annotationApplication
-    ? { annotate: "annotate", synthetic: "synthetic", data: "data", external: "external", calibration: "calibration", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
+    ? { annotate: "annotate", synthetic: "synthetic", data: "data", external: "external", calibration: "deviceConfig", deviceConfig: "deviceConfig", taxonomy: "taxonomy", training: "library", datasets: "datasets", models: "models", delivery: "delivery" }
     : { capture: "capture", records: "library", settings: "settings", diagnostics: "characterize" };
   return (view && mapping[view]) || (annotationApplication ? "annotate" : "capture");
 }
@@ -142,68 +141,6 @@ type BackgroundJob = {
   total_bytes?: number;
   next_attempt_at_utc?: string | null;
   last_error?: string | null;
-};
-
-type CalibrationEvidence = {
-  schema_version: string;
-  profile_id: string;
-  device: { name: string; address: string; scope_zh: string; scope_en: string };
-  coordinate_system: {
-    x_positive_zh: string;
-    x_positive_en: string;
-    y_positive_zh: string;
-    y_positive_en: string;
-    z_positive_zh: string;
-    z_positive_en: string;
-    handedness: string;
-  };
-  calibration: {
-    accel_counts_per_g: number;
-    gyro_counts_per_dps: number;
-    accel_bias_counts_raw: number[];
-    gyro_bias_counts_raw: number[];
-    raw_axis_order: number[];
-    axis_signs: number[];
-    status: string;
-    conclusion_zh: string;
-    conclusion_en: string;
-  };
-  evidence: {
-    recording_id: string;
-    kind: string;
-    setup_zh: string;
-    setup_en: string;
-    expected_zh: string;
-    expected_en: string;
-    observed_zh: string;
-    observed_en: string;
-    available: boolean;
-  }[];
-};
-
-type CalibrationEvidenceAnalysis = {
-  recording_id: string;
-  video: {
-    frame_count: number;
-    recording_time_ns: number[];
-    media_time_ns: number[];
-  };
-  imu: {
-    sample_index: number[];
-    time_ns: number[];
-    time_s: number[];
-    raw_counts: number[][];
-    values_si: number[][];
-    trailer: number[][];
-    frame_hex: string[];
-  };
-  conversion: {
-    available: boolean;
-    source: "runtime_authoritative_profile";
-    profile_id: string | null;
-    evidence_sha256: string | null;
-    error: string | null;
-  };
 };
 
 type Segment = {
@@ -1088,7 +1025,20 @@ export default function App() {
   };
 
   useEffect(() => {
-    const onPopState = () => setTab(initialTab(annotationApplication));
+    const normalizeRetiredView = () => {
+      const url = new URL(location.href);
+      if (!annotationApplication || url.searchParams.get("view") !== "calibration") return;
+      const language = url.searchParams.get("lang");
+      url.search = "?view=deviceConfig";
+      url.hash = "";
+      if (language !== null) url.searchParams.set("lang", language);
+      history.replaceState(history.state, "", url);
+    };
+    const onPopState = () => {
+      normalizeRetiredView();
+      setTab(initialTab(annotationApplication));
+    };
+    normalizeRetiredView();
     window.addEventListener("popstate", onPopState);
     const url = new URL(location.href);
     if (!url.searchParams.has("view")) {
@@ -1403,7 +1353,7 @@ export default function App() {
         <div className={`state state-${liveFresh ? live.state : "reconnecting"}`}>{annotationApplication ? session ? `${tr("当前登录", "Signed in as")} ${session.unikey}` : tr("正在验证身份", "Verifying identity") : !liveFresh ? tr("实时通道重连中", "Live channel reconnecting") : live.session_type === "devices_preview" ? tr("设备预览", "Device preview") : stateLabel(live.state)}</div>
       </header>
       <nav className={annotationApplication && (tab === "annotate" || tab === "synthetic" || tab === "data" || tab === "external") ? "workbench-nav" : ""}>
-        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_enabled && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}{config.synthetic_target === "dev" ? tr(" · 测试", " · Test") : ""}</button>}<button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>{tr("数据管理", "Data management")}</button>{config?.can_view_external_devices && <button className={tab === "external" ? "active" : ""} onClick={() => selectTab("external")}>{tr("外部设备数据", "External device data")}</button>}<button className={tab === "calibration" ? "active" : ""} onClick={() => selectTab("calibration")}>{tr("设备校准证据", "Calibration evidence")}</button><button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
+        {annotationApplication ? <><button className={tab === "annotate" ? "active" : ""} onClick={() => selectTab("annotate")}>{tr("标注与同步", "Annotation & sync")}</button>{config?.synthetic_enabled && <button className={tab === "synthetic" ? "active" : ""} onClick={() => selectTab("synthetic")}>{tr("合成运动", "Synthetic motion")}{config.synthetic_target === "dev" ? tr(" · 测试", " · Test") : ""}</button>}<button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>{tr("数据管理", "Data management")}</button>{config?.can_view_external_devices && <button className={tab === "external" ? "active" : ""} onClick={() => selectTab("external")}>{tr("外部设备数据", "External device data")}</button>}<button className={tab === "deviceConfig" ? "active" : ""} onClick={() => selectTab("deviceConfig")}>{tr("设备配置", "Device configuration")}</button><button className={tab === "taxonomy" ? "active" : ""} onClick={() => selectTab("taxonomy")}>{tr("标签管理", "Label management")}</button><button className={tab === "library" ? "active" : ""} onClick={() => selectTab("library")}>{tr("训练快照", "Training snapshots")}</button><button className={tab === "datasets" ? "active" : ""} onClick={() => selectTab("datasets")}>{tr("数据集", "Datasets")}</button>{config?.can_view_models && <button className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>{tr("模型", "Models")}</button>}</> : <>
           <button className={tab === "capture" ? "active" : ""} onClick={() => selectTab("capture")}>{tr("采集", "Capture")}</button>
           <button className={tab === "library" ? "active" : ""} onClick={() => { selectTab("library"); refreshRecordings(); }}>{tr("记录与发布", "Records & publishing")}</button>
           <button className={tab === "settings" || tab === "characterize" ? "active" : ""} onClick={() => selectTab("settings")}>{tr("设备与设置", "Devices & settings")}</button>
@@ -1475,7 +1425,6 @@ export default function App() {
       {annotationApplication && tab === "external" && session && (config?.can_view_external_devices
         ? <ExternalDevicesPage isAdmin={session.is_admin} />
         : <section className="panel">{tr("外部设备数据尚未启用，或当前账号没有访问权限。", "External device data is disabled or unavailable to this account.")}</section>)}
-      {annotationApplication && tab === "calibration" && <CalibrationEvidencePage />}
       {annotationApplication && tab === "deviceConfig" && <CalibrationDeviceManagement canManage={Boolean(config?.can_manage_device_configuration)} />}
       {annotationApplication && tab === "taxonomy" && taxonomy && session && <LabelManagementWorkspace taxonomy={taxonomy} onChanged={setTaxonomy} isAdmin={session.is_admin} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
       {annotationApplication && tab === "library" && session && <TrainingSnapshotsPage session={session} syntheticEnabled={Boolean(config?.synthetic_enabled)} />}
@@ -1490,136 +1439,6 @@ export default function App() {
       />}
     </div>
   );
-}
-
-function CalibrationEvidencePage() {
-  const [profile, setProfile] = useState<CalibrationEvidence | null>(null);
-  const [selected, setSelected] = useState("");
-  const [analysis, setAnalysis] = useState<CalibrationEvidenceAnalysis | null>(null);
-  const [analysisError, setAnalysisError] = useState("");
-  const [currentTime, setCurrentTime] = useState(0);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const video = useRef<HTMLVideoElement>(null);
-
-  useEffect(() => {
-    api<CalibrationEvidence>("/api/v1/calibration-evidence")
-      .then((value) => {
-        setProfile(value);
-        setSelected(value.evidence.find((item) => item.available)?.recording_id ?? "");
-      })
-      .catch((value) => setError((value as Error).message));
-  }, []);
-
-  useEffect(() => {
-    if (!selected) return;
-    const controller = new AbortController();
-    setAnalysis(null);
-    setAnalysisError("");
-    setCurrentTime(0);
-    api<CalibrationEvidenceAnalysis>(`/api/v1/calibration-evidence/${selected}/analysis`, { signal: controller.signal })
-      .then(setAnalysis)
-      .catch((value) => {
-        if ((value as Error).name !== "AbortError") setAnalysisError((value as Error).message);
-      });
-    return () => controller.abort();
-  }, [selected]);
-
-  if (error) return <main><div className="error-banner">{userVisibleMessage(error)}</div></main>;
-  if (!profile) return <main><section className="panel">{tr("正在读取校准证据…", "Loading calibration evidence…")}</section></main>;
-  const current = profile.evidence.find((item) => item.recording_id === selected);
-  const copyId = async () => {
-    if (!current) return;
-    await navigator.clipboard.writeText(current.recording_id);
-    setMessage(tr(`已复制 ${current.recording_id}`, `Copied ${current.recording_id}`));
-  };
-  const selectRecordingTime = (time: number) => {
-    setCurrentTime(time);
-    if (!analysis || !video.current || !analysis.video.recording_time_ns.length) return;
-    const index = nearestIndex(
-      analysis.video.recording_time_ns,
-      Math.round(time * 1e9),
-    );
-    video.current.currentTime = analysis.video.media_time_ns[index] / 1e9;
-  };
-  const updateTimeFromVideo = () => {
-    if (!analysis || !video.current || !analysis.video.media_time_ns.length) return;
-    const index = nearestIndex(
-      analysis.video.media_time_ns,
-      Math.round(video.current.currentTime * 1e9),
-    );
-    setCurrentTime(analysis.video.recording_time_ns[index] / 1e9);
-  };
-  const currentSample = analysis
-    ? nearestIndex(analysis.imu.time_s, currentTime)
-    : -1;
-  const rawRow = currentSample >= 0 ? analysis?.imu.raw_counts[currentSample] ?? [] : [];
-  const siRow = currentSample >= 0 ? analysis?.imu.values_si[currentSample] ?? [] : [];
-  return <main>
-    {message && <div className="success-banner">{message}</div>}
-    <section className="panel">
-      <div className="panel-title">设备专属工程校准档案</div>
-      <p><strong>{profile.profile_id}</strong> · {profile.device.name} · {profile.device.address}</p>
-      <p className="stage-help">{localizedField(profile.device, "scope")}</p>
-      <div className="status-grid">
-        <span>加速度尺度 {profile.calibration.accel_counts_per_g} counts/g</span>
-        <span>角速度尺度 {profile.calibration.gyro_counts_per_dps} counts/(°/s)</span>
-        <span>{tr("原始加速度零偏 [", "Raw accelerometer bias [")}{profile.calibration.accel_bias_counts_raw.join(", ")}]</span>
-        <span>{tr("原始角速度零偏 [", "Raw gyroscope bias [")}{profile.calibration.gyro_bias_counts_raw.join(", ")}]</span>
-      </div>
-      <p>{localizedField(profile.calibration, "conclusion")}</p>
-      <p className="stage-help">{tr("目标右手坐标系", "Target right-handed coordinate system")}：+X {localizedField(profile.coordinate_system, "x_positive")}；+Y {localizedField(profile.coordinate_system, "y_positive")}；+Z {localizedField(profile.coordinate_system, "z_positive")}。</p>
-    </section>
-    <section className="annotation-layout calibration-layout">
-      <aside className="panel calibration-evidence-sidebar">
-        <div className="panel-title">{tr(`证据录制（${profile.evidence.length}）`, `Evidence recordings (${profile.evidence.length})`)}</div>
-        <div className="calibration-evidence-list">
-          {profile.evidence.map((item) => <button key={item.recording_id} className={selected === item.recording_id ? "selected" : ""} disabled={!item.available} onClick={() => setSelected(item.recording_id)}><strong>{item.kind === "accel_static_face" ? "六面静态" : item.kind === "gyro_rotation" ? "360° 旋转" : "动态校验"}</strong><span>{item.recording_id}</span><span>{item.available ? "证据可用" : "制品缺失"}</span></button>)}
-        </div>
-      </aside>
-      <section className="calibration-evidence-detail">
-        {current && <>
-          <div className="panel calibration-video">
-            <div className="panel-title">{tr("证据视频 · 与两条 IMU 曲线共享时间轴", "Evidence video · shared timeline with both IMU plots")}</div>
-            <video ref={video} key={current.recording_id} controls preload="metadata" src={`/api/v1/calibration-evidence/${current.recording_id}/video`} onTimeUpdate={updateTimeFromVideo} onSeeked={updateTimeFromVideo} />
-          </div>
-          {analysisError && <div className="error-banner">{userVisibleMessage(analysisError)}</div>}
-          {!analysis && !analysisError && <div className="panel">{tr("正在读取证据时间轴…", "Loading evidence timeline…")}</div>}
-          {analysis && <>
-            <div className="panel calibration-plot-panel">
-              <div className="panel-title">{tr("完整证据 IMU · 原始计数（不可变）", "Full evidence IMU · raw counts (immutable)")}</div>
-              <Plot time={analysis.imu.time_s} values={analysis.imu.raw_counts} cursorTime={currentTime} controlledCursor height={250} onSelectTime={selectRecordingTime} />
-            </div>
-            <div className="panel calibration-plot-panel">
-              <div className="panel-title">{tr("完整证据 IMU · SI（按当前权威校准档案即时推导）", "Full evidence IMU · SI (derived at view time using the current authoritative profile)")}</div>
-              {analysis.conversion.available
-                ? <Plot time={analysis.imu.time_s} values={analysis.imu.values_si} cursorTime={currentTime} controlledCursor height={250} onSelectTime={selectRecordingTime} />
-                : <div className="warning-banner">{tr("SI 暂不可用；原始计数和视频仍可复核。", "SI is currently unavailable; raw counts and video remain available for review.")} {userVisibleMessage(analysis.conversion.error)}</div>}
-            </div>
-            <div className="panel calibration-sample-detail">
-              <div className="panel-title">{tr("当前样本精确值", "Exact values at current sample")}</div>
-              <div className="calibration-sample-grid">
-                <span><strong>{tr("录制时间", "Recording time")}</strong>{currentSample >= 0 ? `${analysis.imu.time_s[currentSample].toFixed(6)} s` : "—"}</span>
-                <span><strong>{tr("样本序号", "Sample index")}</strong>{currentSample >= 0 ? analysis.imu.sample_index[currentSample] : "—"}</span>
-                <span className="calibration-hex"><strong>{tr("BLE 帧（HEX）", "BLE frame (HEX)")}</strong><code>{currentSample >= 0 ? analysis.imu.frame_hex[currentSample] : "—"}</code></span>
-                <span><strong>{tr("原始计数", "Raw counts")}</strong><code>{rawRow.length ? rawRow.map((value, index) => `${["a1", "a2", "a3", "g1", "g2", "g3"][index]}=${value}`).join(", ") : "—"}</code></span>
-                <span><strong>SI</strong><code>{siRow.length ? siRow.map((value, index) => `${["ax", "ay", "az", "gx", "gy", "gz"][index]}=${value.toFixed(6)}`).join(", ") : "—"}</code></span>
-              </div>
-              <p className="stage-help">{tr("原始计数和 HEX 来自不可变证据 H5；SI 不回写原文件，始终由页面所示的当前权威 profile 推导。", "Raw counts and HEX come from the immutable evidence H5. SI is never written back and is always derived from the current authoritative profile shown by this page.")}</p>
-            </div>
-          </>}
-          <div className="panel">
-            <div className="panel-title">已确认实验语义</div>
-            <p><strong>实验：</strong>{localizedField(current, "setup")}</p>
-            <p><strong>预期：</strong>{localizedField(current, "expected")}</p>
-            <p><strong>观测：</strong>{localizedField(current, "observed")}</p>
-            <div className="save-row"><button onClick={copyId}>复制录制 ID</button><a className="button-link" href={`/api/v1/calibration-evidence/${current.recording_id}/capture-h5/download`} download>下载原始 H5</a></div>
-            <p className="stage-help">本页只用于理解设备坐标、物理尺度与证据来源，不进入动作标注队列，也不生成训练样本。</p>
-          </div>
-        </>}
-      </section>
-    </section>
-  </main>;
 }
 
 function CapturePage(props: any) {
