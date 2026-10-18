@@ -1,8 +1,11 @@
-# 安全问题报告
+# Security policy
 
-请把安全问题私下发送到 `xuejian.fang.kscii@gmail.com`，不要先创建公开 Issue。
+Report security issues privately to `xuejian.fang.kscii@gmail.com` before opening
+a public issue. Include the affected version, reproduction steps, and impact.
 
-报告中请说明受影响版本、复现条件和可能影响。不要附带参与者视频、原始 H5、Google 登录
-令牌、IAP JWT、OAuth 凭据或 GCP 临时凭据；如确实需要样本，请先协商安全传输方式。
+Do not attach participant videos, raw recordings, login tokens, IAP JWTs, OAuth
+credentials, or cloud credentials. Arrange a private transfer first if a sample
+is necessary.
 
-本项目仍处于研究数据采集阶段，不提供医疗用途保证，也不应作为真实跌倒告警系统直接使用。
+This is research data collection software. It does not provide a medical-use
+guarantee or constitute a validated real-world fall alarm system.

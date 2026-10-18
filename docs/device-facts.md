@@ -1,50 +1,41 @@
-# CW12EU-T 设备事实与未知项
+# CW12EU-T protocol evidence
 
-本文使用三级证据标签：`已验证`、`供应商声称`、`工作假设`。只有可重复的设备/主机观测才升级为“已验证”。
+This reference preserves observations of the original CW12EU-T unit. Evidence
+labels distinguish verified observations, supplier claims, and working assumptions.
+The registry links to this path; its existence is not a claim of current hardware
+availability or support for all devices sold under the same name.
 
-## 当前事实表
+| Property | Observation | Evidence boundary |
+| --- | --- | --- |
+| Advertised name | `CW12EU-T` | Observed; not a unique identity |
+| BLE address | `83:FC:90:14:1E:A4` | Original physical unit only |
+| Data notification | `0x2AE1` under service `0x18E0` | Verified with Bleak |
+| Sample payload | 400 bytes, 25 frames of 16 bytes | Verified on this unit |
+| Frame | Six big-endian int16 counts plus four trailer bytes | Six-axis interpretation verified; trailer meaning unknown |
+| Sampling | Approximately 25 Hz in probes and two ten-minute static runs | Supplier claimed 30 Hz; no 30-minute acceptance claim |
+| Acceleration | `[raw_ax, -raw_ay, raw_az]`, 4096 counts/g | Six-face engineering calibration |
+| Angular velocity | Same mapping, 32.8 counts/(degree/s) | Multi-axis manual rotation evidence |
+| Radio platform | Evidence suggests JL701N | Does not identify board vendor, MEMS, or firmware author |
 
-| 项目 | 当前值 | 证据状态 | 含义 |
-|---|---|---|---|
-| 广播名 | CW12EU-T | 已验证（手机 nRF Connect） | 用于发现，不保证唯一性 |
-| BLE 地址 | `83:FC:90:14:1E:A4` | 已验证（当前样机） | 可能受地址随机化或换机影响 |
-| 手机发现的 GATT 服务 | `0x1800`、`0x18E0`、`0x180D`、`0xAE00` | 已验证（手机 nRF Connect） | 2026-08-25 手工连接后可见 |
-| 通知特征 | `0x2AE1` | 已验证（电脑 Bleak） | 400-byte 通知可拆为 25 个 16-byte 候选帧 |
-| BLE 平台 | 珠海杰理 JL701N | 已有设备信息支持，仍需保存原始证据 | 说明无线 SoC/平台，不等同于整板或 MEMS 来源 |
-| IMU 频率 | 多次短测与两次 10 分钟静态约 25 Hz；供应商称 30 Hz | 工程实测已稳定，仍缺 30 分钟连续验收 | 原始层按实际时间戳保存，不强制成 30 Hz |
-| 候选帧长度 | 16 byte | 已验证（当前样机） | 400-byte 通知稳定无余数拆为每包 25 帧 |
-| 候选帧布局 | 6×big-endian `int16` + 4 byte trailer | 六轴已验证；trailer 未知 | 六轴映射和工程比例已冻结，尾部继续无损保存 |
-| 加速度工程校准 | `[raw_ax, -raw_ay, raw_az]`；4096 counts/g | 六面静止验证（当前样机） | profile 只适用于地址 `83:FC:90:14:1E:A4` |
-| 陀螺仪工程校准 | 同轴映射；32.8 counts/(°/s) | 八次三轴约 360° 旋转验证（当前样机） | 不是实验室可溯源校准 |
-| 协议文档 | `/home/kscii/Downloads/MFIMU.pdf` | 参考资料 | 不把它当成当前型号的权威规范 |
+The historical reference PDF had SHA-256
+`ad214ce70b7b89253886615675a3447d621625134437394364ded8008f61ddc8`.
+It is not an authoritative protocol specification for every similarly named device.
 
-参考 PDF 当前记录的 SHA-256 为 `ad214ce70b7b89253886615675a3447d621625134437394364ded8008f61ddc8`。后续如文件变化，应先确认来源再更新证据记录。
+## Connection behavior
 
-## 2026-08-25 连接诊断记录
+The device exposes both classic Bluetooth and BLE. A generic BlueZ connection
+can choose BR/EDR and expose only classic services. The exercised Linux path sets
+`PreferredBearer=le`, connects through the LE bearer, and then subscribes to GATT.
+The observed unit did not require bonding. `0x2AE1` is shown as a standard voltage
+UUID by some tools, but this device uses it as a vendor data channel; the registered
+UUID name does not explain its payload.
 
-- 手机 nRF Connect 已手工连接成功；界面显示 `CONNECTED`、`NOT BONDED`，说明当前样机可连接且不要求先绑定。
-- 电脑 BlueZ 5.87 可以连接相同地址，但通用 `Device1.Connect()` 为这个双模设备选择了 BR/EDR，随后只暴露串口、音频等经典蓝牙 UUID，没有 GATT 特征。
-- 本机 BlueZ 手册说明：双模设备两个承载时间相同时会优先 BR/EDR；启用 `bluetoothd --experimental` 后，已成功设置 `PreferredBearer=le` 并持久保留。
-- 电脑端实际 GATT 树包含：`0x18E0` 下的 `0x2AE0`（写）、`0x2AE1`（通知）、`0x2AE2`（读）；`0xAE00` 下的 `0xAE01`（写）、`0xAE02`（通知）；`0x180D` 下的 `0x2A37`（通知）。
-- 修正诊断计时后，`0x2AE1` 的独立 15.0016 秒复测收到 15 个 400-byte 包，共 375 个候选帧；估计样本率为 24.99979 Hz，包间隔中位数 999.986 ms、P95 1000.251 ms，无解析错误、无回调丢弃。长时测试前仍不得把它升级为最终规格。
-- Bleak 的通用 `Device1.Connect()` 仍可能在重连时回到 BR/EDR。正式代码不再依赖该选择：每次发现设备后先设置 `PreferredBearer=le`，调用 `org.bluez.Bearer.LE1.Connect()`，等待 Bleak 读取已连接 LE 设备的 GATT 服务。连续重连测试后，主机保持 `BREDR.Paired=no`、`BREDR.Bonded=no`、`PreferredBearer=le`。
-- BlueZ 将标准 UUID `0x2AE1` 显示为 “Average Voltage”，但当前设备显然把它用作厂商数据通道；名称来自 UUID 分配表，不能据此解释负载语义。
+A 15.0016-second probe received 15 notifications of 400 bytes: 375 sample frames,
+24.99979 Hz estimated, 999.986 ms median packet interval, and no parser errors or
+callback drops. These are historical measurements, not general device guarantees.
+The GATT tree also exposed `0x2AE0`/`0x2AE2`, service `0xAE00` with `0xAE01`/`0xAE02`,
+and `0x180D` with `0x2A37`; undocumented payloads remain raw evidence.
 
-## 对“是否由珠海杰理提供”的准确回答
-
-目前可以说：**设备的主 BLE SoC/无线方案很可能属于珠海杰理 JL701N 平台**。目前不能说：**整个主板和 IMU 驱动都是珠海杰理提供**。还缺少 PCB 丝印、BOM、MEMS 芯片识别、固件来源或供应商书面资料。JL701N 可能负责 BLE、封包和应用固件；实际六轴传感器及其寄存器驱动可能来自另一厂商。
-
-## 设备表征实验
-
-以下是复测或更换设备时仍应执行的流程。当前样机的六面和三轴工程校准已在 2026-08-26
-完成，详细坐标、参数、15 条证据和升级规则见
-[坐标系与工程校准档案](device-coordinate-system.md)。
-
-1. 手机断开并关闭自动重连，只让电脑建立单一 BLE 连接。
-2. 先做 30–60 分钟静止采集，记录通知包数量、每包候选帧数、包间隔、样本总量和断连。
-3. 六面静置：胸前坐标系的 `+X/-X/+Y/-Y/+Z/-Z` 各保持 10–20 秒，复核约 ±1 g 的轴和零偏。
-4. 分别绕三轴做清晰正反旋转，复核陀螺仪列、符号、积分角度和饱和范围。
-5. 在镜头可见范围做两次以上明显的拍击/快速动作，建立同步锚点并测漂移。
-6. 重启设备与电脑后复测，避免把一次会话的偶然状态当成协议。
-
-任何实验都应保存原始通知字节；如果解析假设被推翻，旧数据仍可重新解析。
+Use [Device integration](device-registry-and-protocols.md) for onboarding and
+[Coordinate system](device-coordinate-system.md) for the exact calibration profile.
+Do not apply these coefficients to the separate ABF2 device or a replacement unit.

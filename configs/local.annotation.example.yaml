@@ -1,0 +1,24 @@
+# Single-user annotation. Keep local authentication bound to loopback.
+activity_taxonomy_path: configs/activities.yaml
+calibration_evidence_path: configs/calibration-evidence.yaml
+device_registry_path: configs/imu-devices.yaml
+device_registry_auto_refresh: false
+default_sensor_sn: null
+identity:
+  allowed_unikeys: [localuser]
+  admins: [localuser]
+  email_to_unikey: {}
+  subject_ids: {}
+auth:
+  mode: local
+  local_actor_id: localuser
+annotation:
+  server_host: 127.0.0.1
+  server_port: 8766
+  catalog_path: ~/.local/share/imu-annotation-local/catalog.sqlite3
+storage:
+  backend: local
+  root: ~/IMUObjects
+  cache_root: ~/.cache/imu-annotation-local
+external_devices:
+  enabled: false

@@ -1,140 +1,118 @@
-# 正式同步与标注合同
+# Annotation and synchronization
 
-本文冻结当前团队标注版本的正式业务语义。原始 H5/MKV 是事实层；同步、标注与严格 25 Hz
-训练派生都必须可从事实层重新生成，不能反向覆盖原始数据。
+The annotation app reads published recordings. Raw H5/MKV/MP4 artifacts remain
+immutable; synchronization, labels, ownership, and the active export are stored
+in `review.json`.
 
-## 一次录制的首尾流程
+## Workflow
 
-1. 点击开始录制，确认视频帧和 IMU 样本均已实际增长。
-2. 轻拍一次 IMU 外壳；镜头必须看清手首次接触外壳。
-3. 等振动停止，再执行静止基线和计划动作。
-4. 动作完成后、设备仍佩戴稳定时，再轻拍一次外壳。
-5. 等振动停止后停止录制。
+1. Open a recording and claim the task. Another member can explicitly take ownership.
+2. In **Sync**, confirm the participant and select the start/end synchronization anchors.
+3. In **Annotate**, label activity and excluded intervals; mark each fall impact.
+4. In **Data**, resolve coverage gaps and validation errors, then complete the task.
+5. Download the resulting training export or include it in an immutable snapshot.
 
-不按设备功能键。若拍击看不清、设备松动或 BLE 在中途重连，本条可以保留为原始证据，但
-同步和训练资格必须进入人工复核。
+Only the current owner edits an active task. Completed recordings are read-only;
+the owner or an administrator can reopen them. Reopening clears the active-export
+pointer without changing old immutable exports or snapshots. The recording review
+stores its current revision and last editor, not a complete edit history.
 
-## 同步锚点的共同定义
+## Synchronization anchors
 
-- 视频锚点：手指首次接触 IMU 外壳的那一帧。
-- IMU 锚点：同一次轻拍造成的首个明显六轴响应样本。
-- 最大峰只帮助识别事件，不代表事件开始，不能默认作为正式锚点。
-- 每个锚点保存帧号、样本号、精确纳秒时间、前一帧/前一样本时间和复核者 UniKey。
+Pair the first video frame showing finger-to-housing contact with the first clear
+IMU response to the same tap. The largest peak is not necessarily the event start.
+Each anchor retains exact nanoseconds, source frame/sample indices, preceding
+frame/sample times, and reviewer identity. Discrete time intervals define a
+conservative uncertainty bound.
 
-由于事件真实发生时刻位于“前一项到选中项”之间，平台利用两个离散区间计算保守误差上界，
-而不是假装人工能得到亚帧真值。
-
-## 条件式固定偏移
-
-设 `d_start`、`d_end` 分别为开始和结束锚点的 `video_time - imu_time`：
+For the start and end anchors:
 
 ```text
+d_start = video_start - imu_start
+d_end = video_end - imu_end
 estimated_offset = (d_start + d_end) / 2
-anchor_disagreement = |d_end - d_start|
+anchor_disagreement = abs(d_end - d_start)
 ```
 
-决策规则：
+| Condition | Result |
+| --- | --- |
+| Disagreement greater than 100 ms | Reselect anchors; do not compensate |
+| Consistent anchors, absolute offset below 100 ms | Preserve the host clock; applied offset is zero |
+| Consistent anchors, absolute offset at least 100 ms | Suggest a fixed offset requiring confirmation |
+| Conservative error bound greater than 500 ms | Reject finalization |
 
-| 条件 | 处理 |
-|---|---|
-| `anchor_disagreement > 100 ms` | 要求重选锚点，不应用补偿 |
-| 不一致量合格，且 `|estimated_offset| < 100 ms` | 相信共同主机时间，应用偏移为 0 |
-| 不一致量合格，且 `|estimated_offset| >= 100 ms` | 建议固定偏移，等待人工确认 |
-| 保守误差上界 `> 500 ms` | 拒绝定稿 |
+The normal uncertainty target is at most 200 ms. The model fixes `scale=1`; two
+anchors do not justify fitting arbitrary clock drift. The selected transformation
+is `video_time = imu_time + offset`. It is applied when reading or exporting data,
+never by rewriting raw timestamps.
 
-正常目标是保守误差上界不超过 200 ms。模型固定 `scale=1`，不根据一次录制的两个点拟合漂移。
+## Intervals and exact boundaries
 
-参与者 UniKey 直接在“同步”步骤选择，一次保存即确认，不采集证据帧。独立“完整性检查”步骤
-已经合并到“数据”：页面显示全时间轴覆盖、缺失撞击、同步与参与者状态，并在同处完成任务。
-“数据”同时提供当前数据文件下载；“管理”集中显示录制状态、任务技术详情、重开与永久删除操作。
-“完整录制 IMU”的显示点数只说明可视化数据可读，不能证明动作区间覆盖完整；后端在生成训练
-H5 前仍强制检查全时段覆盖、每个跌倒撞击、同步验证和参与者确认。
-若未来多批长录制证明存在可重复的相对速率误差，应升级策略版本并重新评估，不能静默改变
-本合同。
+Every nanosecond from the start to the end of a finalized recording must belong
+to exactly one half-open interval `[start_ns, end_ns)`:
 
-H5 中 `imu/samples/recording_time_ns` 始终是主机原始相对时间。录制完成后的同步决定只写入
-外置 `review.json`；读取时间线或生成派生数据时才应用选定偏移。H5 内旧 `sync/` 和
-`aligned_video_time_ns` 只作为录制结束时的初始值，不再因保存同步而更新。任何时候都不得因
-同步、标注或完成操作修改原始通知、原始计数、主机时间或 MKV。
+- `fall`: a fall activity;
+- `non_fall`: an activity eligible for training;
+- `excluded`: a non-training interval with a reason.
 
-## 标注状态与完整覆盖
+Overlaps, gaps, and out-of-range boundaries block completion, including gaps shorter
+than a video frame. Exclusion reasons include synchronization taps, preparation,
+sensor adjustment/removal, quality, ambiguity, privacy, and other.
 
-草稿阶段允许尚未标注。定稿阶段不再允许“空白自己代表某类”的隐式语义；从 0 到录制结束
-的每一纳秒必须恰好属于以下一种：
+When navigating to an interval boundary or gap, the annotation cursor retains its
+exact nanosecond value while video shows the nearest frame. **I/O** use that exact
+boundary. Playback, scrubbing, and frame stepping return the cursor to real video
+frame time. Synchronization and impact markers always use real frames. Displayed
+milliseconds are a presentation choice, not the stored precision.
 
-- `fall`：跌倒片段；
-- `non_fall`：可用于训练的非跌倒片段；
-- `excluded`：不进入训练的片段，并带结构化原因。
+## Shortcuts
 
-三类区间均使用半开区间 `[start_ns, end_ns)`，不得重叠或越界。定稿还要求同步状态为
-`verified`。平台在页面显示覆盖条、未覆盖总时长和可点击空洞，后端再次执行同样的硬门禁。
-任务由一名当前负责人编辑；其他成员可以明确接管。完成时系统执行全部同步、覆盖、事件、
-校准和来源门禁并自动生成训练 H5；完成后只读，负责人或管理员重开后才能修改。系统只保存
-当前快照、负责人、最后编辑者和 revision，不保存完整编辑历史。
+| Key | Action |
+| --- | --- |
+| `,` / `.` | Previous / next frame |
+| `Shift+,` / `Shift+.` | Back / forward five frames |
+| `I` / `O` | Interval start / end |
+| `E` | Navigate to the selected interval end |
+| `2` | Mark fall impact |
+| `F` / `N` / `X` | Fall / non-fall / excluded |
+| `Ctrl+S` / `Command+S` | Save draft |
 
-排除原因包括同步轻拍、准备阶段、传感器调整、摘下传感器、质量问题、含义模糊、隐私问题
-和其他。开始与结束轻拍可自动生成保守草稿，但标注者必须根据视频与曲线确认边界。
+Shortcuts are disabled while editing text, selecting options, or composing input.
+Structural changes save immediately; use the draft status indicator for remaining
+unsaved work. A conflict requires reading the current revision before retrying.
 
-## 标注工作台与快捷键
+## Fall events
 
-桌面端把视频、当前录制时间、零基帧号和完整 IMU 曲线组成固定媒体工作台；同步、区间、
-覆盖检查和下载位于独立滚动区。完整 IMU 曲线的黄色游标表示当前标注位置，点击曲线
-会跳到最接近的真实视频帧。媒体 PTS 仅在技术详情中显示，不作为人工标注时间。
+A fall interval begins at the first clear loss of balance and ends after the
+post-impact posture has stabilized. Its onset is derived from the exact interval
+start. Mark one impact strictly inside each fall interval: the first major contact
+with the ground, mat, or support. An IMU peak can help inspection but does not replace
+video review. Multiple falls retain separate segment IDs and events.
 
-点击已有区间的开头、结尾（或按 `E`）以及未覆盖区间时，标注位置保留该边界的精确纳秒值，
-`I`/`O` 直接使用该值；视频预览仍显示最近帧。两者不同时，“创建区间”同时显示边界和视频
-时间。区间时间显示到毫秒，悬停可查看完整纳秒值。播放、拖动或逐帧移动后，标注位置重新
-跟随真实视频帧；撞击和同步标记始终使用真实帧时间。覆盖检查不忽略短于一帧的缺口。
+## Versioned labels
 
-标注页全局快捷键为：`,`/`.` 前后移动一帧，`Shift+,`/`Shift+.` 前后移动五帧，`I`/`O`/`2`
-标记区间开始、结束和跌倒撞击，`F`/`N`/`X` 切换跌倒、非跌倒和排除，`Ctrl+S` 或
-`Command+S` 保存草稿。输入框、下拉框、文本域、可编辑元素和输入法组合期间全部停用，避免
-输入标签名称时误改标注。
+Labels have a stable `code`, mutable display `name`, immutable fall/non-fall type,
+and enabled status. Display names are user data and need not match the UI language.
+All allowlisted members can create, rename, disable, restore, and migrate labels.
+Used labels can be disabled; only unused labels can be permanently deleted.
 
-## 活动标签版本
+Each change writes an immutable taxonomy version. Incomplete reviews use current
+labels when saved; completed reviews and exports retain their frozen version.
+The checked-in activity YAML seeds an empty store and does not overwrite online edits.
 
-活动标签是训练数据合同，不是只存在于浏览器的选项。每个标签包含稳定 `code`、可修改的
-单一 `name`、所属的 `fall`/`non_fall` 类型和启用状态。`name` 不区分中文或英文，内容由团队
-自行约定；标注选择器、时间轴和区间列表统一显示当前 taxonomy 版本中的 `name`，H5、迁移和
-训练合同仍只引用 `code`。所有平台白名单成员可以新增、改名、停用或恢复标签。`code` 和类型
-创建后不可修改；已被当前区间引用的标签不能永久删除，只能停用。从未使用的标签才允许二次
-确认后删除，停用标签默认折叠显示。
+Migration between codes of the same type requires a preview freezing taxonomy and
+review revisions. It updates current reviews with optimistic locking, disables the
+source label, and regenerates active exports for completed recordings. Historical
+exports and snapshots remain unchanged. Conflicts are reported per recording.
 
-对象存储保存 current 指针和每个不可变 taxonomy 快照。未完成任务显示当前启用标签，并在
-下一次保存时自动写入当前 taxonomy version；已完成录制和历史训练导出继续按它们固定的旧
-版本校验和重导。停用标签不能用于新建区间，但已有区间可以继续保留。静态
-`configs/activities.yaml` 只负责对象存储尚未初始化时的第一版种子，部署重启不得覆盖网页
-管理结果。每次团队修改都会生成记录操作者、UTC 时间、操作类型和相关 code 的新不可变版本；
-旧 taxonomy 快照缺少 `name` 或变更信息时只在读取期间兼容，不会原地改写历史对象。成员保存
-名称后生成新的 taxonomy 版本。管理页默认只显示名称文本；点击名称后进入单项内联
-编辑，`Enter` 或“保存”提交，`Esc` 或“取消”放弃，点击页面其他位置不会隐式保存或退出编辑。
+## Completion and export
 
-需要统一历史命名时，任一平台白名单成员可选择同一 `fall`/`non_fall` 类型内的源、目标 `code`
-并预览。
-预览冻结当前 taxonomy version 和每条受影响 review revision；执行时逐条使用乐观锁替换当前
-标注，并自动停用源标签。`test` 和 `prod` 都在范围内；已完成录制保持完成状态，平台为其生成
-新的活动 `aligned25.h5`，旧导出、旧 taxonomy 版本和已有训练快照不改写。冲突或失败录制在
-结果中单列，可重新预览后重试。只有当前数据已经不再引用源标签时，成员才可另行删除它。
+Completion requires prod data, verified synchronization, confirmed participant,
+full interval coverage, all fall impacts, verified calibration, approved capture
+configuration, and unchanged source hashes. It automatically writes an immutable
+HDF5 training export on the common valid IMU/video time range.
 
-## 跌倒语义
-
-一个 `fall` 区间从“首次明确失去平衡”开始，到“撞击后身体姿态已经稳定”结束。每个定稿
-跌倒区间必须有且仅有：
-
-- `onset`：由该跌倒区间的 `start_ns` 自动派生，二者必须完全相同；
-- `impact`：由视频人工选择，表示身体与地面、垫子或支撑物首次主要接触。
-
-标注者不再重复点击独立的跌倒起始按钮；选择区间起点就是确定 onset。每个跌倒区间通过
-唯一 `segment_id` 关联自己的一条 impact，因此一段录制中的多次跌倒不会互相覆盖。草稿允许
-暂缺 impact，定稿时逐区间强制检查。保存时后端重建 onset，并把 onset/impact 映射到最近的
-视频帧和对齐后的 IMU 样本，保留来源索引供复核。`impact` 不是默认的区间结束；撞击后的
-稳定阶段仍属于跌倒区间。IMU 峰可以辅助观察，但不能替代视频人工事件。
-
-## 训练派生边界
-
-raw H5 包含整段录制，因此也包含首尾轻拍、准备和其他被排除数据。只有 `prod`、定稿、同步
-verified、尺度 verified 且源哈希未变化的数据才能完成并自动导出。严格 25 Hz
-使用公共有效时间区间和外置同步决定生成独立 `aligned.h5`：第 `k` 行严格对应 `k/25 s`，
-区间边界和派生 onset 用 ceil，确保 onset 与 fall 区间起点仍是同一行；人工 impact 用最近
-样本且半格向后取整，不做外推。原始约 25 Hz 数据不修改；
-本轮也不生成伪造的严格 30 FPS 视频。
+The 25 Hz grid uses linear interpolation without extrapolation. Interval boundaries
+and onset use ceiling; impact uses the nearest grid sample, with a half-step rounded
+later. Snapshot construction packages/merges those exports without resampling again.
+See [Data formats](data-format.md) and the [HDF5 contract](contracts/imu-hdf5-v3.2.md).

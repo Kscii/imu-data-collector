@@ -1,174 +1,279 @@
-# GCP 生产标注服务部署与访问
+# Deploy on Google Cloud
 
-## 生产拓扑
+This guide sets up an independent private annotation platform. Use your own
+project, domain, accounts, and bucket. For a single-user trial, start with
+[Local annotation](self-hosting.md#local-annotation).
+
+## 1. Requirements and architecture
 
 ```text
-浏览器
-  -> https://imu.kscii.tech
-  -> Google Cloud 外部 HTTPS Load Balancer
-     -> 5xx 时读取独立维护页 Backend Bucket
-  -> Identity-Aware Proxy
-  -> soft3888-label:8766
-  -> IMU 标注服务
-  -> gs://soft3888-label
+Browser -> HTTPS load balancer -> IAP -> annotation service :8766 -> private GCS
+Desktop -> HTTPS upload hostname -> upload broker :8770 ---------> private GCS
 ```
 
-- project：`project-51b589c7-8d5e-4e78-a10`
-- VM：`soft3888-label`，zone `australia-southeast1-a`
-- backend service：`imu-annotation-backend`
-- bucket：`gs://soft3888-label`
-- 维护页 bucket：`gs://soft3888-label-maintenance`（只含公开静态维护页）
-- 域名：`imu.kscii.tech`
+The upload broker validates Google tokens itself and is configured separately;
+IAP protects the annotation backend. Capture hardware stays on the desktop.
 
-Cloudflare 的 `imu` A 记录必须为 DNS only，让 Google 托管证书和 IAP 终止 HTTPS。VM 目标
-标签为 `imu-annotation`，8766 只允许 Google Front End/健康检查来源
-`35.191.0.0/16`、`130.211.0.0/22`。
+| Resource | Starting point |
+| --- | --- |
+| VM | Ubuntu 24.04 LTS, x86_64; no GPU required for annotation |
+| CPU / RAM | 2 vCPU / 4 GiB (`e2-medium`) reference deployment |
+| Disk | Reference deployment has a 30 GB boot disk; provision more for caches and export jobs |
+| Object storage | Private regional GCS bucket near the VM; size for raw media and retained snapshots |
+| Network | Domain, static global IP, HTTPS load balancer, Google-managed certificate |
+| Software | Python 3.12, uv, Node.js 24/npm for builds, Git, FFmpeg/FFprobe |
 
-## 身份边界
+The reference sizing is an observed installation, not a measured minimum or
+concurrency guarantee. HDF5 delivery jobs need local space for downloads and the
+complete generated output; do not size disk only for the code. Monitor free space,
+RAM, request latency, storage growth, and download traffic. Synthetic production,
+model training, and external workers have separate requirements. VM, disk, load
+balancing, storage, and egress all contribute to cost; set a billing budget.
 
-IAP IAM 授予确切 Google 账号 `roles/iap.httpsResourceAccessor`。应用再验证
-`X-Goog-IAP-JWT-Assertion` 的签名、issuer、audience，并从服务器私有
-`identity.email_to_unikey` 得到 UniKey。两层任意一层缺失都拒绝访问。
+## 2. Project, storage, and VM
 
-使用应用提供的成员管理命令维护映射，先预演再应用：
+In your administrator terminal, install and authenticate the Google Cloud CLI.
+Choose explicit values (the examples below are placeholders):
 
 ```bash
-sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
-  --config /etc/imu-annotation/config.yaml member-list
+export IMU_GCP_PROJECT='your-project-id'
+export IMU_GCP_REGION='australia-southeast1'
+export IMU_GCP_ZONE='australia-southeast1-a'
+export IMU_GCP_BUCKET='your-globally-unique-private-bucket'
+export IMU_GCP_VM='imu-annotation'
+export IMU_GCP_SA="imu-runtime@${IMU_GCP_PROJECT}.iam.gserviceaccount.com"
 
-sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
-  --config /etc/imu-annotation/config.yaml \
-  member-add --email member@example.com --unikey xabc1234
-
-sudo /opt/imu-annotation/current/.venv/bin/imu-annotation \
-  --config /etc/imu-annotation/config.yaml \
-  member-add --email member@example.com --unikey xabc1234 --apply
+gcloud services enable compute.googleapis.com storage.googleapis.com \
+  iap.googleapis.com iam.googleapis.com iamcredentials.googleapis.com \
+  --project="$IMU_GCP_PROJECT"
+gcloud iam service-accounts create imu-runtime --project="$IMU_GCP_PROJECT"
+gcloud storage buckets create "gs://$IMU_GCP_BUCKET" \
+  --project="$IMU_GCP_PROJECT" --location="$IMU_GCP_REGION" \
+  --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update "gs://$IMU_GCP_BUCKET" --soft-delete-duration=7d
+gcloud storage buckets add-iam-policy-binding "gs://$IMU_GCP_BUCKET" \
+  --member="serviceAccount:$IMU_GCP_SA" --role=roles/storage.objectAdmin
 ```
 
-命令输出精确 IAP IAM 命令，但不会代为执行。加入成员时先应用 YAML、重启服务、再授予 IAP；
-移除成员时先撤销 IAP、再删除 YAML 映射。真实邮箱不进入仓库。
+Bucket-scoped Object Admin supports the app's object creation, reading, and explicit
+delete/cleanup operations. Do not grant this identity to desktop users or create a
+shared service-account key. The VM uses its attached runtime identity.
 
-## 对象布局
+Create the VM in Compute Engine with the OS/resources above, the `imu-runtime`
+service account, and the **cloud-platform** access scope. Put it in your chosen VPC
+and add the network tag `imu-annotation`. Do not enable broad HTTP/HTTPS firewall
+rules to the VM. A VM without an external IP needs Cloud NAT or another controlled
+egress path for dependency installation and external APIs.
 
-```text
-captures/<recording_id>/{capture.h5,video.mkv,preview.mp4,manifest.json}
-reviews/<recording_id>/review.json
-exports/<recording_id>/review-<revision>/aligned-<digest>.h5
-training-snapshots/<snapshot_id>/{cw12eu_<snapshot_id>.tar,manifest.json}
-benchmark-datasets/team/cw12eu/<snapshot_id>/{datasets/cw12eu.h5,manifest.json}
-benchmark-datasets/team/cw12eu/current.json
-benchmark-datasets/base/<snapshot_id>/{datasets/<dataset_id>.h5,manifest.json}
-benchmark-datasets/base/current.json
-calibration-evidence/<profile_id>/<recording_id>/
-index-receipts/<recording_id>.json
-contracts/annotation-capabilities.json
-```
+Allow ingress to tagged instances on TCP 8766 (and 8770 if using uploads) only from
+load-balancer/health-check ranges `35.191.0.0/16` and `130.211.0.0/22`.
+For IAP SSH, separately allow TCP 22 from `35.235.240.0/20` and grant administrators
+the appropriate IAP tunnel and OS Login permissions. Keep these rules scoped to
+this VM/network tag. Do not expose the application ports directly to the internet.
 
-bucket 开启 uniform bucket-level access、public access prevention 和 7 天 soft delete。原始媒体
-不进 Git/Git LFS。服务器每 10 秒扫描一次新的完整 manifest，管理员也可从页面立即刷新。
-benchmark 使用同一个 bucket；`benchmark-datasets/` 已创建为 managed folder，组员的
-`roles/storage.objectViewer` 只绑定到该资源，因此不需要也不应访问参与者视频或可变 review。
-team HDF5 和 manifest 使用不可变 snapshot 前缀，只有 `current.json` 会用对象 generation
-前置条件推进。
-标注平台对两个集合只提供经 manifest 解析的只读目录与下载；它不会上传公共数据、删除
-benchmark 对象或修改任何 `current.json`。
+## 3. Install an application release
 
-## GitHub Actions
-
-仓库 `github.com/Kscii/imu-data-collector` 包含：
-
-1. `CI`：PR 和 main push 执行 Ruff、Pytest、数据合同和两套前端构建；
-2. `部署生产环境`：仅 main 的手动 `workflow_dispatch`，要求输入
-   `DEPLOY PRODUCTION`；
-3. `回滚生产环境`：输入服务器已存在的 40 位 commit 与 `ROLLBACK PRODUCTION`。
-
-生产部署保持手动门禁；main push 只运行 CI，不自动生成或执行生产部署包。PR 自动运行 CI 可以避免合并破坏。合成运动代码已部署到现有站点，当前只接入 dev 测试前缀；已登录浏览器的人工检查、真实质量决定与云端快照仍待验收。prod 配置和正式上传须另行核对，不能因代码部署而自动开始生产或把 dev 决定带入 prod。若要回滚到不识别 `annotation.synthetic_*` 的旧版，先恢复部署前备份的私有配置，再运行代码回滚。
-仓库 Variables：
-
-```text
-GCP_PROJECT_ID=project-51b589c7-8d5e-4e78-a10
-GCP_WIF_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPools/github/providers/imu-data-collector
-GCP_DEPLOY_SERVICE_ACCOUNT=imu-github-deployer@project-51b589c7-8d5e-4e78-a10.iam.gserviceaccount.com
-GCP_ZONE=australia-southeast1-a
-GCP_VM=soft3888-label
-GCP_ANNOTATION_BACKEND=imu-annotation-backend
-```
-
-WIF provider 同时限制不可变 repository ID `1347062318` 和 `refs/heads/main`。部署身份具有
-IAP tunnel、OS Admin Login，并仅能 impersonate VM 运行时服务账号；不保存 GCP JSON key。
-部署身份只有 Compute Viewer，因此 Action 会验证、但不会自行修改负载均衡。首次配置大文件
-下载或基础设施被重建后，由项目管理员运行：
+SSH to the VM. Install system packages:
 
 ```bash
-./scripts/deploy/configure-large-downloads "CONFIGURE LARGE DOWNLOADS"
+sudo apt-get update
+sudo apt-get install -y python3.12 python3.12-venv git ffmpeg curl ca-certificates
 ```
 
-该命令把 `imu-annotation-backend` 的 `timeoutSec` 固定为 3600 秒。生产部署会检查该值，避免
-大文件下载重新退化为 Google HTTPS Load Balancer 的 30 秒默认超时。
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and
+[Node.js 24](https://nodejs.org/en/download) using their official installation
+instructions. Confirm `uv --version`, `node --version`, and `npm --version` in the
+login shell. Node/npm are needed to build, not to run the finished service.
 
-## VM 原子部署
-
-```text
-/opt/imu-annotation/releases/<git-commit>/
-/opt/imu-annotation/current -> releases/<git-commit>
-/var/lib/imu-annotation/catalog.sqlite3
-/var/lib/imu-annotation/cache/
-/etc/imu-annotation/config.yaml
-```
-
-`imu-annotation-deploy` 校验 commit、包 SHA-256、Python、私有配置及回滚兼容性后才原子切换
-symlink，并重启 `imu-annotation.service`。失败自动尝试上一版本。GitHub Runner 经 IAP 上传
-时使用传统 SCP `-O`，并以远端大小和 SHA-256 一致为通过条件。
-
-## 每次发布验收
+Build as your login user from a clean checkout. Replace `RELEASE_REF` with the
+reviewed tag or commit you intend to deploy:
 
 ```bash
+git clone https://github.com/Kscii/imu-data-collector.git imu-build
+cd imu-build
+git checkout RELEASE_REF
+export IMU_RELEASE_ID="$(git rev-parse HEAD)"
+npm ci --prefix frontend
+npm run build:annotation --prefix frontend
+
+sudo useradd --system --user-group --home-dir /var/lib/imu-annotation \
+  --create-home --shell /usr/sbin/nologin imu-annotation
+sudo install -d -m 0755 /opt/imu-annotation/releases
+sudo install -d -o imu-annotation -g imu-annotation -m 0750 /var/lib/imu-annotation
+sudo install -d -o root -g imu-annotation -m 0750 /etc/imu-annotation
+sudo install -d -m 0755 "/opt/imu-annotation/releases/$IMU_RELEASE_ID"
+tar -cf - LICENSE README.md pyproject.toml uv.lock configs src frontend/dist-annotation \
+  | sudo tar -xf - -C "/opt/imu-annotation/releases/$IMU_RELEASE_ID"
+sudo env UV_CACHE_DIR=/var/cache/imu-annotation-uv "$(command -v uv)" sync \
+  --project "/opt/imu-annotation/releases/$IMU_RELEASE_ID" \
+  --python /usr/bin/python3.12 --frozen --no-dev
+sudo ln -s "releases/$IMU_RELEASE_ID" /opt/imu-annotation/current
+```
+
+The user-creation and initial symlink commands are first-install steps. Keep release
+files administrator-owned and readable by the service. Subsequent versions get a
+new release directory; see [Operations](operations.md) for switching and rollback.
+
+## 4. Private application configuration
+
+```bash
+sudo install -o root -g imu-annotation -m 0640 \
+  configs/server.annotation.example.yaml /etc/imu-annotation/config.yaml
+sudoedit /etc/imu-annotation/config.yaml
+```
+
+Replace the GCS project/bucket, application actor IDs, administrator subset, and
+Google email mappings. Set `auth.mode: iap`; the audience is completed in step 6.
+Keep the listener on `0.0.0.0:8766` so the load balancer can reach it through the
+restricted firewall. Catalog and cache paths must be writable under
+`/var/lib/imu-annotation`.
+
+Configure private `identity.subject_ids` before production export; values are
+unique `cw12eu:subject-NNN` IDs that cannot be reused. The example deliberately
+leaves this mapping empty. Device calibration and snapshot approval are separate
+requirements: do not claim a newly attached device is calibrated by copying an
+example. See [Device configuration](device-configuration-v2.md).
+
+Create `/etc/systemd/system/imu-annotation.service`:
+
+```ini
+[Unit]
+Description=IMU annotation platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=imu-annotation
+Group=imu-annotation
+WorkingDirectory=/opt/imu-annotation/current
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_DATA_HOME=/var/lib/imu-annotation/data
+Environment=XDG_CACHE_HOME=/var/lib/imu-annotation/cache
+ExecStart=/opt/imu-annotation/current/.venv/bin/imu-annotation --config /etc/imu-annotation/config.yaml serve
+Restart=on-failure
+RestartSec=5
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/imu-annotation
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The checked-in production units/deployer contain the maintainer's Unix username
+and environment assumptions. This self-hosting unit uses your independent service
+account instead; do not run the production deployer unchanged on a new VM.
+
+## 5. HTTPS load balancer and domain
+
+Use the Google Cloud console to create these resources in your project:
+
+1. An **unmanaged instance group** in the VM's zone containing the VM. Assign named
+   port `annotation:8766`.
+2. An HTTP health check on port 8766, path `/api/v1/health`.
+3. A **global external Application Load Balancer** with a backend service named
+   `imu-annotation-backend`, protocol HTTP, the instance group, named port
+   `annotation`, the health check, and a **3600-second timeout**. Leave Cloud CDN off.
+4. A reserved global static IP, Google-managed certificate for your annotation
+   hostname (for example `imu.example.com`), and HTTPS frontend on port 443.
+5. A URL map routing that hostname to the annotation backend.
+6. A DNS A record pointing to the reserved IP. If using Cloudflare, use DNS-only
+   rather than proxying this hostname. Wait for the certificate to become active.
+
+Use [Google's load-balancer setup guide](https://cloud.google.com/load-balancing/docs/https/setup-global-ext-https-compute)
+for current console screens. Keep the app in IAP mode throughout setup: a reachable
+page or health endpoint does not authorize its protected APIs.
+
+## 6. IAP and the application allowlist
+
+Enable IAP for **the annotation backend service**, not a forwarding rule shared
+with the upload broker. Follow Google's
+[IAP setup](https://cloud.google.com/iap/docs/enabling-compute-howto) and
+[custom OAuth configuration](https://cloud.google.com/iap/docs/custom-oauth-configuration).
+Choose an OAuth audience/client that permits the intended accounts; the
+Google-managed internal-organization path alone does not admit arbitrary external
+Google accounts. Complete external consent/test-user configuration when applicable.
+
+Read the numeric project and backend IDs:
+
+```bash
+gcloud projects describe "$IMU_GCP_PROJECT" --format='value(projectNumber)'
+gcloud compute backend-services describe imu-annotation-backend \
+  --project="$IMU_GCP_PROJECT" --global --format='value(id)'
+```
+
+Set the application's private audience to:
+
+```yaml
+auth:
+  mode: iap
+  iap_audience: /projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
+```
+
+Grant each permitted account access to this backend:
+
+```bash
+gcloud iap web add-iam-policy-binding --project="$IMU_GCP_PROJECT" \
+  --resource-type=backend-services --service=BACKEND_SERVICE_ID \
+  --member='user:operator@example.com' --role=roles/iap.httpsResourceAccessor
+```
+
+The same account needs a private application email mapping to an allowed actor ID.
+Both layers are required; see [Access and privacy](access-and-privacy.md).
+
+## 7. Start and verify
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now imu-annotation.service
 sudo systemctl status imu-annotation.service --no-pager
-sudo systemctl status imu-annotation-gc.timer --no-pager
 curl --fail http://127.0.0.1:8766/api/v1/health
+sudo journalctl -u imu-annotation.service -n 50 --no-pager
 ```
 
-随后按 [生产验收与监控](production-acceptance.md) 完成公网、权限、标注、快照和恢复检查。健康
-接口不含敏感数据，其余 API 都要求可信身份。SQLite 只是可重建索引，事实数据在 GCS。
+Check that the load-balancer backend becomes healthy. In a browser, open your
+hostname with `?lang=en`: unauthenticated users should encounter Google login,
+allowlisted users should see their mapped actor, and an account absent from either
+access layer must be rejected. The new store will have no recordings. Verify a
+short test upload and indexing before attempting production annotation/export.
 
-## 应用停机时的维护提示
+## 8. Uploads and large downloads
 
-维护页不能由 `imu-annotation.service` 自己提供，否则进程停机或部署失败时页面也会消失。
-生产 URL map 仅在 `imu.kscii.tech` 的应用后端返回 `5xx` 时，从独立 Backend Bucket 返回
-`scripts/deploy/maintenance.html`；不覆盖原始状态码，因此公网健康检查仍会失败，
-`upload.imu.kscii.tech` 也不会收到 HTML 错误页。私有数据 Bucket 继续保持 public access
-prevention，只有单独的维护页 Bucket 可公开读取。
+Follow [Desktop upload](desktop-upload.md) to create a separate Desktop OAuth
+client, private broker environment, service, upload backend/hostname, and client
+configuration. Never bundle cloud keys or OAuth secrets into a desktop installer.
 
-首次配置或需要幂等修复时，在已登录正确项目的受控终端运行：
+A runtime service account can use GCS signed downloads when it can sign on its own
+behalf. Enable the IAM Credentials API (step 2), then optionally grant:
 
 ```bash
-./scripts/deploy/configure-maintenance-error-page \
-  'CONFIGURE MAINTENANCE imu.kscii.tech'
+gcloud iam service-accounts add-iam-policy-binding "$IMU_GCP_SA" \
+  --project="$IMU_GCP_PROJECT" --member="serviceAccount:$IMU_GCP_SA" \
+  --role=roles/iam.serviceAccountTokenCreator
 ```
 
-脚本先导出当前 URL map，再创建或复用维护 Bucket 与 Backend Bucket，验证修改后的 URL map
-后才导入。验收应分别确认：正常服务仍进入 IAP；临时停止 8766 后域名显示维护页且 HTTP
-状态仍为 5xx；上传域名 `/health` 不受影响。回滚时从 URL map 删除
-`imu-annotation-maintenance-aware` matcher，并把 `imu.kscii.tech` host rule 恢复到原应用 matcher。
+This binding is scoped to that service account, not the project. Its existing
+bucket read permission is also required. See
+[Google's signing requirements](https://cloud.google.com/storage/docs/access-control/signing-urls-with-helpers).
+Without signing, authenticated proxy downloads remain available. Retain the
+3600-second backend timeout and verify Range downloads before distributing large H5s.
 
-## 校准证据迁移
+## 9. Operations and optional services
 
-新版本首次部署后先预演：
+Back up private configuration/identity mappings, preserve GCS recovery retention,
+and monitor services, disk, scan progress, and export failures. See
+[Operations](operations.md) for the release and recovery checklist.
 
-```bash
-sudo -u kscii /opt/imu-annotation/current/.venv/bin/imu-annotation \
-  --config /etc/imu-annotation/config.yaml archive-calibration-evidence
-```
+External history needs its own credentialed worker; synthetic snapshots need the
+independent compatible producer/worker. Enable them only when configured. A separate
+public maintenance-page bucket is optional; never publish the private data bucket.
 
-只有输出精确包含预期的 15 条录制、全部制品可验证时，才运行：
-
-```bash
-sudo -u kscii /opt/imu-annotation/current/.venv/bin/imu-annotation \
-  --config /etc/imu-annotation/config.yaml \
-  archive-calibration-evidence --apply --delete-source
-```
-
-迁移后检查校准页可播放视频、下载 H5，并确认这些录制不再出现在动作标注队列。普通测试数据
-的批量清理不能和校准迁移混为一个命令。首次执行使用
-[2026-08-27 首次生产数据迁移清单](production-data-migration-2026-08-27.md) 核对精确 ID、
-预期对象数和恢复边界。
+The repository's GitHub deployment workflows use environment variables, Workload
+Identity Federation, and maintainer-specific deployment scripts. They are not a
+ready-to-run deployment pipeline for a fork. Adapt the Unix user, resource names,
+health URLs, WIF repository restrictions, and rollback/configuration assumptions
+before enabling them. Normal main pushes run CI and do not deploy production.

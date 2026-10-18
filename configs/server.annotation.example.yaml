@@ -1,75 +1,50 @@
-# 云端标注服务结构化配置示例；部署时复制到 /etc/imu-annotation/config.yaml。
-activity_taxonomy_path: "/opt/imu-annotation/current/configs/activities.yaml"
-calibration_evidence_path: "/opt/imu-annotation/current/configs/calibration-evidence.yaml"
-device_registry_path: "/opt/imu-annotation/current/configs/imu-devices.yaml"
+# Copy outside the checkout and replace project, bucket, audience, and identities.
+# These paths assume the service layout in docs/gcp-deployment.md.
+activity_taxonomy_path: /opt/imu-annotation/current/configs/activities.yaml
+calibration_evidence_path: /opt/imu-annotation/current/configs/calibration-evidence.yaml
+device_registry_path: /opt/imu-annotation/current/configs/imu-devices.yaml
 device_registry_auto_refresh: false
-default_sensor_sn: "IMU-0001-R01"
+default_sensor_sn: null
 
 identity:
-  allowed_unikeys:
-    - "rkim6933"
-    - "zche0826"
-    - "jzho8728"
-    - "jzha9115"
-    - "xfan0282"
-    - "yniu0950"
-    - "hche5673"
-    - "jmia0254"
-    - "xliu0452"
-  admins:
-    - "xfan0282"
-  # 真实邮箱映射只写入服务器 /etc 配置，不提交仓库。
+  allowed_unikeys: [operator01]
+  admins: [operator01]
+  # Keep real account mappings in private server configuration.
   email_to_unikey:
-    "member@example.com": "xfan0282"
-  # 只存在于服务器私有配置；编号一旦分配不得复用或改绑。
-  subject_ids:
-    "xfan0282": "cw12eu:subject-001"
+    operator@example.com: operator01
+  # Add a unique stable subject ID for each participant before production export.
+  # Never reassign IDs. An empty mapping intentionally prevents participant export.
+  subject_ids: {}
 
 auth:
-  mode: "iap"
-  # 创建 backend service 后，用实际 project number 与 backend service ID 替换。
-  iap_audience: "/projects/123456789/global/backendServices/123456789"
+  mode: iap
+  iap_audience: /projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
 
 annotation:
-  # 合成运动只接入一个目标：先 dev 验收，再将此值切到 prod；旧 dev 对象保留归档。
-  # synthetic_target: dev
-  # synthetic_run_id: fresh-e2e-20260917  # dev 必填；prod 时省略。
-  # synthetic_bucket: soft3888-label  # 与模拟器发布 bucket 一致。
-  # 只允许负载均衡来源访问 8766；应用本身仍校验 IAP 签名 JWT。
-  server_host: "0.0.0.0"
+  # The firewall must restrict this listener to the load balancer/health checkers.
+  server_host: 0.0.0.0
   server_port: 8766
-  catalog_path: "/var/lib/imu-annotation/catalog.sqlite3"
-  # 后台每 10 秒发现一次新的完整 manifest；管理员仍可从页面立即强制刷新。
+  catalog_path: /var/lib/imu-annotation/catalog.sqlite3
   catalog_refresh_interval_s: 10
 
-# 正式导出会把这些参数与服务器证据文件、manifest 和 H5 冻结属性交叉核对。
-# calibration_evidence_sha256 设为 null 时，启动时从上方证据文件计算；不要填写猜测值。
-imu:
-  calibration_profile_id: "cw12eu_t_83fc90141ea4_v1_20260827"
-  calibration_verified: true
-  accel_counts_per_g: 4096.0
-  gyro_counts_per_dps: 32.8
-  accel_bias_counts: [30.0, 48.0, -40.0]
-  gyro_bias_counts: [-17.0, 0.0, 10.0]
-  raw_axis_order: [0, 1, 2]
-  axis_signs: [1, -1, 1]
-  calibration_method: "six_face_static_and_multi_axis_360deg_engineering_v1"
-  calibration_evidence_sha256: null
-
 storage:
-  backend: "gcs"
-  bucket: "soft3888-label"
-  project: "project-51b589c7-8d5e-4e78-a10"
-  cache_root: "/var/lib/imu-annotation/cache"
+  backend: gcs
+  bucket: YOUR_PRIVATE_BUCKET
+  project: YOUR_GCP_PROJECT
+  cache_root: /var/lib/imu-annotation/cache
 
-# External history has its own worker and index. API credentials belong only in
-# /etc/imu-annotation/external-devices.env, loaded by imu-external-devices.service.
+# The broker validates Google ID tokens independently of IAP.
+cloud:
+  broker_server_host: 127.0.0.1
+  broker_server_port: 8770
+
+# Enable only after configuring a separate provider worker and private environment.
 external_devices:
   enabled: false
   access: members
   sync_interval_s: 900
   window_s: 86400
   overlap_s: 0
-  history_start: "2026-08-31T16:00:00.000Z" # 2026-09-01 00:00 Asia/Shanghai
+  history_start: '2026-08-31T16:00:00.000Z'
   request_timeout_s: 75
   max_response_bytes: 16777216

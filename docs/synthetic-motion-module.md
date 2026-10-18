@@ -1,25 +1,74 @@
-# 合成运动标注模块：已定方向与待办
+# Synthetic motion review
 
-此页是 `imu-motion-simulator/docs/productization-roadmap.md` 在标注平台侧的实施入口。正式合成候选已在生产站点增量可见，但真实人工接受与正式快照仍未验收；现有真实设备录制、同步、`review.json` 与 HDF5 3.2 路径保持独立。
+Synthetic motion is an optional annotation-platform integration. An independent
+producer publishes motion candidates, replay assets, and six-axis synthetic IMU.
+This repository reviews those artifacts; it does not decode motion-capture sources,
+run simulation, or perform heavy synthetic HDF5 construction.
 
-## 模块边界
+## Candidate publication
 
-- 在现有 annotation 应用中增加单独的合成运动导航、`/api/v1/synthetic/` API 和专用存储服务；复用现有身份验证、对象存储抽象及部署外壳，不直接导入模拟器 Python 包。
-- 从 `soft3888-label` bucket 的 `synthetic-motion/dev/<run-id>/v1/` 测试前缀或 `synthetic-motion/prod/v1/` 正式前缀读取逐 clip **提交记录**；服务每次只配置一个目标，开发与正式索引/标签注册表隔离。发布器在写提交记录前上传并核验对象；提交后另写不可变 `index-feed` 收据，让平台增量发现新提交，并每日全量对账。收据不是候选资格依据；详情及预览仍检查对象大小、声明的哈希元数据或实际内容哈希。静态 Three.js 资源共享缓存，播放与 IMU 曲线对应同一 motion/selection/layout。
-- 审核页先判断动作和 IMU 是否可用。页面沿用标注工作台的固定视口和任务抽屉，整页不滚动；质量 pass 可以没有正式标签，reject 必须有结构化原因或自定义说明。动作预览下方固定显示一张全片段 IMU 图，默认是总加速度（比力模长）与总角速度两条线，可切换到比力 XYZ 和角速度 XYZ 六条分轴曲线；两种视图都用左轴 m/s²、右轴 rad/s，点击/拖动定位播放，缩略采样保留当前视图的极值。旧播放器浮层仅在平台工作台嵌入时隐藏，独立预览仍保留控件。刷新工作台按 URL 恢复精确 candidate/version、质量或标签阶段及状态筛选；播放从头开始，不恢复未提交输入。短租约队列避免多人同时审核同一条，支持跳过、续租、状态筛选与快捷键；展开正式标签列表时空格仍控制播放。已通过和已拒绝可由任一审核员独占领取复审，改为另一决定或撤回到未审核；标签待办中发现质量问题也可直接退回。退回条目在未审核队列置顶供其他审核员领取，正式标签和旧快照保留，同一审核员暂不自动领回。每次决定保存不可变 revision，绑定 candidate 版本和输入哈希；并发冲突要求刷新后重试。机器 QA 仅提示，不代替人工接受。
-- 独立“数据管理”页统一浏览真实录制和合成片段，默认“我的待办”，可筛选来源/批次、状态、风险与标签待办。后端仍以 50 条游标分页，前端在列表内部滚动到末尾时自动加载，并每 20 秒检查可见首批的新到达条目；无法安全合并的排序变化用页内提示刷新，不强制跳走正在查看的内容。轻量任务抽屉只用于工作台快速切换。管理员可暂停某批次/来源的**新领取**，已领取任务继续有效。真实录制显示已索引/已发布；合成域只显示平台已索引候选数，不把它当作 bucket 字节上传进度。
-- 正式活动标签是独立流程。统一的“概念库”入口管理真实 IMU 共用概念和动捕专用概念，后者不会出现在真实 IMU 标注选择器；来源标签只在正式选择器上方作为参考，不进入受控选项。管理员可维护动捕专用概念，也可从已观测来源值列表选择或手动输入精确来源词来创建映射草稿；创建前显示命中数，草稿仍须回放抽检后才可启用。映射歧义或缺失时仍需人工选标签，跌倒不得自动映射。标签 revision 与映射解析都按版本冻结。
-- “创建合成训练快照”位于训练快照页的合成 HDF5 3.3 标签页，与真实 HDF5 3.2 分开。点击时只冻结完整发布、最新质量 revision 为 pass 且有正式标签的候选；至少一条满足条件才可提交。平台写不可变请求，Ubuntu 上的独立 SDK 工作进程构建和验证 replay-only HDF5 3.3，平台显示状态与分片下载。reject/未审核/未贴标签只在审计中；撤回保留正式标签，但在再次通过前不进入新快照，已冻结的旧快照不变。
-- “数据集”页另列独立的未审核合成核心 HDF5 3.3 版本，按 bucket manifest 校验大小/哈希后鉴权下载；它只包含机器 QA 通过的完整发布候选，不含人工审核、正式标签、回放和模型。新导出清单带有按唯一动作片段计算的 `duration_s`，页面显示总动作小时数；旧单安装位清单只显示估算值，不能把多个安装位的样本行直接当作动作时长。弱标签规则在独立版本中由管理员预览、更新，不改正式标签映射，也不能自动确认跌倒。H5 的 `candidate_index` 提供 candidate/version 精确回放定位；旧真实 IMU HDF5 3.2 目录不改。已有导出不可回写，生产完成后另建完整版本。
-- 该模块的候选、审核 revision、快照请求、对象前缀与真实设备录制完全分开。标注平台不负责动捕解码、IMU 生产或重型 HDF5 构建。
+Candidates must be completely published and pass machine QA before entering review.
+A publication manifest freezes candidate/version identity, source/model/license
+references, SI channel definitions, coordinate frame, sample rate, time origin,
+mount/selection information, file sizes, and hashes. Data objects are verified before
+the immutable commit marker. Incremental receipts accelerate discovery but do not
+replace publication validation; full reconciliation remains necessary.
 
-## 分阶段 TODO
+Dev and prod namespaces are separate. A local trial decision is not a production
+review, and a passing machine check is not human acceptance.
 
-- [x] **本地 pilot**：从 72 个跨来源样本选出 12 条，覆盖普通、warning、标签歧义、高风险及原生/Stage-II；已上传独立 GCS 测试前缀，GCS 正式审核决定仍为空。本地试用页的决定只保存在本机，与正式试点隔离；该试用实例未作为生产服务部署。
-- [x] **基础合同薄切片**：本地对象存储测试已覆盖未提交不可见、不可变 revision、并发冲突和快照冻结；一条仅用于基础设施测试的 pass 已驱动真实 HDF5 3.3 分片验证。它不是用户人工接受，未写到 GCS。
-- [x] **本地工作台增量**：质量/标签拆分、共用与合成专用概念三组展示、草稿映射、来源词观测列表、短租约队列、分页、快捷键、结构化拒绝、固定视口任务抽屉、同步六轴全段曲线、双向复审/退回置顶和快照状态/下载已实现；统一数据管理页和增量索引收据已通过本地集成测试。本轮使用隔离的本地试用实例和两条经校准的真实录制、一个完整复制的合成样本，自动截图检查所有导航页，并实际刷新验证精确录制/候选及页签；尚待用户手工确认操作手感，未写云端审核决定。
-- [~] **端到端验收**：新的 GCS dev 前缀已用一条原生、一条 Stage-II 的真实候选验证增量读取与预览；本地基础设施测试决定已通过 Ubuntu worker 产生合同有效的 HDF5 3.3，不能当作人工接受。用户仍需检查新数据管理页、六轴曲线和标签管理的真实浏览器手感；补足 GCS 断网/缺失对象/哈希失败、并发改判与 worker 失败恢复测试；至少由真实人工 pass 构建并验证一个 GCS 小快照。单实例自动轮询快照 worker 与本地 4 GiB 内合并/资产去重已实现，多实例协调和真实大快照压力测试仍待实现。
-- [~] **未审核核心数据**：数据集页版本列表、鉴权 Range 下载、H5 标识回放定位和管理员弱标签规则已由 PR #64 部署。首次 prod 部分版 `77ce39692697ba34c65eadb6cb902953` 已发布到 `synthetic-motion/prod/v1/datasets/provisional/exports/`：4,203 条、820,066 行六轴数据、27,416,195 字节；云端 H5 与 manifest 元数据、重下载字节哈希及 HDF5 3.3 provisional 合同均通过核验。它不含人工决定、正式标签或回放资产，不算正式训练快照，也不改变真实 HDF5 3.2。已登录浏览器的列表/下载/定位仍待人工验收；生产完成后须另建不可变完整版本。
-- [~] **正式上线**：正式合成候选现已从独立 prod 前缀增量到达现有站点，原生批次仍在生产；未审核核心数据页面及 API 已随 PR #64 生产部署，服务健康及未认证 401 冒烟通过。真实人工审核、首个正式快照、全量完成后的核心数据版本仍待完成。dev 测试命名空间与 prod 决定始终隔离，不改变共享 bucket 的 soft-delete 策略或其他团队数据。
+## Review workflow
 
-Python SDK/CLI 属于模拟器生产内核；独立的本机 Web **生产控制面板**已在 Ubuntu 隔离环境试运行，当前只读观察任务并可由管理员显式触发部分版导出，尚未成为标注平台页面或正式控制服务。原始动捕/模型的私有 GCS 归档、Google CPU VM/Cloud Batch、BVH 生产验证和开源发布均为后续阶段，不能视为此模块已具备的能力。
+Open **Synthetic motion** to inspect replay and IMU traces. Quality review and formal
+activity labeling are separate stages. A pass can initially lack a formal label;
+a rejection needs a structured reason or explanation. The full-sequence chart offers
+magnitude and six-axis views, with m/s² and rad/s on separate axes. Its cursor follows
+the same motion/selection/layout as the replay.
+
+Short task leases prevent simultaneous edits. Reviewers can skip, renew, filter, and
+re-review previous decisions. Each decision is an immutable revision tied to the
+candidate version and input hashes. Conflicts require refresh. Returning a candidate
+to review preserves old labels/snapshots while excluding it from new snapshots until
+it passes again.
+
+**Data management** lists real and synthetic tasks with source, batch, status, risk,
+and label filters. Administrators can pause new claims for a source/batch without
+invalidating existing work. Indexed-candidate counts are not upload-byte progress.
+
+## Labels
+
+Shared activity concepts and motion-capture-only concepts have distinct scopes.
+Source labels are reference information, not automatic formal labels. Administrators
+can draft mappings from observed source values and validate them through replay
+inspection before enabling them. Ambiguous/missing mappings require human selection;
+fall labels are never automatically confirmed. Label and mapping revisions are frozen.
+
+## Two synthetic dataset products
+
+| Product | Eligibility | Contents |
+| --- | --- | --- |
+| Provisional core HDF5 3.3 | Complete publication and machine QA | Synthetic core data; no human acceptance, formal labels, replay, or models |
+| Reviewed snapshot HDF5 3.3 | Latest quality decision is pass and formal labeling is complete | Immutable reviewed selection built by the compatible external worker |
+
+The platform writes immutable snapshot requests and displays worker state/downloads.
+A rejected, unreviewed, or unlabeled candidate cannot enter a new reviewed snapshot.
+Existing frozen snapshots do not change after later review decisions.
+
+Provisional datasets are listed separately. Their `candidate_index` identifies the
+exact candidate/version for replay. Duration metadata must count unique motion clips,
+not sum duplicate mount rows. Older manifests may only support an estimated duration.
+Synthetic HDF5 **3.3** is a separate contract from real-data HDF5 **3.2**; do not pass
+it to a 3.2 consumer based only on a similar extension or channel count.
+
+## Deployment
+
+Configure a single intended `annotation.synthetic_target` (`dev` or `prod`) and
+matching `synthetic_bucket`; dev also needs `synthetic_run_id`. The producer and
+snapshot worker must implement the compatible manifest/request/HDF5 contracts.
+Do not switch a production installation to a trial prefix as an installation step.
+
+The platform can browse and review valid publications independently of the worker,
+but a requested snapshot needs that external worker to finish. Validate actual
+publication, replay, review, worker failure recovery, and a small completed snapshot
+before relying on the integration. Base platform health does not establish that the
+external production pipeline is available.
