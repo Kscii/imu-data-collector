@@ -200,21 +200,6 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .status-grid { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0; }
 .status-grid span { border: 1px solid #334155; border-radius: 999px; color: #cbd5e1; padding: 5px 9px; font-size: 12px; }
 .annotation-layout { grid-template-columns: 280px minmax(0, 1fr); align-items: start; }
-.calibration-layout { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: 16px; align-items: start; }
-.calibration-layout > * { min-width: 0; }
-.calibration-evidence-sidebar { display: grid; gap: 8px; position: static; align-self: start; }
-.calibration-evidence-list { display: grid; gap: 7px; max-height: min(620px, calc(100vh - 220px)); overflow-y: auto; overscroll-behavior: contain; padding-right: 3px; }
-.calibration-evidence-list button { display: grid; gap: 4px; text-align: left; }
-.calibration-evidence-list button span { color: #8193ac; font-size: 10px; overflow-wrap: anywhere; user-select: text; }
-.calibration-evidence-list button.selected { border-color: #3b82f6; background: #17305b; }
-.calibration-evidence-detail { display: grid; gap: 16px; min-width: 0; }
-.calibration-plot-panel { min-width: 0; }
-.calibration-sample-detail { display: grid; gap: 8px; }
-.calibration-sample-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.calibration-sample-grid > span { display: grid; gap: 5px; min-width: 0; padding: 9px 10px; border: 1px solid #263650; border-radius: 7px; background: #0b1525; color: #b8c6d9; font: 12px ui-monospace, monospace; }
-.calibration-sample-grid strong { color: #7f93ae; font: 10px system-ui, sans-serif; text-transform: uppercase; }
-.calibration-sample-grid code { overflow-wrap: anywhere; user-select: all; }
-.calibration-hex { grid-column: 1 / -1; }
 .recording-list { display: grid; gap: 7px; max-height: 78vh; overflow: auto; position: sticky; top: 16px; }
 .recording-list button { display: grid; gap: 4px; text-align: left; }
 .recording-list button span { color: #8193ac; font-size: 10px; overflow-wrap: anywhere; }
@@ -531,7 +516,6 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
 .gap-list { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 14px; }
 .gap-list button { padding: 6px 9px; color: #fcd34d; font: 11px ui-monospace, monospace; }
 .panel-title.subheading { margin-top: 18px; margin-bottom: 6px; }
-.calibration-video video { display: block; width: 100%; max-height: 65vh; background: #000; }
 .taxonomy-admin { display: grid; gap: 16px; }
 .taxonomy-intro { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
 .taxonomy-create-fields { display: grid; grid-template-columns: 180px minmax(220px, 1fr) minmax(220px, 1fr) auto; gap: 10px; align-items: end; }
@@ -595,8 +579,6 @@ input, select { color: white; border: 1px solid #30415f; border-radius: 7px; bac
   .device-editor-layout, .admin-config-layout, .runtime-layout { grid-template-columns: 1fr; }
   .config-list-panel .config-snapshot-list { max-height: 320px; }
   .triple-grid { grid-template-columns: 1fr; }
-  .calibration-layout { grid-template-columns: 1fr; }
-  .calibration-evidence-list { max-height: 340px; }
   .annotation-layout { grid-template-columns: 1fr; }
   .recording-list { position: static; max-height: 340px; }
 }
